@@ -292,6 +292,8 @@ now we could have done this in CPU, yes also keep that support, but interesting,
 thus this step will give us the total DP mapping basically. 
 
 
+** Also please see the "optimized-determination-of-local-mappings.md" file for a different optimized perspective for a somewhat slacked case...
+
 # Weight Calculation of Candidate Bipartitions
 
 Well now that we have the DP search space, we will now at some point traverse this search space and will choose optimal solutions based on scores etc. For that reason, the only thing remaining to complete the whole inference is how to calculate score for a particular candidate bipartition, then we very similar to STELAR-X, accumulate scores and keep choosing optimal biparittions at correpsonding levels and theerby form the tree. 
