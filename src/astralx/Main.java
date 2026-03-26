@@ -1,7 +1,10 @@
 package astralx;
 
 import astralx.cluster.ClusterTable;
+import astralx.dp.DPTable;
+import astralx.dp.Inference;
 import astralx.partition.PartitionTable;
+import astralx.weight.WeightTable;
 import astralx.hash.PrefixHashArrays;
 import astralx.hash.TaxonHasher;
 import astralx.taxon.TaxonRegistry;
@@ -63,8 +66,36 @@ public class Main {
                 return;
             }
 
-            // ── Phases 5-7: TODO ─────────────────────────────────────────────
-            Logging.info("Phases 5-7 not yet implemented");
+            // ── Phase 5: DP search space (tree-local transitions) ─────────────
+            DPTable dpTable = new DPTable(trees, pref, clusterTable);
+
+            if (cfg.isVerifyDPSpace()) {
+                Phase5Verifier.dump(trees, registry, pref, clusterTable, dpTable, cfg.getOutputFile());
+                return;
+            }
+
+            // ── Phase 6: Weight calculation ───────────────────────────────────
+            WeightTable weightTable = new WeightTable(dpTable, partTable, clusterTable, trees);
+
+            if (cfg.isVerifyWeights()) {
+                Phase6Verifier.dump(trees, registry, clusterTable, dpTable, weightTable, cfg.getOutputFile());
+                return;
+            }
+
+            // ── Phase 7: Inference DP + tree reconstruction ───────────────────
+            Inference inference = new Inference();
+            String speciesTree = inference.run(dpTable, weightTable, clusterTable, trees, registry);
+
+            // Write or print the species tree
+            if (cfg.getOutputFile() != null) {
+                try (java.io.PrintStream out = new java.io.PrintStream(
+                        new java.io.FileOutputStream(cfg.getOutputFile()))) {
+                    out.println(speciesTree);
+                }
+                Logging.info("Species tree written to %s", cfg.getOutputFile());
+            } else {
+                System.out.println(speciesTree);
+            }
 
         } finally {
             Threading.shutdown();
@@ -92,6 +123,8 @@ public class Main {
                 case "--verify-hash"      -> cfg.setVerifyHash(true);
                 case "--verify-clusters"    -> cfg.setVerifyClusters(true);
                 case "--verify-partitions" -> cfg.setVerifyPartitions(true);
+                case "--verify-dp"         -> cfg.setVerifyDPSpace(true);
+                case "--verify-weights"    -> cfg.setVerifyWeights(true);
                 case "-h","--help"     -> { printUsage(); System.exit(0); }
                 default -> { System.err.println("Unknown arg: " + args[i]); return false; }
             }

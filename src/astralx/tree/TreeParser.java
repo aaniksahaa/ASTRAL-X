@@ -74,25 +74,34 @@ public class TreeParser {
 
     /**
      * Walk the Newick string and register every taxon name.
-     * We only care about characters that look like taxon names (not digits/symbols
-     * that appear as bootstrap support inside ")" labels).
+     * Tracks whether the last structural token was ')': if so, the next label is
+     * a bootstrap/internal value (skip it); otherwise it is a taxon name (register it).
+     * This correctly handles both named taxa (strings) and integer-labelled taxa.
      */
     private static void collectTaxonNames(String s, TaxonRegistry reg) {
         int i = 0, n = s.length();
+        // true if the most recent structural character was ')'
+        boolean afterCloseParen = false;
         while (i < n) {
             char c = s.charAt(i);
-            if (c == '(' || c == ')' || c == ',') { i++; continue; }
+            if (c == '(') { afterCloseParen = false; i++; continue; }
+            if (c == ',') { afterCloseParen = false; i++; continue; }
+            if (c == ')') { afterCloseParen = true;  i++; continue; }
             if (c == ';') break;
             if (c == ':') { i = skipBranchLen(s, i + 1, n); continue; }
-            // potential name token
+            if (c == '[') { // NHX or comment: skip to ']'
+                while (i < n && s.charAt(i) != ']') i++;
+                if (i < n) i++;
+                continue;
+            }
+            // Token: taxon name (after '(' or ',') or internal label (after ')')
             int start = i;
             while (i < n && !isDelim(s.charAt(i))) i++;
             String tok = s.substring(start, i).trim();
-            // Accept as taxon name only if it does NOT start with a digit or '['
-            // (bootstrap values / comments appear after ')' and start with digits)
-            if (!tok.isEmpty() && !Character.isDigit(tok.charAt(0)) && tok.charAt(0) != '[') {
+            if (!tok.isEmpty() && !afterCloseParen) {
                 reg.register(tok);
             }
+            afterCloseParen = false;
         }
     }
 

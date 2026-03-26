@@ -54,4 +54,12 @@ public class Config {
     private boolean verifyPartitions = false;
     public boolean isVerifyPartitions()        { return verifyPartitions; }
     public void setVerifyPartitions(boolean v) { this.verifyPartitions = v; }
+
+    private boolean verifyDPSpace = false;
+    public boolean isVerifyDPSpace()           { return verifyDPSpace; }
+    public void setVerifyDPSpace(boolean v)    { this.verifyDPSpace = v; }
+
+    private boolean verifyWeights = false;
+    public boolean isVerifyWeights()           { return verifyWeights; }
+    public void setVerifyWeights(boolean v)    { this.verifyWeights = v; }
 }
