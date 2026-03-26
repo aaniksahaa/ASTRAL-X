@@ -1,23 +1,16 @@
 #!/bin/bash
 set -e
-
-PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
-SRC_DIR="$PROJECT_DIR/src"
-BUILD_DIR="$PROJECT_DIR/build"
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+SRC="$ROOT/src"
+BUILD="$ROOT/build"
 
 echo "=== Building ASTRAL-X ==="
+rm -rf "$BUILD"
+mkdir -p "$BUILD"
 
-# Clean
-rm -rf "$BUILD_DIR"
-mkdir -p "$BUILD_DIR"
+find "$SRC" -name "*.java" > /tmp/astralx_src.txt
+javac -d "$BUILD" -sourcepath "$SRC" @/tmp/astralx_src.txt
+rm /tmp/astralx_src.txt
 
-# Compile Java
-echo "Compiling Java sources..."
-find "$SRC_DIR" -name "*.java" > /tmp/astralx_sources.txt
-javac -d "$BUILD_DIR" -sourcepath "$SRC_DIR" @/tmp/astralx_sources.txt
-rm /tmp/astralx_sources.txt
-
-echo "Build successful: $BUILD_DIR"
-echo ""
-echo "Run with:"
-echo "  java -cp $BUILD_DIR astralx.Main -i <input.tre> -o <output.tre> -v"
+echo "Build OK -> $BUILD"
+echo "Run: java -cp $BUILD astralx.Main -i <input.tre> -vv"
