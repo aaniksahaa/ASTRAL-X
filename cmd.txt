@@ -1,17 +1,27 @@
 # Build Java classes
 bash build.sh
 
-# Build CUDA JNI shared library (once, or after changing .cu)
+# Build CUDA JNI shared libraries (once, or after changing .cu files)
 bash build_native.sh
 
-# Run on 37-taxa input — GPU mode
+# ── 37-taxa ──────────────────────────────────────────────────────────────────
+
+# Mode 1 (tree-local DP, GPU weight)
 java -Djava.library.path=native -cp build astralx.Main -i all_gt_bs_rooted_37.tre -o astralx_species_tree_37.newick --gpu -vv
 
-# Run on 100-taxa input — GPU mode
+# Mode 2 (cross-tree DP, GPU weight + GPU DP search)
+java -Djava.library.path=native -cp build astralx.Main -i all_gt_bs_rooted_37.tre -o astralx_species_tree_37_full.newick --gpu --search-mode full -vv
+
+# ── 100-taxa ─────────────────────────────────────────────────────────────────
+
 java -Djava.library.path=native -cp build astralx.Main -i all_gt_bs_rooted_100.tre -o astralx_species_tree_100.newick --gpu -vv
+java -Djava.library.path=native -cp build astralx.Main -i all_gt_bs_rooted_100.tre -o astralx_species_tree_100_full.newick --gpu --search-mode full -vv
 
-# Run on 200-taxa input — GPU mode
+# ── 200-taxa ─────────────────────────────────────────────────────────────────
+
 java -Djava.library.path=native -cp build astralx.Main -i all_gt_bs_rooted_200.tre -o astralx_species_tree_200.newick --gpu -vv
+java -Djava.library.path=native -cp build astralx.Main -i all_gt_bs_rooted_200.tre -o astralx_species_tree_200_full.newick --gpu --search-mode full -vv
 
-# Run on 200-taxa input — CPU mode (fallback / comparison)
+# CPU fallback (no GPU needed)
 java -cp build astralx.Main -i all_gt_bs_rooted_200.tre -o astralx_species_tree_200_cpu.newick -vv
+java -cp build astralx.Main -i all_gt_bs_rooted_200.tre -o astralx_species_tree_200_cpu_full.newick --search-mode full -vv

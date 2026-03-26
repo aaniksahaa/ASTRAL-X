@@ -1,45 +1,59 @@
 package astralx.cluster;
 
-import astralx.hash.TaxonHasher;
 import java.util.Arrays;
 
 /**
  * Immutable hash key for a cluster (set of taxa).
  *
- * Stores 2m values: m finalized sum-hashes and m finalized XOR-hashes.
- * Used as HashMap key; equals/hashCode based on these values.
+ * Stores 2m values: m sum-hashes and m XOR-hashes.
+ * Values are stored RAW (un-mixed) so that arithmetic operations are valid:
  *
- * The "finalized" (mixed) values give better bucket distribution.
- * Raw (un-mixed) sum/XOR values are NOT stored here -- they are
- * computed on-the-fly from PrefixHashArrays when needed for arithmetic.
+ *   sum(A ∪ B)  = sum(A)  + sum(B)   (mod 2^64)
+ *   xor(A ∪ B)  = xor(A)  ^ xor(B)   (for disjoint A, B)
+ *   sum(A \ B)  = sum(A)  - sum(B)   (mod 2^64, valid when B ⊆ A)
+ *   xor(A \ B)  = xor(A)  ^ xor(B)   (valid when B ⊆ A)
+ *
+ * Raw values are already pseudo-random (they are sums/XORs of SplitMix64
+ * outputs per taxon), so Long.hashCode(rawSum) gives good Java HashMap
+ * bucket distribution without any additional mixing.
  *
  * Also stores the cluster size for O(1) access.
  */
 public final class ClusterHash {
 
-    public final long[] sums;   // sums[s]  = finalized sum  hash under seed s
-    public final long[] xors;  // xors[s]  = finalized XOR  hash under seed s
-    public final int size;     // number of taxa in this cluster
+    public final long[] sums;   // sums[s]  = raw sum  of taxon hashes under seed s
+    public final long[] xors;   // xors[s]  = raw XOR  of taxon hashes under seed s
+    public final int size;      // number of taxa in this cluster
     private final int cachedHashCode;
 
     public ClusterHash(long[] rawSums, long[] rawXors, int size, int m) {
         this.size = size;
-        this.sums = new long[m];
-        this.xors = new long[m];
-        for (int s = 0; s < m; s++) {
-            // Apply SplitMix64 finalizer to raw values for better hash-table distribution.
-            // Raw values are additive; mixed values are not -- use raw for arithmetic.
-            this.sums[s] = TaxonHasher.mix64(rawSums[s]);
-            this.xors[s] = TaxonHasher.mix64(rawXors[s]);
-        }
-        // Combine into a single Java hashCode
+        this.sums = Arrays.copyOf(rawSums, m);
+        this.xors = Arrays.copyOf(rawXors, m);
+        // Raw sum/xor values are already pseudo-random (from SplitMix64 taxon hashes),
+        // so folding directly into a Java int gives good distribution.
         int h = 1;
         for (long v : this.sums) h = 31 * h + Long.hashCode(v);
         for (long v : this.xors) h = 31 * h + Long.hashCode(v);
         this.cachedHashCode = h;
     }
 
-    /** Two ClusterHash objects are equal iff all finalized values and size match. */
+    /**
+     * Compute hash of set difference A \ B, given B ⊆ A.
+     * Result has sums[s] = a.sums[s] - b.sums[s] and xors[s] = a.xors[s] ^ b.xors[s].
+     * Size = a.size - b.size.
+     */
+    public static ClusterHash residual(ClusterHash a, ClusterHash b) {
+        int m = a.sums.length;
+        long[] resSums = new long[m];
+        long[] resXors = new long[m];
+        for (int s = 0; s < m; s++) {
+            resSums[s] = a.sums[s] - b.sums[s];   // mod 2^64, Java wraps automatically
+            resXors[s] = a.xors[s] ^ b.xors[s];
+        }
+        return new ClusterHash(resSums, resXors, a.size - b.size, m);
+    }
+
     @Override
     public boolean equals(Object o) {
         if (this == o) return true;

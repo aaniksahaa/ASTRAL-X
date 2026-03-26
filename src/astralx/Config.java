@@ -2,6 +2,7 @@ package astralx;
 
 public class Config {
     public enum ComputeMode { CPU, GPU }
+    public enum SearchMode  { LOCAL, FULL }
 
     private static Config instance;
 
@@ -13,6 +14,7 @@ public class Config {
     private long baseSeed = 0xDEADBEEFCAFEL;
     private int verbosity = 1; // 0=quiet 1=INFO 2=DEBUG 3=TRACE
     private boolean treatAsUnrooted = true;
+    private SearchMode searchMode = SearchMode.LOCAL;
 
     private Config() {}
 
@@ -37,6 +39,8 @@ public class Config {
     public void setVerbosity(int v)           { this.verbosity = v; }
     public boolean getTreatAsUnrooted()       { return treatAsUnrooted; }
     public void setTreatAsUnrooted(boolean u) { this.treatAsUnrooted = u; }
+    public SearchMode getSearchMode()          { return searchMode; }
+    public void setSearchMode(SearchMode s)   { this.searchMode = s; }
 
     // Testing flags
     private boolean verifyParse = false;

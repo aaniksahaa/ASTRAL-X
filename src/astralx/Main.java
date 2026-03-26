@@ -3,6 +3,7 @@ package astralx;
 import astralx.cluster.ClusterTable;
 import astralx.dp.DPTable;
 import astralx.dp.Inference;
+import astralx.gpu.GPUDPBuilder;
 import astralx.partition.PartitionTable;
 import astralx.weight.WeightTable;
 import astralx.hash.PrefixHashArrays;
@@ -69,6 +70,13 @@ public class Main {
             // ── Phase 5: DP search space (tree-local transitions) ─────────────
             DPTable dpTable = new DPTable(trees, pref, clusterTable);
 
+            // ── Phase 5b: Cross-tree transitions (Mode 2, optional) ───────────
+            if (cfg.getSearchMode() == Config.SearchMode.FULL) {
+                boolean gpuDP = (cfg.getComputeMode() == Config.ComputeMode.GPU)
+                                && GPUDPBuilder.tryLoad();
+                dpTable.addCrossTreeTransitions(clusterTable, gpuDP);
+            }
+
             if (cfg.isVerifyDPSpace()) {
                 Phase5Verifier.dump(trees, registry, pref, clusterTable, dpTable, cfg.getOutputFile());
                 return;
@@ -112,6 +120,11 @@ public class Main {
                 case "-t","--threads"  -> { if (++i>=args.length) return false; cfg.setThreadCount(Integer.parseInt(args[i])); }
                 case "--cpu"           -> cfg.setComputeMode(Config.ComputeMode.CPU);
                 case "--gpu"           -> cfg.setComputeMode(Config.ComputeMode.GPU);
+                case "--search-mode"   -> {
+                    if (++i >= args.length) return false;
+                    cfg.setSearchMode(args[i].equalsIgnoreCase("full")
+                        ? Config.SearchMode.FULL : Config.SearchMode.LOCAL);
+                }
                 case "-v"              -> cfg.setVerbosity(Logging.INFO);
                 case "-vv"             -> cfg.setVerbosity(Logging.DEBUG);
                 case "-vvv"            -> cfg.setVerbosity(Logging.TRACE);

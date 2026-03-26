@@ -1,29 +1,44 @@
 #!/bin/bash
-# Build the CUDA JNI shared library for ASTRAL-X GPU weight calculation.
-# Output: native/libastralx_weight.so
+# Build all CUDA JNI shared libraries for ASTRAL-X.
+#   native/libastralx_weight.so  -- GPU weight calculation kernel
+#   native/libastralx_dp.so      -- GPU cross-tree DP transition search kernel
 set -e
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
-SRC="$ROOT/src/native/astralx_weight.cu"
-OUT="$ROOT/native/libastralx_weight.so"
 JAVA_HOME="${JAVA_HOME:-/usr/lib/jvm/java-21-openjdk-amd64}"
+
+# GPU architecture.  Override with e.g.  CUDA_ARCH=sm_80 ./build_native.sh
+CUDA_ARCH="${CUDA_ARCH:-sm_86}"
 
 mkdir -p "$ROOT/native"
 
-echo "=== Building ASTRAL-X native GPU library ==="
-echo "  Source : $SRC"
-echo "  Output : $OUT"
-echo "  JDK    : $JAVA_HOME"
+NVCC_FLAGS=(
+  -arch="${CUDA_ARCH}"
+  -O3
+  -Xcompiler '-fPIC'
+  --shared
+  -I"${JAVA_HOME}/include"
+  -I"${JAVA_HOME}/include/linux"
+)
 
-nvcc \
-  -arch=sm_86 \
-  -O3 \
-  -Xcompiler '-fPIC' \
-  -I"${JAVA_HOME}/include" \
-  -I"${JAVA_HOME}/include/linux" \
-  --shared \
-  -o "$OUT" \
-  "$SRC"
+echo "=== Building ASTRAL-X native GPU libraries ==="
+echo "  JDK         : $JAVA_HOME"
+echo "  CUDA arch   : $CUDA_ARCH"
 
-echo "=== Native build OK -> $OUT ==="
-echo "Run with: java -Djava.library.path=native -cp build astralx.Main -i <input.tre> --gpu -vv"
+# ── Weight kernel ─────────────────────────────────────────────────────────────
+SRC_W="$ROOT/src/native/astralx_weight.cu"
+OUT_W="$ROOT/native/libastralx_weight.so"
+echo "  Building    : $SRC_W  ->  $OUT_W"
+nvcc "${NVCC_FLAGS[@]}" -o "$OUT_W" "$SRC_W"
+echo "  OK"
+
+# ── DP cross-tree search kernel ───────────────────────────────────────────────
+SRC_DP="$ROOT/src/native/astralx_dp.cu"
+OUT_DP="$ROOT/native/libastralx_dp.so"
+echo "  Building    : $SRC_DP  ->  $OUT_DP"
+nvcc "${NVCC_FLAGS[@]}" -o "$OUT_DP" "$SRC_DP"
+echo "  OK"
+
+echo "=== Native build complete ==="
+echo "Run with:"
+echo "  java -Djava.library.path=native -cp build astralx.Main -i <input.tre> --gpu --search-mode full -vv"

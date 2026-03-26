@@ -3,10 +3,12 @@ package astralx.dp;
 import astralx.Logging;
 import astralx.cluster.ClusterHash;
 import astralx.cluster.ClusterTable;
+import astralx.gpu.GPUDPBuilder;
 import astralx.hash.PrefixHashArrays;
 import astralx.hash.TaxonHasher;
 import astralx.tree.Tree;
 import astralx.tree.TreeNode;
+import astralx.util.Threading;
 
 import java.util.*;
 
@@ -114,6 +116,174 @@ public class DPTable {
         }
         int sz = complement ? (L - (hi - lo)) : (hi - lo);
         return new ClusterHash(rawSums, rawXors, sz, m);
+    }
+
+    // -------------------------------------------------------------------------
+    // Mode 2: Cross-tree DP transitions
+    // -------------------------------------------------------------------------
+
+    /**
+     * Expand the search space with cross-tree splits (ASTRAL Mode 2 / "full" search).
+     *
+     * For every cluster A ∈ X and every cluster B ∈ X with |B| ≤ |A|/2:
+     *   if hash(A) − hash(B) matches another cluster R ∈ X  →  add A → B | R.
+     *
+     * Also handles the all-taxa root cluster (not in X, but its transitions matter).
+     *
+     * @param clusterTable  the cluster set X
+     * @param useGPU        true to use CUDA acceleration; false for parallel CPU
+     */
+    public void addCrossTreeTransitions(ClusterTable clusterTable, boolean useGPU) {
+        long t0 = System.nanoTime();
+        int beforeSplits = 0;
+        for (Set<BipartitionSplit> s : transitions.values()) beforeSplits += s.size();
+
+        if (useGPU) {
+            addCrossTreeGPU(clusterTable);
+        } else {
+            addCrossTreeCPU(clusterTable);
+        }
+
+        // Recount
+        uniqueSplits = 0;
+        for (Set<BipartitionSplit> s : transitions.values()) uniqueSplits += s.size();
+
+        long ms = (System.nanoTime() - t0) / 1_000_000;
+        Logging.info("Cross-tree transitions (Mode 2): +%d splits (%d total) in %d ms",
+            uniqueSplits - beforeSplits, uniqueSplits, ms);
+    }
+
+    // ── CPU path ─────────────────────────────────────────────────────────────
+
+    private void addCrossTreeCPU(ClusterTable clusterTable) {
+        List<ClusterHash> allHashes = new ArrayList<>();
+        for (var e : clusterTable.entries()) allHashes.add(e.hash);
+        int N = allHashes.size();
+
+        // Parallel over all clusters A: each thread writes to its own perCluster[idx] slot
+        @SuppressWarnings("unchecked")
+        Set<BipartitionSplit>[] perCluster = new Set[N];
+
+        Threading.processRangeParallel(N, idx -> {
+            ClusterHash hashA = allHashes.get(idx);
+            int szA = hashA.size;
+            Set<BipartitionSplit> localSet = null; // lazy-init to avoid object churn
+
+            for (int sz = 1; sz <= szA / 2; sz++) {
+                for (ClusterHash hashB : clusterTable.getBySize(sz)) {
+                    ClusterHash residual = ClusterHash.residual(hashA, hashB);
+                    if (clusterTable.contains(residual)) {
+                        if (localSet == null) localSet = new LinkedHashSet<>();
+                        localSet.add(new BipartitionSplit(hashB, residual));
+                    }
+                }
+            }
+
+            if (localSet != null) perCluster[idx] = localSet;
+        });
+
+        // Serial merge into transitions (different A → different keys, no map contention)
+        for (int idx = 0; idx < N; idx++) {
+            if (perCluster[idx] != null) {
+                ClusterHash hashA = allHashes.get(idx);
+                transitions.computeIfAbsent(hashA, k -> new LinkedHashSet<>())
+                           .addAll(perCluster[idx]);
+            }
+        }
+
+        // Also handle the root (all-taxa) cluster — not in clusterTable but is the DP root
+        searchRootTransitions(clusterTable);
+    }
+
+    // ── GPU path ─────────────────────────────────────────────────────────────
+
+    private void addCrossTreeGPU(ClusterTable clusterTable) {
+        List<ClusterTable.Entry> entries = new ArrayList<>(clusterTable.entries());
+        int N = entries.size();
+        if (N == 0) { searchRootTransitions(clusterTable); return; }
+
+        int maxSize = clusterTable.sizes().stream().mapToInt(Integer::intValue).max().orElse(1);
+
+        // ── Flatten cluster data ──────────────────────────────────────────────
+        long[] clusterSums  = new long[N * m];
+        long[] clusterXors  = new long[N * m];
+        int[]  clusterSizes = new int[N];
+
+        for (int c = 0; c < N; c++) {
+            ClusterHash h = entries.get(c).hash;
+            clusterSizes[c] = h.size;
+            for (int s = 0; s < m; s++) {
+                clusterSums[c * m + s] = h.sums[s];
+                clusterXors[c * m + s] = h.xors[s];
+            }
+        }
+
+        // ── Build sortedBySize and binStart ───────────────────────────────────
+        // sortedBySize[i] = cluster index (into above arrays) ordered by size asc
+        // binStart[sz]    = first index in sortedBySize with size >= sz
+        Integer[] order = new Integer[N];
+        for (int i = 0; i < N; i++) order[i] = i;
+        Arrays.sort(order, Comparator.comparingInt(i -> clusterSizes[i]));
+        int[] sortedBySize = new int[N];
+        for (int i = 0; i < N; i++) sortedBySize[i] = order[i];
+
+        int[] binStart = new int[maxSize + 2];
+        int ptr = 0;
+        for (int sz = 0; sz <= maxSize + 1; sz++) {
+            while (ptr < N && clusterSizes[sortedBySize[ptr]] < sz) ptr++;
+            binStart[sz] = ptr;
+        }
+
+        // ── Compute maxPerRound to bound GPU output buffer ────────────────────
+        // maxPerRound = 10M triples max = 10M * 12 bytes = 120 MB on GPU
+        // Sub-batching within each round ensures this is never exceeded.
+        int maxPerRound = 10_000_000;
+
+        // ── Call GPU ──────────────────────────────────────────────────────────
+        Logging.debug("  GPU cross-tree search: N=%d clusters, maxSize=%d", N, maxSize);
+        int[] raw = GPUDPBuilder.findCrossTreeTransitionsGPU(
+            clusterSums, clusterXors, clusterSizes,
+            N, m,
+            sortedBySize, binStart, maxSize,
+            maxPerRound);
+
+        if (raw == null) {
+            Logging.info("  GPU cross-tree search returned null, falling back to CPU");
+            addCrossTreeCPU(clusterTable);
+            return;
+        }
+
+        // ── Process GPU results ───────────────────────────────────────────────
+        int count = raw[0];
+        Logging.debug("  GPU cross-tree: %d raw pairs found", count);
+        for (int i = 0; i < count; i++) {
+            int idxA   = raw[1 + i * 3];
+            int idxB   = raw[1 + i * 3 + 1];
+            int idxRes = raw[1 + i * 3 + 2];
+            ClusterHash hashA   = entries.get(idxA).hash;
+            ClusterHash hashB   = entries.get(idxB).hash;
+            ClusterHash hashRes = entries.get(idxRes).hash;
+            transitions.computeIfAbsent(hashA, k -> new LinkedHashSet<>())
+                       .add(new BipartitionSplit(hashB, hashRes));
+        }
+
+        // Root cluster transitions (handled on CPU, fast)
+        searchRootTransitions(clusterTable);
+    }
+
+    /** Search transitions for the all-taxa root cluster (not in X itself). */
+    private void searchRootTransitions(ClusterTable clusterTable) {
+        int szRoot = rootHash.size;
+        Set<BipartitionSplit> rootSet =
+            transitions.computeIfAbsent(rootHash, k -> new LinkedHashSet<>());
+        for (int sz = 1; sz <= szRoot / 2; sz++) {
+            for (ClusterHash hashB : clusterTable.getBySize(sz)) {
+                ClusterHash residual = ClusterHash.residual(rootHash, hashB);
+                if (clusterTable.contains(residual)) {
+                    rootSet.add(new BipartitionSplit(hashB, residual));
+                }
+            }
+        }
     }
 
     // -------------------------------------------------------------------------
