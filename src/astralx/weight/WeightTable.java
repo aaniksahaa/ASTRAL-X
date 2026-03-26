@@ -1,14 +1,17 @@
 package astralx.weight;
 
+import astralx.Config;
 import astralx.Logging;
 import astralx.cluster.Cluster;
 import astralx.cluster.ClusterHash;
 import astralx.cluster.ClusterTable;
 import astralx.dp.BipartitionSplit;
 import astralx.dp.DPTable;
+import astralx.gpu.GPUWeightCalculator;
 import astralx.partition.Partition;
 import astralx.partition.PartitionTable;
 import astralx.tree.Tree;
+import astralx.util.Threading;
 
 import java.util.*;
 
@@ -34,6 +37,10 @@ import java.util.*;
  *
  * QI is always a non-negative integer (proven by parity argument),
  * so scores are stored as non-negative longs.
+ *
+ * Execution path selection:
+ *   GPU  — when --gpu flag is set and libastralx_weight.so is loadable.
+ *   CPU  — otherwise (multi-threaded via Threading.processRangeParallel).
  */
 public class WeightTable {
 
@@ -51,19 +58,36 @@ public class WeightTable {
         long t0 = System.nanoTime();
         this.n = clusterTable.getAllTaxaHash().size;
 
-        // Collect all unique splits from DPTable
-        Set<BipartitionSplit> allSplits = new LinkedHashSet<>();
-        for (var entry : dpTable.entries()) {
-            allSplits.addAll(entry.getValue());
+        // Collect all unique splits from DPTable into an indexed list
+        List<BipartitionSplit> splitList = new ArrayList<>();
+        for (var entry : dpTable.entries()) splitList.addAll(entry.getValue());
+        int numSplits = splitList.size();
+
+        List<PartitionTable.Entry> partList = new ArrayList<>(partTable.entries());
+        long[] scoreArray = new long[numSplits];
+
+        boolean useGPU = (Config.getInstance().getComputeMode() == Config.ComputeMode.GPU)
+                         && GPUWeightCalculator.tryLoad();
+
+        if (useGPU) {
+            Logging.info("Weight table: using GPU path (%d splits, %d partitions)",
+                numSplits, partList.size());
+            computeScoresGPU(splitList, partList, clusterTable, trees, scoreArray);
+        } else {
+            if (Config.getInstance().getComputeMode() == Config.ComputeMode.GPU) {
+                Logging.info("GPU library not available, falling back to CPU");
+            }
+            // CPU: parallel over splits
+            Collection<PartitionTable.Entry> partitions = partTable.entries();
+            Threading.processRangeParallel(numSplits, idx -> {
+                scoreArray[idx] = computeScore(splitList.get(idx), partitions, clusterTable, trees);
+            });
         }
 
-        // Precompute score for each split
-        Collection<PartitionTable.Entry> partitions = partTable.entries();
-        for (BipartitionSplit split : allSplits) {
-            long score = computeScore(split, partitions, clusterTable, trees);
-            scores.put(split, score);
-            if (score > maxScore) maxScore = score;
-            totalScore += score;
+        for (int i = 0; i < numSplits; i++) {
+            scores.put(splitList.get(i), scoreArray[i]);
+            if (scoreArray[i] > maxScore) maxScore = scoreArray[i];
+            totalScore += scoreArray[i];
         }
 
         long ms = (System.nanoTime() - t0) / 1_000_000;
@@ -71,6 +95,99 @@ public class WeightTable {
             scores.size(), maxScore, totalScore, ms);
     }
 
+    // -------------------------------------------------------------------------
+    // GPU path
+    // -------------------------------------------------------------------------
+
+    /**
+     * Flatten all data to primitive arrays, call the CUDA kernel via JNI,
+     * and write results (score = twoScore/2) into scoreArray.
+     */
+    private void computeScoresGPU(List<BipartitionSplit> splitList,
+                                   List<PartitionTable.Entry> partList,
+                                   ClusterTable clusterTable,
+                                   List<Tree> trees,
+                                   long[] scoreArray) {
+        int numSplits = splitList.size();
+        int numParts  = partList.size();
+        int numTrees  = trees.size();
+
+        // --- splits: numSplits * 10 ints ---
+        // [loTree, loLeft, loRight, loComp, loSize, hiTree, hiLeft, hiRight, hiComp, hiSize]
+        int[] splitsData = new int[numSplits * 10];
+        for (int i = 0; i < numSplits; i++) {
+            BipartitionSplit split = splitList.get(i);
+            ClusterTable.Entry eA = clusterTable.get(split.lo);
+            ClusterTable.Entry eB = clusterTable.get(split.hi);
+            int base = i * 10;
+            if (eA != null && eB != null) {
+                Cluster cA = eA.exemplar, cB = eB.exemplar;
+                splitsData[base + 0] = cA.treeIndex;
+                splitsData[base + 1] = cA.left;
+                splitsData[base + 2] = cA.right;
+                splitsData[base + 3] = cA.complement ? 1 : 0;
+                splitsData[base + 4] = cA.size;
+                splitsData[base + 5] = cB.treeIndex;
+                splitsData[base + 6] = cB.left;
+                splitsData[base + 7] = cB.right;
+                splitsData[base + 8] = cB.complement ? 1 : 0;
+                splitsData[base + 9] = cB.size;
+            }
+            // else: all zeros → kernel will compute sizeC = n - 0 - 0, but the
+            // first valid partition check will likely skip; score stays 0.
+        }
+
+        // --- partitions: numParts * 9 ints ---
+        // [treeIdx, lo1, hi1, lo2, hi2, sz1, sz2, sz3, frequency]
+        int[] partsData = new int[numParts * 9];
+        for (int j = 0; j < numParts; j++) {
+            PartitionTable.Entry pe = partList.get(j);
+            Partition p = pe.exemplar;
+            int base = j * 9;
+            partsData[base + 0] = p.treeIndex;
+            partsData[base + 1] = p.leftStart;
+            partsData[base + 2] = p.leftEnd;
+            partsData[base + 3] = p.rightStart;
+            partsData[base + 4] = p.rightEnd;
+            partsData[base + 5] = p.size1;
+            partsData[base + 6] = p.size2;
+            partsData[base + 7] = p.size3;
+            partsData[base + 8] = pe.frequency;
+        }
+
+        // --- orderings + invIndex: numTrees * n ints each ---
+        // orderings[t*n + pos]   = postorderArray[pos]
+        // invIndex [t*n + taxon] = positionMap[taxon]  (-1 if absent)
+        int[] orderings = new int[numTrees * n];
+        int[] invIndex  = new int[numTrees * n];
+        Arrays.fill(invIndex, -1);
+        for (int t = 0; t < numTrees; t++) {
+            Tree tree = trees.get(t);
+            int base = t * n;
+            for (int pos = 0; pos < tree.leafCount; pos++) {
+                orderings[base + pos] = tree.postorderArray[pos];
+            }
+            for (int taxon = 0; taxon < n; taxon++) {
+                invIndex[base + taxon] = tree.positionMap[taxon];
+            }
+        }
+
+        // --- call GPU ---
+        long t1 = System.nanoTime();
+        long[] twoScores = GPUWeightCalculator.computeWeightsGPU(
+            splitsData, partsData, orderings, invIndex,
+            numSplits, numParts, numTrees, n, n);
+        long gpuMs = (System.nanoTime() - t1) / 1_000_000;
+        Logging.info("  GPU kernel returned in %d ms", gpuMs);
+
+        // twoScores[i] = 2 * score; divide by 2
+        for (int i = 0; i < numSplits; i++) {
+            scoreArray[i] = twoScores[i] / 2L;
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // CPU path
     // -------------------------------------------------------------------------
 
     private long computeScore(BipartitionSplit split,

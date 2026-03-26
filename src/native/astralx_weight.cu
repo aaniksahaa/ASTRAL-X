@@ -1,0 +1,225 @@
+/**
+ * ASTRAL-X GPU weight calculation kernel (CUDA + JNI).
+ *
+ * One CUDA thread per candidate split.  Each thread iterates over every
+ * gene-tree tripartition and accumulates 2*QI weighted by tripartition
+ * frequency.  The result array (twoScores) is divided by 2 on the Java side.
+ *
+ * Data layout (mirrors STELAR-X compact pattern):
+ *   orderings[t * numTaxa + pos]   = taxon id at postorder position pos in tree t
+ *   invIndex [t * numTaxa + taxon] = postorder position of taxon in tree t (-1 if absent)
+ *
+ * Split layout (10 ints per split):
+ *   [0] loTreeIdx  [1] loLeft  [2] loRight  [3] loComplement  [4] loSize
+ *   [5] hiTreeIdx  [6] hiLeft  [7] hiRight  [8] hiComplement  [9] hiSize
+ *
+ * Partition layout (9 ints per partition):
+ *   [0] treeIdx  [1] lo1  [2] hi1  [3] lo2  [4] hi2
+ *   [5] sz1  [6] sz2  [7] sz3  [8] frequency
+ */
+
+#include <stdio.h>
+#include <cuda_runtime.h>
+#include <jni.h>
+
+// ---------------------------------------------------------------------------
+// Device helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Range intersection: count taxa in [loA,hiA) of tree tA that also appear
+ * in [loB,hiB) of tree tB.  Iterates the smaller range for efficiency.
+ */
+__device__ int coreIntersect(
+    int tA, int loA, int hiA,
+    int tB, int loB, int hiB,
+    const int* __restrict__ orderings,
+    const int* __restrict__ invIndex,
+    int numTaxa)
+{
+    int szA = hiA - loA, szB = hiB - loB;
+    int count = 0;
+    if (szA <= szB) {
+        for (int pos = loA; pos < hiA; pos++) {
+            int taxon = orderings[tA * numTaxa + pos];
+            int posB  = invIndex [tB * numTaxa + taxon];
+            if (posB >= loB && posB < hiB) count++;
+        }
+    } else {
+        for (int pos = loB; pos < hiB; pos++) {
+            int taxon = orderings[tB * numTaxa + pos];
+            int posA  = invIndex [tA * numTaxa + taxon];
+            if (posA >= loA && posA < hiA) count++;
+        }
+    }
+    return count;
+}
+
+/**
+ * Intersection with optional complement.  If cComp==1, actual set is the
+ * complement of [loC, hiC) within tree tC, so
+ *   |comp(C) ∩ M| = |M| - |C ∩ M|
+ */
+__device__ int intersect(
+    int tGT, int loGT, int hiGT,
+    int tC,  int loC,  int hiC, int cComp, int szGTRange,
+    const int* __restrict__ orderings,
+    const int* __restrict__ invIndex,
+    int numTaxa)
+{
+    int raw = coreIntersect(tGT, loGT, hiGT, tC, loC, hiC, orderings, invIndex, numTaxa);
+    return cComp ? (szGTRange - raw) : raw;
+}
+
+// ---------------------------------------------------------------------------
+// Main kernel: 1 thread per split
+// ---------------------------------------------------------------------------
+
+__global__ void computeWeightsKernel(
+    const int* __restrict__ splits,    // numSplits * 10
+    const int* __restrict__ parts,     // numParts  * 9
+    const int* __restrict__ orderings, // numTrees  * numTaxa
+    const int* __restrict__ invIndex,  // numTrees  * numTaxa
+    int numSplits,
+    int numParts,
+    int numTaxa,
+    int totalN,
+    long long* __restrict__ twoScores  // output
+)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= numSplits) return;
+
+    // Load split
+    const int* sp = splits + idx * 10;
+    int loTree = sp[0], loLeft = sp[1], loRight = sp[2], loComp = sp[3], sizeA = sp[4];
+    int hiTree = sp[5], hiLeft = sp[6], hiRight = sp[7], hiComp = sp[8], sizeB = sp[9];
+
+    int sizeC = totalN - sizeA - sizeB;
+    if (sizeC < 0) { twoScores[idx] = 0LL; return; }
+
+    // 6 permutations: (pi,pj,pk) index into arrays a[], b[], c[]
+    // {{0,1,2},{0,2,1},{1,0,2},{1,2,0},{2,0,1},{2,1,0}}
+    const int PI[6] = {0, 0, 1, 1, 2, 2};
+    const int PJ[6] = {1, 2, 0, 2, 0, 1};
+    const int PK[6] = {2, 1, 2, 0, 1, 0};
+
+    long long twoScore = 0LL;
+
+    for (int j = 0; j < numParts; j++) {
+        const int* pt = parts + j * 9;
+        int tGT = pt[0];
+        int lo1 = pt[1], hi1 = pt[2];
+        int lo2 = pt[3], hi2 = pt[4];
+        int sz1 = pt[5], sz2 = pt[6], sz3 = pt[7];
+        int freq = pt[8];
+
+        // 4 core intersections
+        int a0 = intersect(tGT, lo1, hi1, loTree, loLeft, loRight, loComp, sz1, orderings, invIndex, numTaxa);
+        int a1 = intersect(tGT, lo2, hi2, loTree, loLeft, loRight, loComp, sz2, orderings, invIndex, numTaxa);
+        int b0 = intersect(tGT, lo1, hi1, hiTree, hiLeft, hiRight, hiComp, sz1, orderings, invIndex, numTaxa);
+        int b1 = intersect(tGT, lo2, hi2, hiTree, hiLeft, hiRight, hiComp, sz2, orderings, invIndex, numTaxa);
+
+        // Derive remaining 5
+        int a2 = sizeA - a0 - a1;
+        int b2 = sizeB - b0 - b1;
+        int c0 = sz1   - a0 - b0;
+        int c1 = sz2   - a1 - b1;
+        int c2 = sz3   - c0 - c1;
+
+        if (a2 < 0 || b2 < 0 || c0 < 0 || c1 < 0 || c2 < 0) continue;
+
+        // 2*QI = sum over 6 perms (i,j,k): a[i]*b[j]*c[k]*(a[i]+b[j]+c[k]-3)
+        long long a[3] = {a0, a1, a2};
+        long long b[3] = {b0, b1, b2};
+        long long c[3] = {c0, c1, c2};
+
+        long long twoQI = 0LL;
+        for (int p = 0; p < 6; p++) {
+            long long ai = a[PI[p]], bj = b[PJ[p]], ck = c[PK[p]];
+            long long s  = ai + bj + ck - 3;
+            if (s > 0) twoQI += ai * bj * ck * s;
+        }
+        twoScore += (long long)freq * twoQI;
+    }
+
+    twoScores[idx] = twoScore;
+}
+
+// ---------------------------------------------------------------------------
+// JNI entry point
+// ---------------------------------------------------------------------------
+
+extern "C" {
+
+JNIEXPORT jlongArray JNICALL
+Java_astralx_gpu_GPUWeightCalculator_computeWeightsGPU(
+    JNIEnv* env, jclass cls,
+    jintArray jSplits, jintArray jParts,
+    jintArray jOrderings, jintArray jInvIndex,
+    jint numSplits, jint numParts,
+    jint numTrees, jint numTaxa, jint totalN)
+{
+    // Pin host arrays
+    jint* hSplits    = env->GetIntArrayElements(jSplits,    NULL);
+    jint* hParts     = env->GetIntArrayElements(jParts,     NULL);
+    jint* hOrderings = env->GetIntArrayElements(jOrderings, NULL);
+    jint* hInvIndex  = env->GetIntArrayElements(jInvIndex,  NULL);
+
+    // Device allocations
+    int      *dSplits, *dParts, *dOrderings, *dInvIndex;
+    long long *dTwoScores;
+
+    size_t splitsSz    = (size_t)numSplits * 10 * sizeof(int);
+    size_t partsSz     = (size_t)numParts  *  9 * sizeof(int);
+    size_t orderingSz  = (size_t)numTrees  * numTaxa * sizeof(int);
+    size_t scoresSz    = (size_t)numSplits * sizeof(long long);
+
+    cudaMalloc(&dSplits,    splitsSz);
+    cudaMalloc(&dParts,     partsSz);
+    cudaMalloc(&dOrderings, orderingSz);
+    cudaMalloc(&dInvIndex,  orderingSz);
+    cudaMalloc(&dTwoScores, scoresSz);
+
+    cudaMemcpy(dSplits,    hSplits,    splitsSz,   cudaMemcpyHostToDevice);
+    cudaMemcpy(dParts,     hParts,     partsSz,    cudaMemcpyHostToDevice);
+    cudaMemcpy(dOrderings, hOrderings, orderingSz, cudaMemcpyHostToDevice);
+    cudaMemcpy(dInvIndex,  hInvIndex,  orderingSz, cudaMemcpyHostToDevice);
+
+    // Launch kernel
+    int blockSize = 256;
+    int gridSize  = (numSplits + blockSize - 1) / blockSize;
+    computeWeightsKernel<<<gridSize, blockSize>>>(
+        dSplits, dParts, dOrderings, dInvIndex,
+        numSplits, numParts, numTaxa, totalN,
+        dTwoScores);
+
+    cudaError_t err = cudaDeviceSynchronize();
+    if (err != cudaSuccess) {
+        fprintf(stderr, "[ASTRAL-X GPU] kernel error: %s\n", cudaGetErrorString(err));
+    }
+
+    // Copy results back and build Java long[]
+    long long* hTwoScores = new long long[numSplits];
+    cudaMemcpy(hTwoScores, dTwoScores, scoresSz, cudaMemcpyDeviceToHost);
+
+    jlongArray result = env->NewLongArray(numSplits);
+    env->SetLongArrayRegion(result, 0, numSplits, (jlong*)hTwoScores);
+
+    // Cleanup
+    delete[] hTwoScores;
+    cudaFree(dSplits);
+    cudaFree(dParts);
+    cudaFree(dOrderings);
+    cudaFree(dInvIndex);
+    cudaFree(dTwoScores);
+
+    env->ReleaseIntArrayElements(jSplits,    hSplits,    JNI_ABORT);
+    env->ReleaseIntArrayElements(jParts,     hParts,     JNI_ABORT);
+    env->ReleaseIntArrayElements(jOrderings, hOrderings, JNI_ABORT);
+    env->ReleaseIntArrayElements(jInvIndex,  hInvIndex,  JNI_ABORT);
+
+    return result;
+}
+
+} // extern "C"

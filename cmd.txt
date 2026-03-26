@@ -1,13 +1,17 @@
-# (Optional) Build GPU weight runner once
-./src/cuda/build-weight-kernel.sh sm_86
+# Build Java classes
+bash build.sh
 
-# GPU-first run (falls back automatically if GPU runner/device is unavailable)
-./run-astralx.sh -i ./all_gt_bs_rooted_37.tre -o ./astralx_species_tree_37.newick --intersection wavelet --weight-mode gpu
+# Build CUDA JNI shared library (once, or after changing .cu)
+bash build_native.sh
 
-# Force CPU-parallel weight precompute
-./run-astralx.sh -i ./all_gt_bs_rooted_37.tre -o ./astralx_species_tree_37_cpu.newick --intersection wavelet --weight-mode cpu
+# Run on 37-taxa input — GPU mode
+java -Djava.library.path=native -cp build astralx.Main -i all_gt_bs_rooted_37.tre -o astralx_species_tree_37.newick --gpu -vv
 
+# Run on 100-taxa input — GPU mode
+java -Djava.library.path=native -cp build astralx.Main -i all_gt_bs_rooted_100.tre -o astralx_species_tree_100.newick --gpu -vv
 
+# Run on 200-taxa input — GPU mode
+java -Djava.library.path=native -cp build astralx.Main -i all_gt_bs_rooted_200.tre -o astralx_species_tree_200.newick --gpu -vv
 
-./src/cuda/build-weight-kernel.sh sm_86
-./run-astralx.sh -i ./all_gt_bs_rooted_200.tre -o ./astralx_species_tree_200.newick --intersection wavelet --weight-mode gpu
+# Run on 200-taxa input — CPU mode (fallback / comparison)
+java -cp build astralx.Main -i all_gt_bs_rooted_200.tre -o astralx_species_tree_200_cpu.newick -vv
