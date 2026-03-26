@@ -50,4 +50,8 @@ public class Config {
     private boolean verifyClusters = false;
     public boolean isVerifyClusters()       { return verifyClusters; }
     public void setVerifyClusters(boolean v){ this.verifyClusters = v; }
+
+    private boolean verifyPartitions = false;
+    public boolean isVerifyPartitions()        { return verifyPartitions; }
+    public void setVerifyPartitions(boolean v) { this.verifyPartitions = v; }
 }
