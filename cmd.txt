@@ -1,6 +1,12 @@
 # Build Java classes
 bash build.sh
 
+# ── Automated test (runs Mode 1 + Mode 2 on GPU, prints RF vs true tree) ─────
+bash test_rf.sh 37          # 37-taxa dataset
+bash test_rf.sh 48          # 48-taxa dataset
+bash test_rf.sh 200         # 200-taxa dataset
+bash test_rf.sh all         # all three datasets in sequence
+
 # Build CUDA JNI shared libraries (once, or after changing .cu files)
 bash build_native.sh
 
