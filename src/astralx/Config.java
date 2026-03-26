@@ -46,4 +46,8 @@ public class Config {
     private boolean verifyHash = false;
     public boolean isVerifyHash()           { return verifyHash; }
     public void setVerifyHash(boolean v)    { this.verifyHash = v; }
+
+    private boolean verifyClusters = false;
+    public boolean isVerifyClusters()       { return verifyClusters; }
+    public void setVerifyClusters(boolean v){ this.verifyClusters = v; }
 }

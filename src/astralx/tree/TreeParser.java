@@ -52,13 +52,17 @@ public class TreeParser {
         long ms = (System.nanoTime() - t0) / 1_000_000;
         Logging.info("Parsed %d gene trees in %d ms", trees.size(), ms);
 
-        // Per-tree debug log (capped to avoid flooding on large inputs)
-        int printLimit = Logging.isDebug() ? trees.size() : 0;
-        for (int i = 0; i < printLimit; i++) {
-            Tree t = trees.get(i);
-            Logging.debug("  Tree %d: %d leaves, complete=%b  postorder=%s",
-                i, t.leafCount, t.isComplete,
-                Logging.isTrace() ? Arrays.toString(t.postorderArray) : "(use -vvv to see)");
+        // Per-tree debug log -- cap at 5 trees to avoid flooding on large inputs
+        if (Logging.isDebug()) {
+            int cap = Math.min(5, trees.size());
+            for (int i = 0; i < cap; i++) {
+                Tree t = trees.get(i);
+                Logging.debug("  Tree %d: %d leaves, complete=%b  postorder=%s",
+                    i, t.leafCount, t.isComplete,
+                    Logging.isTrace() ? Arrays.toString(t.postorderArray) : "(use -vvv to see)");
+            }
+            if (trees.size() > cap)
+                Logging.debug("  ... (%d more trees not shown)", trees.size() - cap);
         }
 
         return trees;

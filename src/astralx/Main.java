@@ -1,5 +1,6 @@
 package astralx;
 
+import astralx.cluster.ClusterTable;
 import astralx.hash.PrefixHashArrays;
 import astralx.hash.TaxonHasher;
 import astralx.taxon.TaxonRegistry;
@@ -45,8 +46,16 @@ public class Main {
                 return;
             }
 
-            // ── Phases 3-7: TODO ─────────────────────────────────────────────
-            Logging.info("Phases 3-7 not yet implemented");
+            // ── Phase 3: Cluster extraction -> X ─────────────────────────────
+            ClusterTable clusterTable = new ClusterTable(trees, pref, registry.size());
+
+            if (cfg.isVerifyClusters()) {
+                Phase3Verifier.dump(trees, registry, pref, clusterTable, cfg.getOutputFile());
+                return;
+            }
+
+            // ── Phases 4-7: TODO ─────────────────────────────────────────────
+            Logging.info("Phases 4-7 not yet implemented");
 
         } finally {
             Threading.shutdown();
@@ -71,7 +80,8 @@ public class Main {
                 case "--rooted"        -> cfg.setTreatAsUnrooted(false);
                 case "--unrooted"      -> cfg.setTreatAsUnrooted(true);
                 case "--verify-parse"  -> cfg.setVerifyParse(true);
-                case "--verify-hash"   -> cfg.setVerifyHash(true);
+                case "--verify-hash"      -> cfg.setVerifyHash(true);
+                case "--verify-clusters"  -> cfg.setVerifyClusters(true);
                 case "-h","--help"     -> { printUsage(); System.exit(0); }
                 default -> { System.err.println("Unknown arg: " + args[i]); return false; }
             }
