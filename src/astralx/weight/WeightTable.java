@@ -70,9 +70,14 @@ public class WeightTable {
                          && GPUWeightCalculator.tryLoad();
 
         if (useGPU) {
-            Logging.info("Weight table: using GPU path (%d splits, %d partitions)",
-                numSplits, partList.size());
-            computeScoresGPU(splitList, partList, clusterTable, trees, scoreArray);
+            // batchSizeHint: 0 = auto (VRAM-adaptive), -1 = no batching, >0 = exact size
+            int batchSizeHint = Config.getInstance().isGpuBatch()
+                ? Config.getInstance().getGpuBatchSize()   // 0 = auto, >0 = manual
+                : -1;                                       // disabled = single launch
+            Logging.info("Weight table: using GPU path (%d splits, %d partitions, batchHint=%s)",
+                numSplits, partList.size(),
+                batchSizeHint == -1 ? "off" : batchSizeHint == 0 ? "auto" : String.valueOf(batchSizeHint));
+            computeScoresGPU(splitList, partList, clusterTable, trees, scoreArray, batchSizeHint);
         } else {
             if (Config.getInstance().getComputeMode() == Config.ComputeMode.GPU) {
                 Logging.info("GPU library not available, falling back to CPU");
@@ -118,7 +123,8 @@ public class WeightTable {
                                    List<PartitionTable.Entry> partList,
                                    ClusterTable clusterTable,
                                    List<Tree> trees,
-                                   long[] scoreArray) {
+                                   long[] scoreArray,
+                                   int batchSizeHint) {
         int numSplits = splitList.size();
         int numParts  = partList.size();
         int numTrees  = trees.size();
@@ -187,7 +193,8 @@ public class WeightTable {
         long t1 = System.nanoTime();
         long[] twoScores = GPUWeightCalculator.computeWeightsGPU(
             splitsData, partsData, orderings, invIndex,
-            numSplits, numParts, numTrees, n, n);
+            numSplits, numParts, numTrees, n, n,
+            batchSizeHint);
         long gpuMs = (System.nanoTime() - t1) / 1_000_000;
         Logging.info("  GPU kernel returned in %d ms", gpuMs);
 

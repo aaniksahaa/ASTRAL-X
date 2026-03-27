@@ -8,7 +8,13 @@ package astralx.gpu;
  *
  * Call tryLoad() once at startup; it returns false if the .so is missing.
  * After a successful load, computeWeightsGPU() offloads all score computation
- * to the GPU in a single kernel launch.
+ * to the GPU with adaptive split-batching to bound peak VRAM usage.
+ *
+ * batchSizeHint controls the batching:
+ *    0  — auto: the C layer queries cudaMemGetInfo after uploading static data
+ *               and picks the largest batch that fits in 75% of free VRAM.
+ *   -1  — no batching: all splits in one launch (original single-kernel behaviour).
+ *   >0  — manual override: use exactly this many splits per launch.
  */
 public class GPUWeightCalculator {
 
@@ -31,24 +37,27 @@ public class GPUWeightCalculator {
     public static boolean isLoaded() { return loaded; }
 
     /**
-     * Compute 2*score for every split on the GPU.
+     * Compute 2*score for every split on the GPU with adaptive split-batching.
      *
-     * @param splits     flat int array, numSplits × 10:
-     *                   [loTreeIdx, loLeft, loRight, loComplement, loSize,
-     *                    hiTreeIdx, hiLeft, hiRight, hiComplement, hiSize]
-     * @param parts      flat int array, numParts × 9:
-     *                   [treeIdx, lo1, hi1, lo2, hi2, sz1, sz2, sz3, frequency]
-     * @param orderings  flat int array, numTrees × numTaxa:
-     *                   orderings[t*numTaxa + pos] = taxon id
-     * @param invIndex   flat int array, numTrees × numTaxa:
-     *                   invIndex[t*numTaxa + taxon] = postorder position (-1 if absent)
-     * @param numSplits  number of candidate splits
-     * @param numParts   number of gene-tree tripartitions
-     * @param numTrees   number of gene trees
-     * @param numTaxa    total taxon count (registry size)
-     * @param totalN     total taxon count (same as numTaxa, passed to kernel)
-     * @return long[numSplits] where result[i] = 2 * score(split i);
-     *         divide each element by 2 for the final ASTRAL quartet score
+     * Static data (orderings, invIndex, parts) is uploaded to the GPU once.
+     * Splits are streamed in adaptive batches; scores are accumulated into the
+     * host result array.  This bounds peak VRAM at:
+     *
+     *   O(numTrees × numTaxa)   [orderings + invIndex, permanent]
+     * + O(numParts)              [parts, permanent]
+     * + batchSize × 48 B         [current split batch + score slice]
+     *
+     * @param splits         flat int array, numSplits × 10
+     * @param parts          flat int array, numParts × 9
+     * @param orderings      flat int array, numTrees × numTaxa
+     * @param invIndex        flat int array, numTrees × numTaxa
+     * @param numSplits      number of candidate splits
+     * @param numParts       number of gene-tree tripartitions
+     * @param numTrees       number of gene trees
+     * @param numTaxa        total taxon count (registry size)
+     * @param totalN         total taxon count (same as numTaxa, passed to kernel)
+     * @param batchSizeHint  0=auto, -1=no batching, >0=exact batch size
+     * @return long[numSplits] where result[i] = 2 * score(split i)
      */
     public static native long[] computeWeightsGPU(
         int[] splits,
@@ -59,6 +68,7 @@ public class GPUWeightCalculator {
         int numParts,
         int numTrees,
         int numTaxa,
-        int totalN
+        int totalN,
+        int batchSizeHint
     );
 }

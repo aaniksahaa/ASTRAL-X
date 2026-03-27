@@ -132,6 +132,8 @@ public class Main {
                 case "-m","--seeds"    -> { if (++i>=args.length) return false; cfg.setNumHashSeeds(Integer.parseInt(args[i])); }
                 case "--rooted"        -> cfg.setTreatAsUnrooted(false);
                 case "--unrooted"      -> cfg.setTreatAsUnrooted(true);
+                case "--no-gpu-batch"  -> cfg.setGpuBatch(false);
+                case "--gpu-batch-size" -> { if (++i>=args.length) return false; cfg.setGpuBatchSize(Integer.parseInt(args[i])); }
                 case "--verify-parse"  -> cfg.setVerifyParse(true);
                 case "--verify-hash"      -> cfg.setVerifyHash(true);
                 case "--verify-clusters"    -> cfg.setVerifyClusters(true);

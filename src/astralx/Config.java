@@ -16,6 +16,20 @@ public class Config {
     private boolean treatAsUnrooted = true;
     private SearchMode searchMode = SearchMode.LOCAL;
 
+    /**
+     * GPU split-batching control.
+     *   true  (default) — adaptive: batch size computed from free VRAM at runtime.
+     *   false           — disabled: all splits sent in one kernel launch (original behaviour).
+     */
+    private boolean gpuBatch = true;
+
+    /**
+     * Manual GPU batch size override (ignored when gpuBatch=false).
+     *   0 (default) — auto: derived from free VRAM via cudaMemGetInfo.
+     *   > 0         — use exactly this many splits per kernel launch.
+     */
+    private int gpuBatchSize = 0;
+
     private Config() {}
 
     public static Config getInstance() {
@@ -41,6 +55,10 @@ public class Config {
     public void setTreatAsUnrooted(boolean u) { this.treatAsUnrooted = u; }
     public SearchMode getSearchMode()          { return searchMode; }
     public void setSearchMode(SearchMode s)   { this.searchMode = s; }
+    public boolean isGpuBatch()               { return gpuBatch; }
+    public void setGpuBatch(boolean b)        { this.gpuBatch = b; }
+    public int getGpuBatchSize()              { return gpuBatchSize; }
+    public void setGpuBatchSize(int s)        { this.gpuBatchSize = s; }
 
     // Testing flags
     private boolean verifyParse = false;
