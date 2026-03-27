@@ -77,11 +77,22 @@ public class WeightTable {
             if (Config.getInstance().getComputeMode() == Config.ComputeMode.GPU) {
                 Logging.info("GPU library not available, falling back to CPU");
             }
-            // CPU: parallel over splits
+            // CPU: parallel over splits (TRACE: single-threaded for deterministic output)
             Collection<PartitionTable.Entry> partitions = partTable.entries();
-            Threading.processRangeParallel(numSplits, idx -> {
-                scoreArray[idx] = computeScore(splitList.get(idx), partitions, clusterTable, trees);
-            });
+            if (Logging.isTrace()) {
+                // Single-threaded for readable trace output
+                for (int idx = 0; idx < numSplits; idx++) {
+                    BipartitionSplit sp = splitList.get(idx);
+                    Logging.trace("SPLIT sz=%d|%d  lo=%s  hi=%s",
+                        sp.lo.size, sp.hi.size, sp.lo, sp.hi);
+                    scoreArray[idx] = computeScore(sp, partitions, clusterTable, trees);
+                    Logging.trace("  => score=%d", scoreArray[idx]);
+                }
+            } else {
+                Threading.processRangeParallel(numSplits, idx -> {
+                    scoreArray[idx] = computeScore(splitList.get(idx), partitions, clusterTable, trees);
+                });
+            }
         }
 
         for (int i = 0; i < numSplits; i++) {
@@ -238,9 +249,19 @@ public class WeightTable {
             int c2 = sz3 - a2 - b2;            // column constraint M3 (correct formula)
 
             // All values must be non-negative for a valid intersection matrix
-            if (a2 < 0 || b2 < 0 || c0 < 0 || c1 < 0 || c2 < 0) continue;
+            if (a2 < 0 || b2 < 0 || c0 < 0 || c1 < 0 || c2 < 0) {
+                Logging.trace("    SKIP  tGT=%d sz=%d|%d|%d lgA=%d lgB=%d "
+                    + "a=[%d,%d,%d] b=[%d,%d,%d] c=[%d,%d,%d]",
+                    p.treeIndex, sz1, sz2, sz3, lgA, lgB,
+                    a0,a1,a2, b0,b1,b2, c0,c1,c2);
+                continue;
+            }
 
             long twoQI = computeTwoQI(a0, a1, a2, b0, b1, b2, c0, c1, c2);
+            Logging.trace("    PART  tGT=%d sz=%d|%d|%d lgA=%d lgB=%d "
+                + "a=[%d,%d,%d] b=[%d,%d,%d] c=[%d,%d,%d] 2*QI=%d freq=%d",
+                p.treeIndex, sz1, sz2, sz3, lgA, lgB,
+                a0,a1,a2, b0,b1,b2, c0,c1,c2, twoQI, pe.frequency);
             twoScore += (long) pe.frequency * twoQI;
         }
 

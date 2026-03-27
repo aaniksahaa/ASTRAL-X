@@ -87,7 +87,7 @@ public class PartitionTable {
         ClusterHash h2 = buildHash(ti, rStart, rEnd, false, sz2, pref);
         ClusterHash h3 = buildHash(ti, pStart, pEnd, true,  sz3, pref); // complement
 
-        PartitionHash ph = new PartitionHash(h1, h2);
+        PartitionHash ph = new PartitionHash(h1, h2, h3);
 
         Entry existing = table.get(ph);
         if (existing != null) {
