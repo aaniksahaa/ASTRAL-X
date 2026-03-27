@@ -23,10 +23,7 @@ public class Main {
         if (!parseArgs(args, cfg)) { printUsage(); System.exit(1); }
 
         Logging.setLevel(cfg.getVerbosity());
-        Logging.info("ASTRAL-X v%s", VERSION);
-        Logging.info("Input: %s", cfg.getInputFile());
-        Logging.info("Mode: %s  Threads: %d  Seeds: %d",
-            cfg.getComputeMode(), cfg.getThreadCount(), cfg.getNumHashSeeds());
+        Banner.print(cfg);
 
         Threading.start(cfg.getThreadCount());
         long t0 = System.nanoTime();
