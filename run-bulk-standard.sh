@@ -26,6 +26,10 @@ METHODS_ARG=""                       # optional semicolon-separated methods over
 FOLDERS_ARG=""                       # optional semicolon-separated folders override
 FRESH=false
 NO_NOTIFY=false
+GENERIC_OPTS=""
+GENERIC_OPTS_SET=false
+GENERIC_OPTS_LIST_RAW=""
+GENERIC_OPTS_LIST_SET=false
 
 # Algorithm configuration
 # Available: stelar, aster, astral, treeqmc, wqfmtree, supertriplets, stp-nni, tmc
@@ -45,7 +49,15 @@ ALGORITHMS=("astralx")
 
 
 # Algorithm-specific options
+# ASTRAL-X examples:
+# GENERIC_OPTS="--search-mode full -vv"
+# GENERIC_OPTS_LIST_RAW="--search-mode local -vv;--search-mode full -vv"
+# The setting-name encoder ignores verbosity, so these become:
+#   search-mode_local
+#   search-mode_full
 STELAR_OPTS="--search-mode full -vv"
+STELAR_OPTS_LIST_RAW=""
+STELAR_OPTS_LIST=()
 ASTER_OPTS="-t 16"  # ASTER thread count
 ASTRAL_OPTS=""  # ASTRAL doesn't need special options for basic runs
 TREEQMC_OPTS=""  # TreeQMC doesn't need special options for basic runs
@@ -206,13 +218,34 @@ split_semicolon_list() {
     local -n out_arr="$2"
     out_arr=()
 
-    local work="${raw//;/ }"
-    local token
-    for token in $work; do
-      if [[ -n "$token" ]]; then
-        out_arr+=("$token")
+    local -a raw_items=()
+    local item=""
+    IFS=';' read -r -a raw_items <<< "$raw"
+    for item in "${raw_items[@]}"; do
+      item="$(echo "$item" | sed 's/^ *//;s/ *$//')"
+      if [[ -n "$item" ]]; then
+        out_arr+=("$item")
       fi
     done
+}
+
+assign_generic_opts_to_algorithm() {
+    local algorithm="$1"
+    local value="$2"
+
+    case "$algorithm" in
+      astralx) STELAR_OPTS="$value" ;;
+      aster) ASTER_OPTS="$value" ;;
+      astral) ASTRAL_OPTS="$value" ;;
+      treeqmc) TREEQMC_OPTS="$value" ;;
+      wqfmtree) WQFMTREE_OPTS="$value" ;;
+      supertriplets|stp-nni) SUPERTRIPLETS_OPTS="$value" ;;
+      tmc) TMC_OPTS="$value" ;;
+      *)
+        echo -e "${RED}Error: Unsupported algorithm '$algorithm' for generic --opts.${NC}"
+        exit 1
+        ;;
+    esac
 }
 
 get_csv_column_value() {
@@ -228,6 +261,78 @@ csv_escape() {
     local raw="$1"
     raw="${raw//\"/\"\"}"
     printf '%s' "$raw"
+}
+
+sanitize_setting_part() {
+    local value="$1"
+    value="${value// /-}"
+    value="${value//\//-}"
+    value="${value//:/-}"
+    value="${value//=/-}"
+    value="${value//,/.-}"
+    printf '%s' "$value"
+}
+
+build_setting_name_from_opts() {
+    local raw="$1"
+    local -a tokens=()
+    local -a parts=()
+    local i=0
+    local key
+    local value
+
+    if [[ -z "${raw// }" ]]; then
+      printf 'default'
+      return
+    fi
+
+    read -r -a tokens <<< "$raw"
+    while (( i < ${#tokens[@]} )); do
+      key="${tokens[$i]}"
+      case "$key" in
+        -v|-vv|-vvv|-q|--quiet)
+          ((i+=1))
+          continue
+          ;;
+        --*)
+          key="${key#--}"
+          if (( i + 1 < ${#tokens[@]} )) && [[ ! "${tokens[$((i + 1))]}" =~ ^- ]]; then
+            value="${tokens[$((i + 1))]}"
+            parts+=("$(sanitize_setting_part "$key")_$(sanitize_setting_part "$value")")
+            ((i+=2))
+          else
+            parts+=("$(sanitize_setting_part "$key")_true")
+            ((i+=1))
+          fi
+          ;;
+        -t)
+          if (( i + 1 < ${#tokens[@]} )); then
+            parts+=("threads_$(sanitize_setting_part "${tokens[$((i + 1))]}")")
+            ((i+=2))
+          else
+            ((i+=1))
+          fi
+          ;;
+        -m)
+          if (( i + 1 < ${#tokens[@]} )); then
+            parts+=("seeds_$(sanitize_setting_part "${tokens[$((i + 1))]}")")
+            ((i+=2))
+          else
+            ((i+=1))
+          fi
+          ;;
+        *)
+          ((i+=1))
+          ;;
+      esac
+    done
+
+    if [[ ${#parts[@]} -eq 0 ]]; then
+      printf 'default'
+    else
+      local IFS='__'
+      printf '%s' "${parts[*]}"
+    fi
 }
 
 method_opts_for_algorithm() {
@@ -357,19 +462,6 @@ run_algorithm_and_write_stats() {
     local INNER_FOLDER_NAME="$6"
     local ALGORITHM="$7"         # algorithm name (astralx, astral, etc.)
 
-    mkdir -p "$OUT_DIR"
-
-    local OUT_FILE="${OUT_DIR%/}/output-${ALGORITHM}.tre"
-    local STAT_FILE="${OUT_DIR%/}/stat-${ALGORITHM}.csv"
-
-    # If stat file exists and not FRESH -> skip
-    if [[ "$FRESH" = false && -f "$STAT_FILE" ]]; then
-        echo "      SKIPPING: ${STAT_FILE} already exists. Use --fresh to force rerun."
-        return 0
-    fi
-
-    echo "      Running ${ALGORITHM^^} (output -> $OUT_FILE)"
-
     local START_NS
     local END_NS
     local ELAPSED_MS
@@ -387,6 +479,23 @@ run_algorithm_and_write_stats() {
     METHOD_OPTS_RAW="$(method_opts_for_algorithm "$ALGORITHM")"
     local METHOD_OPTS_ESCAPED
     METHOD_OPTS_ESCAPED="$(csv_escape "$METHOD_OPTS_RAW")"
+    local SETTING_NAME
+    SETTING_NAME="$(build_setting_name_from_opts "$METHOD_OPTS_RAW")"
+    if [[ "$ALGORITHM" == "astralx" ]]; then
+      OUT_DIR="${OUT_DIR%/}/${SETTING_NAME}"
+    fi
+
+    mkdir -p "$OUT_DIR"
+
+    local OUT_FILE="${OUT_DIR%/}/output-${ALGORITHM}.tre"
+    local STAT_FILE="${OUT_DIR%/}/stat-${ALGORITHM}.csv"
+
+    if [[ "$FRESH" = false && -f "$STAT_FILE" ]]; then
+        echo "      SKIPPING: ${STAT_FILE} already exists. Use --fresh to force rerun."
+        return 0
+    fi
+
+    echo "      Running ${ALGORITHM^^} [${SETTING_NAME}] (output -> $OUT_FILE)"
     case "$ALGORITHM" in
       "astralx")
         if [[ -n "$STELAR_OPTS" ]]; then
@@ -394,7 +503,7 @@ run_algorithm_and_write_stats() {
             --stelar-root "$STELAR_X_ROOT" \
             --input "$ALL_GT_FILE" \
             --output "$OUT_FILE" \
-            --stelar-opts "$STELAR_OPTS" \
+            --opts "$STELAR_OPTS" \
             --no-notify
         else
           "$RUN_WITH_MONITOR_SCRIPT" \
@@ -491,8 +600,8 @@ run_algorithm_and_write_stats() {
       echo -e "      ${RED}ERROR: ${ALGORITHM^^} failed with exit code $ALGORITHM_EXIT_CODE${NC}"
       echo -e "      ${RED}Skipping CSV writing and RF calculation for this run${NC}"
       echo -e "      ${YELLOW}Continuing with next dataset...${NC}"
-      local FAIL_STATS_HEADER="alg,opts,folder,inner_folder,replicate,rf-rate,running-time-s,max-cpu-mb,max-gpu-mb,exit-code"
-      local FAIL_STATS_ROW="${ALGORITHM},\"${METHOD_OPTS_ESCAPED}\",${FOLDER_NAME},${INNER_FOLDER_NAME},${REPLICATE_NAME},NA,${RUNNING_TIME},${MAX_CPU_MB},${MAX_GPU_MB},${ALGORITHM_EXIT_CODE}"
+      local FAIL_STATS_HEADER="alg,setting,opts,folder,inner_folder,replicate,rf-rate,running-time-s,max-cpu-mb,max-gpu-mb,exit-code"
+      local FAIL_STATS_ROW="${ALGORITHM},${SETTING_NAME},\"${METHOD_OPTS_ESCAPED}\",${FOLDER_NAME},${INNER_FOLDER_NAME},${REPLICATE_NAME},NA,${RUNNING_TIME},${MAX_CPU_MB},${MAX_GPU_MB},${ALGORITHM_EXIT_CODE}"
       send_run_notification "$ALGORITHM" "$FOLDER_NAME" "$INNER_FOLDER_NAME" "$REPLICATE_NAME" "FAILED" "NA" "$RUNNING_TIME" "$MAX_CPU_MB" "$MAX_GPU_MB" "$OUT_FILE" "${METHOD_OPTS_RAW:-<default/none>}" "$FAIL_STATS_HEADER" "$FAIL_STATS_ROW"
       return 1
     fi
@@ -545,8 +654,8 @@ run_algorithm_and_write_stats() {
 
     # Write stat CSV (overwrite per run)
     # Header: alg,opts,folder,inner_folder,replicate,rf-rate,running-time-s,max-cpu-mb,max-gpu-mb,exit-code
-    local STATS_HEADER="alg,opts,folder,inner_folder,replicate,rf-rate,running-time-s,max-cpu-mb,max-gpu-mb,exit-code"
-    local STATS_ROW="${ALGORITHM},\"${METHOD_OPTS_ESCAPED}\",${FOLDER_NAME},${INNER_FOLDER_NAME},${REPLICATE_NAME},${RF_RATE},${RUNNING_TIME},${MAX_CPU_MB},${MAX_GPU_MB},${ALGORITHM_EXIT_CODE}"
+    local STATS_HEADER="alg,setting,opts,folder,inner_folder,replicate,rf-rate,running-time-s,max-cpu-mb,max-gpu-mb,exit-code"
+    local STATS_ROW="${ALGORITHM},${SETTING_NAME},\"${METHOD_OPTS_ESCAPED}\",${FOLDER_NAME},${INNER_FOLDER_NAME},${REPLICATE_NAME},${RF_RATE},${RUNNING_TIME},${MAX_CPU_MB},${MAX_GPU_MB},${ALGORITHM_EXIT_CODE}"
     {
       echo "$STATS_HEADER"
       echo "$STATS_ROW"
@@ -584,12 +693,40 @@ while [[ $# -gt 0 ]]; do
       FOLDERS_ARG="$2"
       shift 2
       ;;
-    --stelar-opts)
+    --opts|--alg-opts)
+      GENERIC_OPTS="$2"
+      GENERIC_OPTS_SET=true
+      shift 2
+      ;;
+    --opts=*|--alg-opts=*)
+      GENERIC_OPTS="${1#*=}"
+      GENERIC_OPTS_SET=true
+      shift
+      ;;
+    --opts-list|--alg-opts-list)
+      GENERIC_OPTS_LIST_RAW="$2"
+      GENERIC_OPTS_LIST_SET=true
+      shift 2
+      ;;
+    --opts-list=*|--alg-opts-list=*)
+      GENERIC_OPTS_LIST_RAW="${1#*=}"
+      GENERIC_OPTS_LIST_SET=true
+      shift
+      ;;
+    --stelar-opts|--astralx-opts)
       STELAR_OPTS="$2"
       shift 2
       ;;
-    --stelar-opts=*)
+    --stelar-opts=*|--astralx-opts=*)
       STELAR_OPTS="${1#*=}"
+      shift
+      ;;
+    --stelar-opts-list|--astralx-opts-list)
+      STELAR_OPTS_LIST_RAW="$2"
+      shift 2
+      ;;
+    --stelar-opts-list=*|--astralx-opts-list=*)
+      STELAR_OPTS_LIST_RAW="${1#*=}"
       shift
       ;;
     --aster-opts)
@@ -652,14 +789,18 @@ while [[ $# -gt 0 ]]; do
       cat <<EOF
 Usage: $0 [--base-dir /path/to/base] [--dataset-dir /path/to/datasets] [--method "m1;m2"] [--folder "f1;f2"] [--fresh] [--no-notify]
 
-Multi-algorithm dataset runner supporting STELAR, ASTER, ASTRAL, TreeQMC, wQFMtree, SuperTriplets, and TMC.
+Multi-algorithm dataset runner supporting ASTRAL-X, ASTER, ASTRAL, TreeQMC, wQFMtree, SuperTriplets, and TMC.
 
 --base-dir, -b      Base directory containing RF/ and external tools (overrides default)
 --dataset-dir, -d   Dataset directory (overrides default BASE_DIR/datasets)
 --stelar-x-root     STELAR-X root directory (overrides auto-detection from script location)
 --method, -m        Optional semicolon-separated methods (e.g. "stelar;astral;aster")
 --folder, -f        Optional semicolon-separated folders (e.g. "37-taxon;48-taxon")
---stelar-opts       Override default STELAR_OPTS
+--opts, --alg-opts  Override the default option string for the selected algorithm
+--opts-list, --alg-opts-list
+                    Semicolon-separated list of option strings to loop over for the selected algorithm
+--stelar-opts       Compatibility alias for ASTRAL-X-specific --opts
+--stelar-opts-list  Compatibility alias for ASTRAL-X-specific --opts-list
 --aster-opts        Override default ASTER_OPTS
 --astral-opts       Override default ASTRAL_OPTS
 --treeqmc-opts      Override default TREEQMC_OPTS
@@ -671,6 +812,8 @@ Multi-algorithm dataset runner supporting STELAR, ASTER, ASTRAL, TreeQMC, wQFMtr
 --help, -h          Show this help
 
 Algorithms available: astralx, aster, astral, treeqmc, wqfmtree, supertriplets, stp-nni, tmc
+Example ASTRAL-X setting sweep:
+  --method "astralx" --opts-list "--search-mode local -vv;--search-mode full -vv"
 Algorithm root directories:
   STELAR-X:       Auto-detected from script location
   ASTER:          \${STELAR_X_ROOT}/baselines/ASTER
@@ -706,6 +849,34 @@ if [[ -n "$METHODS_ARG" ]]; then
     }
     ALGORITHMS+=("$normalized_method")
   done
+fi
+
+if [[ "$GENERIC_OPTS_SET" == true || "$GENERIC_OPTS_LIST_SET" == true ]]; then
+  if [[ ${#ALGORITHMS[@]} -ne 1 ]]; then
+    echo -e "${RED}Error: --opts and --opts-list require exactly one selected algorithm in --method.${NC}"
+    exit 1
+  fi
+
+  assign_generic_opts_to_algorithm "${ALGORITHMS[0]}" "$GENERIC_OPTS"
+
+  if [[ "$GENERIC_OPTS_LIST_SET" == true ]]; then
+    case "${ALGORITHMS[0]}" in
+      astralx)
+        STELAR_OPTS_LIST_RAW="$GENERIC_OPTS_LIST_RAW"
+        ;;
+      *)
+        echo -e "${RED}Error: --opts-list is currently supported only for astralx in this script.${NC}"
+        exit 1
+        ;;
+    esac
+  fi
+fi
+
+if [[ -n "$STELAR_OPTS_LIST_RAW" ]]; then
+  split_semicolon_list "$STELAR_OPTS_LIST_RAW" STELAR_OPTS_LIST
+fi
+if [[ ${#STELAR_OPTS_LIST[@]} -eq 0 ]]; then
+  STELAR_OPTS_LIST=("$STELAR_OPTS")
 fi
 
 if [[ -n "$FOLDERS_ARG" ]]; then
@@ -869,11 +1040,21 @@ for folder in "${folders[@]}"; do
                 # output directory for this replicate and algorithm
                 OUT_DIR="${DATASET_DIR%/}/$folder/$GT_FOLDER/${algorithm}_outputs"
 
-                # run and write per-run stat file (skips if stat exists and not fresh)
-                if ! run_algorithm_and_write_stats "$ALL_GT_FILE" "$TRUE_TREE" "$OUT_DIR" "$REPL" "$folder" "$inner_folder" "$algorithm"; then
-                    echo -e "      ${RED}Failed to process $algorithm for ${folder}/${inner_folder}/${REPL}${NC}"
-                    echo -e "      ${YELLOW}Continuing with next algorithm...${NC}"
-                    continue
+                if [[ "$algorithm" == "astralx" ]]; then
+                    for ASTRALX_OPTS_ITEM in "${STELAR_OPTS_LIST[@]}"; do
+                        STELAR_OPTS="$ASTRALX_OPTS_ITEM"
+                        if ! run_algorithm_and_write_stats "$ALL_GT_FILE" "$TRUE_TREE" "$OUT_DIR" "$REPL" "$folder" "$inner_folder" "$algorithm"; then
+                            echo -e "      ${RED}Failed to process $algorithm for ${folder}/${inner_folder}/${REPL}${NC}"
+                            echo -e "      ${YELLOW}Continuing with next setting or algorithm...${NC}"
+                            continue
+                        fi
+                    done
+                else
+                    if ! run_algorithm_and_write_stats "$ALL_GT_FILE" "$TRUE_TREE" "$OUT_DIR" "$REPL" "$folder" "$inner_folder" "$algorithm"; then
+                        echo -e "      ${RED}Failed to process $algorithm for ${folder}/${inner_folder}/${REPL}${NC}"
+                        echo -e "      ${YELLOW}Continuing with next algorithm...${NC}"
+                        continue
+                    fi
                 fi
             done
         done

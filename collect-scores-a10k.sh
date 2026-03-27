@@ -33,15 +33,12 @@ fi
 
 DATA_DIR="$(realpath "$DATA_DIR")"
 MERGED_CSV="${DATA_DIR}/a10k_astralx_scores_merged.csv"
-echo "alg,replicate,tree_type,rf-rate,optimal-quartet-score,running-time-s,max-cpu-mb,max-gpu-mb" > "$MERGED_CSV"
+echo "alg,setting,replicate,tree_type,rf-rate,optimal-quartet-score,running-time-s,max-cpu-mb,max-gpu-mb" > "$MERGED_CSV"
 
 for i in $(seq "$START_REP" "$END_REP"); do
-  for tree_type in estimated true; do
-    STAT_FILE="${DATA_DIR}/10k-simphy/R${i}/astralx_outputs/${tree_type}/stat-astralx.csv"
-    if [[ -f "$STAT_FILE" ]]; then
-      tail -n +2 "$STAT_FILE" >> "$MERGED_CSV"
-    fi
-  done
+  while IFS= read -r -d '' stat_file; do
+    tail -n +2 "$stat_file" >> "$MERGED_CSV"
+  done < <(find "${DATA_DIR}/10k-simphy/R${i}/astralx_outputs" -type f -name 'stat-astralx.csv' -print0 2>/dev/null | sort -z)
 done
 
 echo "Merged A10K ASTRAL-X stats saved to: $MERGED_CSV"

@@ -8,9 +8,12 @@ echo "=== Building ASTRAL-X ==="
 rm -rf "$BUILD"
 mkdir -p "$BUILD"
 
-find "$SRC" -name "*.java" > /tmp/astralx_src.txt
-javac -d "$BUILD" -sourcepath "$SRC" @/tmp/astralx_src.txt
-rm /tmp/astralx_src.txt
+TMP_SRC_LIST="$(mktemp /tmp/astralx_src.XXXXXX.txt)"
+trap 'rm -f "$TMP_SRC_LIST"' EXIT
+find "$SRC" -name "*.java" > "$TMP_SRC_LIST"
+javac -d "$BUILD" -sourcepath "$SRC" @"$TMP_SRC_LIST"
+rm -f "$TMP_SRC_LIST"
+trap - EXIT
 
 echo "Build OK -> $BUILD"
 echo "Run: java -cp $BUILD astralx.Main -i <input.tre> -vv"

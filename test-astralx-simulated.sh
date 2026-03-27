@@ -28,6 +28,77 @@ GPU_MONITOR=true
 NO_NOTIFY=false
 DEBUG=0
 
+sanitize_setting_part() {
+  local value="$1"
+  value="${value// /-}"
+  value="${value//\//-}"
+  value="${value//:/-}"
+  value="${value//=/-}"
+  value="${value//,/.-}"
+  printf '%s' "$value"
+}
+
+build_setting_name_from_opts() {
+  local raw="$1"
+  local -a tokens=()
+  local -a parts=()
+  local i key value
+
+  if [[ -z "${raw// }" ]]; then
+    printf 'default'
+    return
+  fi
+
+  read -r -a tokens <<< "$raw"
+  i=0
+  while (( i < ${#tokens[@]} )); do
+    key="${tokens[$i]}"
+    case "$key" in
+      -v|-vv|-vvv|-q|--quiet)
+        ((i+=1))
+        continue
+        ;;
+      --*)
+        key="${key#--}"
+        if (( i + 1 < ${#tokens[@]} )) && [[ ! "${tokens[$((i + 1))]}" =~ ^- ]]; then
+          value="${tokens[$((i + 1))]}"
+          parts+=("$(sanitize_setting_part "$key")_$(sanitize_setting_part "$value")")
+          ((i+=2))
+        else
+          parts+=("$(sanitize_setting_part "$key")_true")
+          ((i+=1))
+        fi
+        ;;
+      -t)
+        if (( i + 1 < ${#tokens[@]} )); then
+          parts+=("threads_$(sanitize_setting_part "${tokens[$((i + 1))]}")")
+          ((i+=2))
+        else
+          ((i+=1))
+        fi
+        ;;
+      -m)
+        if (( i + 1 < ${#tokens[@]} )); then
+          parts+=("seeds_$(sanitize_setting_part "${tokens[$((i + 1))]}")")
+          ((i+=2))
+        else
+          ((i+=1))
+        fi
+        ;;
+      *)
+        ((i+=1))
+        ;;
+    esac
+  done
+
+  if [[ ${#parts[@]} -eq 0 ]]; then
+    printf 'default'
+  else
+    local IFS='__'
+    printf '%s' "${parts[*]}"
+  fi
+}
+
 print_help() {
   cat <<EOF
 test-astralx-simulated.sh
@@ -43,8 +114,9 @@ Optional:
   --simphy-data-dir    Custom path to simphy/data root
   --astralx-root       Path to ASTRAL-X root
   --stelar-root        Compatibility alias for --astralx-root
-  --astralx-opts       Extra args for ASTRAL-X run (default: "${ASTRALX_OPTS}")
-  --stelar-opts        Compatibility alias for --astralx-opts
+  --opts, --alg-opts   Extra args for the selected algorithm run (default: "${ASTRALX_OPTS}")
+  --astralx-opts       Compatibility alias for --opts
+  --stelar-opts        Compatibility alias for --opts
   --sb                 Substitution/birthrate parameter
   --spmin              Population size minimum
   --spmax              Population size maximum
@@ -56,6 +128,12 @@ Optional:
   --no-gpu-monitor     Disable GPU monitoring
   --no-notify, -nn     Disable ntfy notifications
   --debug              Enable shell tracing
+
+Examples:
+  ./test-astralx-simulated.sh -t 100 -g 100 -r R1 --fresh
+  ./test-astralx-simulated.sh -t 100 -g 100 -r R1 --fresh --opts "--search-mode local -vv"
+  ./test-astralx-simulated.sh -t 100 -g 100 -r R1 --fresh --opts "--search-mode full -vv"
+  Verbosity is ignored when constructing the setting name.
 EOF
 }
 
@@ -67,7 +145,7 @@ while [[ $# -gt 0 ]]; do
     --simphy-dir) SIMPHY_DIR="$2"; SIMPHY_DIR_SET=true; shift 2 ;;
     --simphy-data-dir) SIMPHY_DATA_DIR="$2"; SIMPHY_DATA_DIR_SET=true; shift 2 ;;
     --astralx-root|--stelar-root) ASTRALX_ROOT="$2"; ASTRALX_ROOT_SET=true; shift 2 ;;
-    --astralx-opts|--stelar-opts) ASTRALX_OPTS="$2"; shift 2 ;;
+    --opts|--alg-opts|--astralx-opts|--stelar-opts) ASTRALX_OPTS="$2"; shift 2 ;;
     --base-dir|-b) BASE_DIR="$2"; shift 2 ;;
     --sb) SB="$2"; shift 2 ;;
     --spmin) SPMIN="$2"; shift 2 ;;
@@ -95,6 +173,8 @@ if [[ "$ASTRALX_ROOT_SET" == false ]]; then
   ASTRALX_ROOT="."
 fi
 
+SETTING_NAME="$(build_setting_name_from_opts "$ASTRALX_OPTS")"
+
 PAIR="${TAXA_NUM}_${GENE_TREES}"
 if [[ "$SIMPHY_DATA_DIR_SET" == true ]]; then
   if [[ "$USE_LEGACY_LAYOUT" == true ]]; then
@@ -110,12 +190,13 @@ else
   fi
 fi
 
-STAT_FILE="${SIMPHY_RUN_DIR%/}/stat-astralx.csv"
-LOCK_FILE="${SIMPHY_RUN_DIR%/}/.astralx.lock"
 ALL_GT_FILE="${SIMPHY_RUN_DIR%/}/all_gt.tre"
 TRUE_SPECIES_TREE="${SIMPHY_RUN_DIR%/}/s_tree.trees"
-OUT_ASTRALX="${SIMPHY_RUN_DIR%/}/out-astralx.tre"
-RUN_LOG="${SIMPHY_RUN_DIR%/}/.astralx_run.log"
+RESULTS_DIR="${SIMPHY_RUN_DIR%/}/astralx_outputs/${SETTING_NAME}"
+STAT_FILE="${RESULTS_DIR%/}/stat-astralx.csv"
+LOCK_FILE="${RESULTS_DIR%/}/.astralx.lock"
+OUT_ASTRALX="${RESULTS_DIR%/}/out-astralx.tre"
+RUN_LOG="${RESULTS_DIR%/}/.astralx_run.log"
 
 if [[ "${DEBUG:-0}" == "1" ]]; then
   set -x
@@ -143,12 +224,13 @@ if [[ ! -f "$ALL_GT_FILE" ]]; then
     REPLICATE_COUNT="$REPLICATE"
     REPLICATE="R${REPLICATE}"
     SIMPHY_RUN_DIR="${SIMPHY_RUN_DIR%/*}/R${REPLICATE_COUNT}"
-    STAT_FILE="${SIMPHY_RUN_DIR%/}/stat-astralx.csv"
-    LOCK_FILE="${SIMPHY_RUN_DIR%/}/.astralx.lock"
     ALL_GT_FILE="${SIMPHY_RUN_DIR%/}/all_gt.tre"
     TRUE_SPECIES_TREE="${SIMPHY_RUN_DIR%/}/s_tree.trees"
-    OUT_ASTRALX="${SIMPHY_RUN_DIR%/}/out-astralx.tre"
-    RUN_LOG="${SIMPHY_RUN_DIR%/}/.astralx_run.log"
+    RESULTS_DIR="${SIMPHY_RUN_DIR%/}/astralx_outputs/${SETTING_NAME}"
+    STAT_FILE="${RESULTS_DIR%/}/stat-astralx.csv"
+    LOCK_FILE="${RESULTS_DIR%/}/.astralx.lock"
+    OUT_ASTRALX="${RESULTS_DIR%/}/out-astralx.tre"
+    RUN_LOG="${RESULTS_DIR%/}/.astralx_run.log"
   fi
 
   SIM_CMD=(./sim.sh -t "$TAXA_NUM" -g "$GENE_TREES" -r "$REPLICATE" -rs "$REPLICATE_COUNT" --sb "$SB" --spmin "$SPMIN" --spmax "$SPMAX")
@@ -170,7 +252,7 @@ if [[ ! -f "$ALL_GT_FILE" ]]; then
   fi
 fi
 
-mkdir -p "${SIMPHY_RUN_DIR%/}"
+mkdir -p "${RESULTS_DIR%/}"
 rm -f "$LOCK_FILE" "$RUN_LOG"
 touch "$LOCK_FILE"
 
@@ -178,7 +260,9 @@ echo "Parameters:"
 echo "  taxa_num:       $TAXA_NUM"
 echo "  gene_trees:     $GENE_TREES"
 echo "  replicate:      $REPLICATE"
+echo "  setting:        $SETTING_NAME"
 echo "  simphy run dir: $SIMPHY_RUN_DIR"
+echo "  results dir:    $RESULTS_DIR"
 echo "  output tree:    $OUT_ASTRALX"
 echo "  stat file:      $STAT_FILE"
 echo
@@ -220,8 +304,8 @@ if [[ -f "$OUT_ASTRALX" && -f "$TRUE_SPECIES_TREE" ]]; then
   fi
 fi
 
-echo "alg,num-taxa,gene-trees,replicate,sb,spmin,spmax,rf-rate,optimal-quartet-score,running-time-s,max-cpu-mb,max-gpu-mb" > "$STAT_FILE"
-echo "astralx,${TAXA_NUM},${GENE_TREES},${REPLICATE},${SB},${SPMIN},${SPMAX},${RF_RATE},${OPTIMAL_QUARTET_SCORE},${RUNNING_TIME},${MAX_CPU_MB},${MAX_GPU_MB}" >> "$STAT_FILE"
+echo "alg,setting,num-taxa,gene-trees,replicate,sb,spmin,spmax,rf-rate,optimal-quartet-score,running-time-s,max-cpu-mb,max-gpu-mb" > "$STAT_FILE"
+echo "astralx,${SETTING_NAME},${TAXA_NUM},${GENE_TREES},${REPLICATE},${SB},${SPMIN},${SPMAX},${RF_RATE},${OPTIMAL_QUARTET_SCORE},${RUNNING_TIME},${MAX_CPU_MB},${MAX_GPU_MB}" >> "$STAT_FILE"
 
 if [[ "$ASTRALX_EXIT_CODE" -ne 0 ]]; then
   rm -f "$LOCK_FILE"

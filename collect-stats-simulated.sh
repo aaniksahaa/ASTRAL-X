@@ -3,7 +3,7 @@
 # Merges stat-*.csv files under simphy/data into one combined CSV file
 # and appends gt-gt,gt-st from a stat-sim.csv in the same directory (if present).
 # Handles header mismatches by taking the union of columns, filling missing ones with empty values.
-# Outputs columns in the prescribed order: alg,num-taxa,gene-trees,replicate,sb,spmin,spmax,rf-rate,running-time-s,max-cpu-mb,max-gpu-mb,gt-gt,gt-st
+# Outputs columns in the prescribed order: alg,setting,num-taxa,gene-trees,replicate,sb,spmin,spmax,rf-rate,running-time-s,max-cpu-mb,max-gpu-mb,gt-gt,gt-st
 #
 # Usage:
 #   ./collect-stats-simulated.sh
@@ -107,7 +107,7 @@ norm_line() {
 }
 
 # Define the prescribed header order
-PRESCRIBED_HEADER="alg,num-taxa,gene-trees,replicate,sb,spmin,spmax,rf-rate,running-time-s,max-cpu-mb,max-gpu-mb,gt-gt,gt-st"
+PRESCRIBED_HEADER="alg,setting,num-taxa,gene-trees,replicate,sb,spmin,spmax,rf-rate,running-time-s,max-cpu-mb,max-gpu-mb,gt-gt,gt-st"
 
 # Write prescribed header to output
 printf "%s\n" "$PRESCRIBED_HEADER" > "$OUT_FILE"
@@ -133,7 +133,23 @@ for stat_file in "${all_stat_files[@]}"; do
 
   # Process stat-sim.csv for gt-gt, gt-st
   dir=$(dirname "$stat_file")
-  stat_sim="${dir%/}/stat-sim.csv"
+  setting_name="default"
+  dir_base="$(basename "$dir")"
+  if [[ "$dir_base" == *"_"* ]]; then
+    setting_name="$dir_base"
+  fi
+  stat_sim=""
+  search_dir="$dir"
+  while [[ "$search_dir" != "/" && "$search_dir" != "." ]]; do
+    if [[ -f "${search_dir%/}/stat-sim.csv" ]]; then
+      stat_sim="${search_dir%/}/stat-sim.csv"
+      break
+    fi
+    search_dir="$(dirname "$search_dir")"
+  done
+  if [[ -z "$stat_sim" && -f "./stat-sim.csv" ]]; then
+    stat_sim="./stat-sim.csv"
+  fi
   gt_gt=""
   gt_st=""
 
@@ -148,7 +164,7 @@ for stat_file in "${all_stat_files[@]}"; do
   fi
 
   # Process data rows, mapping to prescribed header
-  awk -F, -v OFS=',' -v header="$file_header" -v prescribed="$PRESCRIBED_HEADER" -v gt_gt="$gt_gt" -v gt_st="$gt_st" '
+  awk -F, -v OFS=',' -v header="$file_header" -v prescribed="$PRESCRIBED_HEADER" -v gt_gt="$gt_gt" -v gt_st="$gt_st" -v setting_name="$setting_name" '
   BEGIN {
     split(header, h, ",");
     split(prescribed, u, ",");
@@ -169,6 +185,7 @@ for stat_file in "${all_stat_files[@]}"; do
     # Set gt-gt and gt-st
     out[length(u)-1]=gt_gt;
     out[length(u)]=gt_st;
+    if (out[2] == "") out[2]=setting_name;
     # Build output line
     line="";
     for (i=1; i<=length(u); i++) {

@@ -29,8 +29,10 @@ Required:
 Optional:
   --astralx-root        Path to ASTRAL-X root directory (default: current directory)
   --stelar-root         Compatibility alias for --astralx-root
-  --astralx-opts "..."  Extra ASTRAL-X options passed to run.sh
-  --stelar-opts "..."   Compatibility alias for --astralx-opts
+  --opts "..."          Extra algorithm options passed to run.sh
+  --alg-opts "..."      Alias for --opts
+  --astralx-opts "..."  Compatibility alias for --opts
+  --stelar-opts "..."   Compatibility alias for --opts
   --no-time-monitor     Disable time monitoring
   --no-gpu-monitor      Disable GPU monitoring
   --no-notify, -nn      Disable ntfy notifications
@@ -45,7 +47,7 @@ while [[ $# -gt 0 ]]; do
     -i|--input) INPUT_FILE="$2"; shift 2 ;;
     -o|--output) OUTPUT_FILE="$2"; shift 2 ;;
     --astralx-root|--stelar-root) ASTRALX_ROOT="$2"; shift 2 ;;
-    --astralx-opts|--stelar-opts)
+    --opts|--alg-opts|--astralx-opts|--stelar-opts)
       read -r -a TMP_OPTS <<< "$2"
       ASTRALX_ARGS+=("${TMP_OPTS[@]}")
       shift 2

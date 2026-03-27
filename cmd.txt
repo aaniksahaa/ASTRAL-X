@@ -1,31 +1,147 @@
-# ASTRAL-X working commands
+# ASTRAL-X research command sheet
+#
+# Notes:
+# - Use generic algorithm option flags everywhere: --opts / --opts-list
+# - For ASTRAL-X, result-affecting settings are stored under:
+#     astralx_outputs/<setting>/...
+#   or for A10K:
+#     astralx_outputs/<tree_type>/<setting>/...
+# - Verbosity flags such as -v / -vv do not affect the setting name
+# - Common setting names:
+#     --opts "--search-mode local"  -> search-mode_local
+#     --opts "--search-mode full"   -> search-mode_full
 
+
+./run-bulk-simulated.sh --method astralx --num-replicates 5 --opts-list "--search-mode local;--search-mode full"
+
+./collect-stats-simulated.sh --simphy-dir ./simphy --out as.csv
+
+
+###############################################################################
 # Build
+###############################################################################
+
 bash build.sh
 
-# Core runner
-./run.sh -i all_gt_bs_rooted_37.tre -o /tmp/astralx37_local.tre -vv
+
+###############################################################################
+# Core single-run examples
+###############################################################################
+
+# 37-taxon style local/full runs
+./run.sh -i all_gt_bs_rooted_37.tre -o /tmp/astralx37_local.tre --search-mode local -vv
 ./run.sh -i all_gt_bs_rooted_37.tre -o /tmp/astralx37_full.tre --search-mode full -vv
 
-# Compatibility wrapper
-./run-astralx.sh -i all_gt_bs_rooted_37.tre -o /tmp/astralx37_full_via_wrapper.tre --search-mode full -vv
+# Wrapper alias
+./run-astralx.sh -i all_gt_bs_rooted_37.tre -o /tmp/astralx37_full_wrapper.tre --search-mode full -vv
 
-# Monitored standard run on 37 taxa
-./run-astralx-with-monitor.sh -i all_gt_bs_rooted_37.tre -o /tmp/astralx37_monitored.tre --search-mode full -vv --no-notify --no-build
+# Monitored run
+./run-astralx-with-monitor.sh -i all_gt_bs_rooted_37.tre -o /tmp/astralx37_monitored.tre --opts "--search-mode full -vv" --no-notify --no-build
 
-# Simulate 100 taxa, 100 gene trees, 1 replicate
+
+###############################################################################
+# Simulation generation
+###############################################################################
+
+# 100 taxa, 100 gene trees
 ./sim.sh -t 100 -g 100 --sb 0.000001 --spmin 100000 --spmax 200000 -rs 1 --fresh
 
-# Run ASTRAL-X on that simulated replicate and write stat-astralx.csv
-./test-astralx-simulated.sh -t 100 -g 100 --sb 0.000001 --spmin 100000 --spmax 200000 -r R1 --fresh
-
-./test-astralx-simulated.sh -t 100 -g 100 --sb 0.000001 --spmin 100000 --spmax 200000 -r R1 --fresh --astralx-opts "--search-mode local -vv"
+# 1000 taxa, 1000 gene trees
+./sim.sh -t 1000 -g 1000 --sb 0.000001 --spmin 100000 --spmax 200000 -rs 1 --fresh
 
 
-# Collect merged simulated stats
-./collect-stats-simulated.sh --simphy-dir ./simphy --out /tmp/astralx-sim-stats.csv
+###############################################################################
+# Simulated ASTRAL-X testing
+###############################################################################
 
-# Example output locations from the validated run above
-simphy/data/t_100_g_100_sb_0.000001_spmin_100000_spmax_200000/R1/out-astralx.tre
-simphy/data/t_100_g_100_sb_0.000001_spmin_100000_spmax_200000/R1/out-astralx_stats.csv
-simphy/data/t_100_g_100_sb_0.000001_spmin_100000_spmax_200000/R1/stat-astralx.csv
+# Single simulated replicate, local search
+./test-astralx-simulated.sh -t 100 -g 100 --sb 0.000001 --spmin 100000 --spmax 200000 -r R1 --fresh --opts "--search-mode local"
+
+# Single simulated replicate, full search
+./test-astralx-simulated.sh -t 100 -g 100 --sb 0.000001 --spmin 100000 --spmax 200000 -r R1 --fresh --opts "--search-mode full"
+
+# Larger simulated case
+./test-astralx-simulated.sh -t 1000 -g 1000 --sb 0.000001 --spmin 100000 --spmax 200000 -r R1 --fresh --opts "--search-mode full"
+
+# The script can auto-run sim.sh if the matching simulated dataset is missing
+
+
+###############################################################################
+# Simulated stats collection
+###############################################################################
+
+./collect-stats-simulated.sh --simphy-dir ./simphy --out /tmp/astralx-simulated-stats.csv
+
+
+###############################################################################
+# Bulk simulated sweeps
+###############################################################################
+
+# One setting only
+./run-bulk-simulated.sh --method astralx --num-replicates 1 --opts "--search-mode full"
+
+# Sweep over both main search modes
+./run-bulk-simulated.sh --method astralx --num-replicates 1 --opts-list "--search-mode local;--search-mode full"
+
+
+###############################################################################
+# Standard dataset bulk runs
+###############################################################################
+
+# All configured standard folders with one setting
+./run-bulk-standard.sh --method "astralx" --opts "--search-mode full"
+
+# All configured standard folders with both local and full search
+./run-bulk-standard.sh --method "astralx" --opts-list "--search-mode local;--search-mode full"
+
+# One standard folder only, both settings, force rerun
+./run-bulk-standard.sh --method "astralx" --folder "37-taxon" --opts-list "--search-mode local;--search-mode full" --fresh
+
+
+###############################################################################
+# Standard dataset stats collection
+###############################################################################
+
+./collect-stats-standard.sh --dataset-dir /home/aaniksahaa/research/datasets/standard --output /tmp/astralx-standard-stats.csv
+
+
+###############################################################################
+# A10K runs
+###############################################################################
+
+# Estimated gene trees, one setting
+./run-a10k.sh --data-dir /home/user/10k-astral-dataset --tree-type estimated --opts "--search-mode full"
+
+# Estimated gene trees, both local and full search
+./run-a10k.sh --data-dir /home/user/10k-astral-dataset --tree-type estimated --opts-list "--search-mode local;--search-mode full"
+
+# Estimated gene trees, selected replicate range
+./run-a10k.sh --data-dir /home/user/10k-astral-dataset --tree-type estimated --start-rep 1 --end-rep 5 --opts "--search-mode full"
+
+# True gene trees, selected replicate list
+./run-a10k.sh --data-dir /home/user/10k-astral-dataset --tree-type true --replicates "R1,R3,R5" --opts "--search-mode local"
+
+# True gene trees, selected replicate list, both settings
+./run-a10k.sh --data-dir /home/user/10k-astral-dataset --tree-type true --replicates "R1,R3,R5" --opts-list "--search-mode local;--search-mode full"
+
+
+###############################################################################
+# A10K stats collection
+###############################################################################
+
+./collect-scores-a10k.sh --data-dir /home/user/10k-astral-dataset --start-rep 1 --end-rep 20
+
+
+###############################################################################
+# Example output paths
+###############################################################################
+
+# Simulated
+simphy/data/t_100_g_100_sb_0.000001_spmin_100000_spmax_200000/R1/astralx_outputs/search-mode_full/out-astralx.tre
+simphy/data/t_100_g_100_sb_0.000001_spmin_100000_spmax_200000/R1/astralx_outputs/search-mode_full/out-astralx_stats.csv
+simphy/data/t_100_g_100_sb_0.000001_spmin_100000_spmax_200000/R1/astralx_outputs/search-mode_full/stat-astralx.csv
+simphy/data/t_100_g_100_sb_0.000001_spmin_100000_spmax_200000/R1/astralx_outputs/search-mode_local/stat-astralx.csv
+
+# A10K
+/home/user/10k-astral-dataset/10k-simphy/R1/astralx_outputs/estimated/search-mode_full/stat-astralx.csv
+/home/user/10k-astral-dataset/10k-simphy/R1/astralx_outputs/estimated/search-mode_local/stat-astralx.csv
