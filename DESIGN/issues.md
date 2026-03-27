@@ -2,4 +2,6 @@ for the cross tree recombination with GPU by hash table etc, if the GPU has to s
 
 
 
-** for incomplete trees, need to include h3 in the hash, since otherwise it would wrongly do this, if M1,M2 match, but the complement does not, it would be wrong
+** for incomplete trees, need to include h3 in the hash, since otherwise it would wrongly do this, if M1,M2 match, but the complement does not, it would be wrong, now fixed
+
+
