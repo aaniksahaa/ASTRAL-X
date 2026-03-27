@@ -7,11 +7,20 @@ import java.io.*;
 import java.util.*;
 
 /**
- * Newick parser for rooted binary gene trees.
+ * Newick parser for binary gene trees — supports both rooted and unrooted input.
  *
  * Two-pass design:
  *   Pass 1  -- collectTaxonNames(): scan every Newick string, register all names.
  *   Pass 2  -- parseNewick(): build Tree objects with postorder arrays + node ranges.
+ *
+ * Parsing is intentionally lenient: any number of children is allowed during the
+ * stack-based parse phase.  A separate validation+rooting step then checks:
+ *
+ *   Root node with 2 children → already a rooted binary tree, keep as-is.
+ *   Root node with 3 children → unrooted binary tree; arbitrarily rooted here
+ *                                (ASTRAL is rooting-agnostic, so any choice is fine).
+ *   Any internal node with exactly 2 children → valid binary node.
+ *   Any other arity → polytomy error (not yet supported).
  *
  * After parsing every node has a half-open range [rangeStart, rangeEnd) that indexes
  * into the tree's postorderArray (left-to-right leaf ordering).
@@ -106,40 +115,49 @@ public class TreeParser {
     }
 
     // -------------------------------------------------------------------------
+    // Temporary multi-child node for lenient parsing
+    // -------------------------------------------------------------------------
+
+    /**
+     * Internal node used only during parsing — supports any number of children.
+     * Converted to binary TreeNode after validation.
+     */
+    private static class RawNode {
+        int taxonId = -1;                          // leaf: taxon ID; internal: -1
+        final List<RawNode> children = new ArrayList<>();
+        boolean isLeaf() { return children.isEmpty(); }
+    }
+
+    // -------------------------------------------------------------------------
     // Pass 2 – full parse
     // -------------------------------------------------------------------------
 
-    /** Sentinel node pushed onto the stack to mark an open parenthesis. */
-    private static final TreeNode SENTINEL = new TreeNode();
+    /** Sentinel object pushed onto the stack to mark an open parenthesis. */
+    private static final Object SENTINEL = new Object();
 
     private static Tree parseNewick(String s, int treeIdx, TaxonRegistry reg) {
         int n = s.length(), totalTaxa = reg.size();
-        Deque<TreeNode> stack = new ArrayDeque<>();
+        Deque<Object> stack = new ArrayDeque<>();   // contains RawNode or SENTINEL
         int i = 0;
 
         while (i < n) {
             char c = s.charAt(i);
 
             if (c == '(') {
-                stack.push(SENTINEL);   // marks open-paren
+                stack.push(SENTINEL);
                 i++;
 
             } else if (c == ')') {
-                // Pop children (pushed left-to-right, popped right-to-left)
-                List<TreeNode> children = new ArrayList<>();
-                while (stack.peek() != SENTINEL) children.add(stack.pop());
+                // Collect all children pushed since the matching '('
+                List<RawNode> children = new ArrayList<>();
+                while (stack.peek() != SENTINEL) children.add((RawNode) stack.pop());
                 stack.pop();   // remove sentinel
 
-                if (children.size() != 2) {
-                    throw new RuntimeException("Tree " + treeIdx
-                        + ": non-binary node with " + children.size() + " children near pos " + i);
-                }
-                TreeNode node = new TreeNode();
-                // children were pushed L then R, so popped: [R, L]
-                node.right = children.get(0);
-                node.left  = children.get(1);
-                node.left.parent  = node;
-                node.right.parent = node;
+                // children were pushed left-to-right, popped right-to-left; restore order
+                Collections.reverse(children);
+
+                RawNode node = new RawNode();
+                node.children.addAll(children);
                 stack.push(node);
 
                 i++;
@@ -162,7 +180,7 @@ public class TreeParser {
                 while (i < n && !isDelim(s.charAt(i))) i++;
                 String name = s.substring(start, i).trim();
                 if (!name.isEmpty()) {
-                    TreeNode leaf = new TreeNode();
+                    RawNode leaf = new RawNode();
                     leaf.taxonId = reg.getId(name);
                     stack.push(leaf);
                 }
@@ -174,10 +192,13 @@ public class TreeParser {
             throw new RuntimeException("Tree " + treeIdx
                 + ": malformed Newick, stack size=" + stack.size());
         }
-        TreeNode root = stack.pop();
-        if (root.isLeaf()) {
+        RawNode rawRoot = (RawNode) stack.pop();
+        if (rawRoot.isLeaf()) {
             throw new RuntimeException("Tree " + treeIdx + ": root is a leaf");
         }
+
+        // Validate arity and root unrooted trees; convert RawNode → binary TreeNode
+        TreeNode root = validateAndConvert(rawRoot, treeIdx, true);
 
         // Assign ranges and build postorderArray in one left-to-right DFS
         int[] postorderArray = new int[reg.size()]; // upper bound; trimmed below
@@ -192,6 +213,65 @@ public class TreeParser {
         for (int j = 0; j < leafCount; j++) positionMap[postorderArray[j]] = j;
 
         return new Tree(treeIdx, root, postorderArray, positionMap, leafCount, totalTaxa);
+    }
+
+    /**
+     * Recursively validates a RawNode tree and converts it to binary TreeNode:
+     *
+     *   isRoot=true, 2 children  → rooted binary root, recurse normally.
+     *   isRoot=true, 3 children  → unrooted input; root arbitrarily by isolating
+     *                              the first child and making a new internal node
+     *                              from the remaining two. Logs a message.
+     *   isRoot=false, 2 children → normal binary internal node.
+     *   leaf                     → leaf node.
+     *   any other arity          → RuntimeException (polytomy not supported).
+     */
+    private static TreeNode validateAndConvert(RawNode raw, int treeIdx, boolean isRoot) {
+        if (raw.isLeaf()) {
+            TreeNode leaf = new TreeNode();
+            leaf.taxonId = raw.taxonId;
+            return leaf;
+        }
+
+        int nc = raw.children.size();
+
+        if (nc == 2) {
+            TreeNode node = new TreeNode();
+            node.left  = validateAndConvert(raw.children.get(0), treeIdx, false);
+            node.right = validateAndConvert(raw.children.get(1), treeIdx, false);
+            node.left.parent  = node;
+            node.right.parent = node;
+            return node;
+
+        } else if (nc == 3 && isRoot) {
+            // Unrooted tree: 3-furcation at root
+            // Root by isolating children[0] as left and joining children[1]+children[2]
+            // into a new internal right node.  Any choice gives a valid rooted binary
+            // tree equivalent under ASTRAL's rooting-agnostic scoring.
+            Logging.info("Tree %d: unrooted input (3-furcation at root) — rooting arbitrarily", treeIdx);
+
+            TreeNode c0 = validateAndConvert(raw.children.get(0), treeIdx, false);
+            TreeNode c1 = validateAndConvert(raw.children.get(1), treeIdx, false);
+            TreeNode c2 = validateAndConvert(raw.children.get(2), treeIdx, false);
+
+            TreeNode inner = new TreeNode();
+            inner.left  = c1;
+            inner.right = c2;
+            c1.parent = inner;
+            c2.parent = inner;
+
+            TreeNode root = new TreeNode();
+            root.left  = c0;
+            root.right = inner;
+            c0.parent    = root;
+            inner.parent = root;
+            return root;
+
+        } else {
+            String where = isRoot ? "root" : "internal node";
+            throw new RuntimeException("Tree " + treeIdx + ": " + nc
+                + "-furcation at " + where + " — polytomy not supported");
+        }
     }
 
     /**

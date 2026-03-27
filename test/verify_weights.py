@@ -35,12 +35,24 @@ def parse_newick(s):
     if not s.startswith('('):
         return frozenset([s.strip()])
     commas = _top_commas(s)
-    if len(commas) != 1:
+    if len(commas) == 1:
+        # Rooted binary node: two children
+        c = commas[0]
+        left  = parse_newick(s[1:c])
+        right = parse_newick(s[c+1:-1])
+        return (left, right, leaves(left) | leaves(right))
+    elif len(commas) == 2:
+        # Unrooted tree: 3-furcation at root — root arbitrarily.
+        # Mirror ASTRAL-X: isolate first child as left, join second+third into
+        # a new inner right node.  ASTRAL is rooting-agnostic so any choice works.
+        c1, c2 = commas
+        n0 = parse_newick(s[1:c1])
+        n1 = parse_newick(s[c1+1:c2])
+        n2 = parse_newick(s[c2+1:-1])
+        inner = (n1, n2, leaves(n1) | leaves(n2))
+        return (n0, inner, leaves(n0) | leaves(n1) | leaves(n2))
+    else:
         raise ValueError(f"Non-binary node (commas={len(commas)}): {s[:60]}")
-    c = commas[0]
-    left  = parse_newick(s[1:c])
-    right = parse_newick(s[c+1:-1])
-    return (left, right, leaves(left) | leaves(right))  # (left_leaves, right_leaves, own_leaves)
 
 def leaves(node):
     if isinstance(node, frozenset): return node
