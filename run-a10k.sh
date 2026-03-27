@@ -19,6 +19,29 @@ TIME_MONITOR=true
 GPU_MONITOR=true
 NO_NOTIFY=false
 
+csv_get_field() {
+  local file="$1"
+  shift
+  local header data
+  header="$(head -n1 "$file" 2>/dev/null || true)"
+  data="$(sed -n '2p' "$file" 2>/dev/null || true)"
+  if [[ -z "$header" || -z "$data" ]]; then
+    echo ""
+    return 0
+  fi
+  IFS=',' read -r -a headers <<< "$header"
+  IFS=',' read -r -a values <<< "$data"
+  for key in "$@"; do
+    for i in "${!headers[@]}"; do
+      if [[ "${headers[$i]}" == "$key" ]]; then
+        echo "${values[$i]:-}"
+        return 0
+      fi
+    done
+  done
+  echo ""
+}
+
 # Example single setting:
 # ASTRALX_OPTS="--search-mode full"
 #
@@ -216,21 +239,37 @@ for REPL in "${REPL_LIST[@]}"; do
     fi
 
     mkdir -p "$OUT_DIR"
-    CMD=("${ASTRALX_ROOT}/run-astralx-with-monitor.sh" -i "$GT_FILE" -o "$OUT_FILE" --astralx-root "$ASTRALX_ROOT" --no-notify)
+    CMD=("${ASTRALX_ROOT}/run-astralx-with-monitor.sh" -i "$GT_FILE" -o "$OUT_FILE" --astralx-root "$ASTRALX_ROOT")
     if [[ "$TIME_MONITOR" == false ]]; then CMD+=(--no-time-monitor); fi
     if [[ "$GPU_MONITOR" == false ]]; then CMD+=(--no-gpu-monitor); fi
+    if [[ "$NO_NOTIFY" == true ]]; then CMD+=(--no-notify); fi
     if [[ -n "$ASTRALX_OPTS_ITEM" ]]; then
       read -r -a EXTRA <<< "$ASTRALX_OPTS_ITEM"
       CMD+=("${EXTRA[@]}")
     fi
 
+    echo "==> Running astralx on ${REPL} (${TREE_TYPE}, ${SETTING_NAME})"
+    echo "Command: ${CMD[*]}"
+    set +e
     "${CMD[@]}"
+    RUN_EXIT=$?
+    set -e
 
     SIDE_STATS="${OUT_FILE%.tre}_stats.csv"
-    RUNNING_TIME=$(awk -F, 'NR==2 {print $4}' "$SIDE_STATS")
-    MAX_CPU_MB=$(awk -F, 'NR==2 {print $5}' "$SIDE_STATS")
-    MAX_GPU_MB=$(awk -F, 'NR==2 {print $6}' "$SIDE_STATS")
-    OPTIMAL_QUARTET_SCORE=$(awk -F, 'NR==2 {print $7}' "$SIDE_STATS")
+    if [[ "$RUN_EXIT" -ne 0 || ! -f "$SIDE_STATS" ]]; then
+      echo "Run failed for ${REPL} (${TREE_TYPE}, ${SETTING_NAME}); skipping RF/stat summary."
+      continue
+    fi
+
+    RUNNING_TIME="$(csv_get_field "$SIDE_STATS" "running_time_s" "running-time-s")"
+    MAX_CPU_MB="$(csv_get_field "$SIDE_STATS" "max_cpu_mb" "max-cpu-mb")"
+    MAX_GPU_MB="$(csv_get_field "$SIDE_STATS" "max_gpu_mb" "max-gpu-mb")"
+    OPTIMAL_QUARTET_SCORE="$(csv_get_field "$SIDE_STATS" "optimal_quartet_score" "optimal-quartet-score")"
+    EXIT_CODE="$(csv_get_field "$SIDE_STATS" "exit_code" "exit-code")"
+    if [[ -z "$EXIT_CODE" ]]; then
+      EXIT_CODE="$RUN_EXIT"
+    fi
+
     RF_RATE="NA"
     if [[ -f "$OUT_FILE" && -f "$TRUE_TREE" ]]; then
       rf_output=$(python3 "${ASTRALX_ROOT}/rf.py" "$OUT_FILE" "$TRUE_TREE" 2>&1) || true
@@ -242,6 +281,36 @@ for REPL in "${REPL_LIST[@]}"; do
 
     echo "alg,setting,replicate,tree_type,rf-rate,optimal-quartet-score,running-time-s,max-cpu-mb,max-gpu-mb" > "$STAT_FILE"
     echo "astralx,${SETTING_NAME},${REPL},${TREE_TYPE},${RF_RATE},${OPTIMAL_QUARTET_SCORE},${RUNNING_TIME},${MAX_CPU_MB},${MAX_GPU_MB}" >> "$STAT_FILE"
+    echo
+    echo "=== A10K ASTRAL-X Summary ==="
+    echo "Replicate:      ${REPL}"
+    echo "Tree type:      ${TREE_TYPE}"
+    echo "Setting:        ${SETTING_NAME}"
+    echo "RF rate:        ${RF_RATE}"
+    echo "Quartet score:  ${OPTIMAL_QUARTET_SCORE}"
+    echo "Running time:   ${RUNNING_TIME}s"
+    echo "Max CPU RAM:    ${MAX_CPU_MB} MB"
+    echo "Max GPU VRAM:   ${MAX_GPU_MB} MB"
+    echo "Output tree:    ${OUT_FILE}"
+    echo "Stats file:     ${STAT_FILE}"
     echo "Saved $STAT_FILE"
+
+    if [[ "$NO_NOTIFY" == false ]] && command -v curl >/dev/null 2>&1; then
+      curl -s -d "✅ ASTRAL-X A10K completed
+
+Replicate: ${REPL}
+Tree type: ${TREE_TYPE}
+Setting: ${SETTING_NAME}
+
+RF: ${RF_RATE}
+Quartet score: ${OPTIMAL_QUARTET_SCORE}
+Time: ${RUNNING_TIME}s
+CPU: ${MAX_CPU_MB} MB
+GPU: ${MAX_GPU_MB} MB
+Exit: ${EXIT_CODE}
+
+Tree: $(basename "$OUT_FILE")
+Stats: $(basename "$STAT_FILE")" "https://ntfy.sh/${NTFY_CHANNEL_NAME}" >/dev/null 2>&1 || true
+    fi
   done
 done
