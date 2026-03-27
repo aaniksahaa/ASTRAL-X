@@ -57,11 +57,11 @@ while [[ $# -gt 0 ]]; do
     --no-notify|-nn) NO_NOTIFY=true; shift ;;
     --debug) DEBUG=1; shift ;;
     --help|-h) print_help; exit 0 ;;
-    --cpu|--gpu|--rooted|--unrooted|--verify-parse|--verify-hash|--verify-clusters|--verify-partitions|--verify-dp|--verify-weights|-v|-vv|-vvv|-q|--quiet)
+    --cpu|--gpu|--rooted|--unrooted|--no-gpu-batch|--verify-parse|--verify-hash|--verify-clusters|--verify-partitions|--verify-dp|--verify-weights|-v|-vv|-vvv|-q|--quiet)
       ASTRALX_ARGS+=("$1")
       shift
       ;;
-    --search-mode|-t|--threads|-m|--seeds)
+    --search-mode|-t|--threads|-m|--seeds|--gpu-batch-size|--gpu-batches)
       ASTRALX_ARGS+=("$1" "$2")
       shift 2
       ;;
