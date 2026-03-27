@@ -46,6 +46,9 @@ public class TaxonHasher {
     /** Number of seeds. */
     public int numSeeds() { return m; }
 
+    /** Number of taxa. */
+    public int numTaxa() { return hashes[0].length; }
+
     // -------------------------------------------------------------------------
     // SplitMix64 finalizer  (standard bijection on 64-bit integers)
     // -------------------------------------------------------------------------

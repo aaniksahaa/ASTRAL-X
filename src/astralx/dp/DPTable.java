@@ -5,7 +5,6 @@ import astralx.cluster.ClusterHash;
 import astralx.cluster.ClusterTable;
 import astralx.gpu.GPUDPBuilder;
 import astralx.hash.PrefixHashArrays;
-import astralx.hash.TaxonHasher;
 import astralx.tree.Tree;
 import astralx.tree.TreeNode;
 import astralx.util.Threading;
@@ -35,6 +34,7 @@ public class DPTable {
 
     private final ClusterHash rootHash; // allTaxaHash -- starting point of the DP
     private final int m;
+    private final int n; // total taxa count
 
     // stats
     private int totalEmitted = 0;   // total emitted (with duplicates across trees)
@@ -46,6 +46,7 @@ public class DPTable {
         long t0 = System.nanoTime();
         this.m        = pref.numSeeds();
         this.rootHash = clusterTable.getAllTaxaHash();
+        this.n        = rootHash.size;
 
         for (Tree tree : trees) {
             extractFromTree(tree, pref);
@@ -66,32 +67,44 @@ public class DPTable {
     private void extractFromTree(Tree tree, PrefixHashArrays pref) {
         int ti = tree.treeIndex;
         int L  = tree.leafCount;
-        emit(tree.root, ti, L, pref);
+        emit(tree.root, ti, pref);
+
+        // ── Type 3: for incomplete trees add S → Lg | (S\Lg) ─────────────────
+        // Connects the DP root (S) to this gene tree's taxa boundary.
+        if (!tree.isComplete) {
+            ClusterHash hLg  = hashRange(ti, 0, L, false, pref); // hash(Lg)
+            ClusterHash hSLg = hashRange(ti, 0, L, true,  pref); // hash(S\Lg)
+            if (hSLg.size > 0) {
+                addTransition(rootHash, hLg, hSLg);
+            }
+        }
     }
 
     /** Post-order recursion: emit transitions for this node, then children. */
-    private void emit(TreeNode u, int ti, int L, PrefixHashArrays pref) {
+    private void emit(TreeNode u, int ti, PrefixHashArrays pref) {
         if (u.isLeaf()) return;
-        emit(u.left,  ti, L, pref);
-        emit(u.right, ti, L, pref);
+        emit(u.left,  ti, pref);
+        emit(u.right, ti, pref);
 
         // ── Type 1: sub(u) → sub(left) | sub(right) ─────────────────────────
-        ClusterHash hU     = hashRange(ti, u.rangeStart,       u.rangeEnd,       false, L, pref);
-        ClusterHash hLeft  = hashRange(ti, u.left.rangeStart,  u.left.rangeEnd,  false, L, pref);
-        ClusterHash hRight = hashRange(ti, u.right.rangeStart, u.right.rangeEnd, false, L, pref);
+        ClusterHash hU     = hashRange(ti, u.rangeStart,       u.rangeEnd,       false, pref);
+        ClusterHash hLeft  = hashRange(ti, u.left.rangeStart,  u.left.rangeEnd,  false, pref);
+        ClusterHash hRight = hashRange(ti, u.right.rangeStart, u.right.rangeEnd, false, pref);
         addTransition(hU, hLeft, hRight);
 
-        // ── Type 2: comp(u) → sub(sibling) | comp(parent) ───────────────────
-        // Applies only if u is not root AND u's parent is not root.
-        // (If parent is root, comp(parent) = empty -- degenerate, skip.)
-        if (!u.isRoot() && !u.parent.isRoot()) {
+        // ── Type 2: S\sub(u) → sub(sibling) | S\sub(parent) ─────────────────
+        // For non-root u: if parent is root and tree is complete, S\sub(root)=empty (size 0)
+        // so hCompParent.size==0 and we skip.  For incomplete trees, S\sub(root) = S\Lg != empty.
+        if (!u.isRoot()) {
             TreeNode sib    = u.getSibling();
             TreeNode parent = u.parent;
 
-            ClusterHash hCompU      = hashRange(ti, u.rangeStart,      u.rangeEnd,      true, L, pref);
-            ClusterHash hSib        = hashRange(ti, sib.rangeStart,    sib.rangeEnd,    false, L, pref);
-            ClusterHash hCompParent = hashRange(ti, parent.rangeStart, parent.rangeEnd, true,  L, pref);
-            addTransition(hCompU, hSib, hCompParent);
+            ClusterHash hCompU      = hashRange(ti, u.rangeStart,      u.rangeEnd,      true,  pref);
+            ClusterHash hSib        = hashRange(ti, sib.rangeStart,    sib.rangeEnd,    false, pref);
+            ClusterHash hCompParent = hashRange(ti, parent.rangeStart, parent.rangeEnd, true,  pref);
+            if (hCompParent.size > 0) {
+                addTransition(hCompU, hSib, hCompParent);
+            }
         }
     }
 
@@ -104,17 +117,17 @@ public class DPTable {
     }
 
     /**
-     * Compute a finalized ClusterHash for the range [lo,hi) in tree ti,
-     * optionally complement w.r.t. Lg (the L leaves of this tree).
+     * Compute a finalized ClusterHash for the range [lo,hi) in tree ti.
+     * complement=true gives the super-complement S\[lo,hi) (w.r.t. ALL n taxa).
      */
-    private ClusterHash hashRange(int ti, int lo, int hi, boolean complement, int L,
+    private ClusterHash hashRange(int ti, int lo, int hi, boolean complement,
                                    PrefixHashArrays pref) {
         long[] rawSums = new long[m], rawXors = new long[m];
         for (int s = 0; s < m; s++) {
-            rawSums[s] = complement ? pref.compSum(ti, s, lo, hi) : pref.rangeSum(ti, s, lo, hi);
-            rawXors[s] = complement ? pref.compXor(ti, s, lo, hi) : pref.rangeXor(ti, s, lo, hi);
+            rawSums[s] = complement ? pref.superCompSum(ti, s, lo, hi) : pref.rangeSum(ti, s, lo, hi);
+            rawXors[s] = complement ? pref.superCompXor(ti, s, lo, hi) : pref.rangeXor(ti, s, lo, hi);
         }
-        int sz = complement ? (L - (hi - lo)) : (hi - lo);
+        int sz = complement ? (n - (hi - lo)) : (hi - lo);
         return new ClusterHash(rawSums, rawXors, sz, m);
     }
 

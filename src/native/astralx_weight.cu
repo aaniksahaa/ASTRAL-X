@@ -120,12 +120,26 @@ __global__ void computeWeightsKernel(
         int b0 = intersect(tGT, lo1, hi1, hiTree, hiLeft, hiRight, hiComp, sz1, orderings, invIndex, numTaxa);
         int b1 = intersect(tGT, lo2, hi2, hiTree, hiLeft, hiRight, hiComp, sz2, orderings, invIndex, numTaxa);
 
-        // Derive remaining 5
-        int a2 = sizeA - a0 - a1;
-        int b2 = sizeB - b0 - b1;
-        int c0 = sz1   - a0 - b0;
-        int c1 = sz2   - a1 - b1;
-        int c2 = sz3   - c0 - c1;
+        // Row sums: for incomplete gene trees L_GT < totalN, so |A∩Lg_GT| != sizeA
+        int L_GT = sz1 + sz2 + sz3;
+        int lgA, lgB;
+        if (L_GT == totalN) {
+            lgA = sizeA;
+            lgB = sizeB;
+        } else {
+            // Compute |A ∩ Lg_GT| = coreIntersect(tGT, 0, L_GT, tA, loA, hiA), then flip for comp
+            int coreA = coreIntersect(tGT, 0, L_GT, loTree, loLeft, loRight, orderings, invIndex, numTaxa);
+            lgA = loComp ? (L_GT - coreA) : coreA;
+            int coreB = coreIntersect(tGT, 0, L_GT, hiTree, hiLeft, hiRight, orderings, invIndex, numTaxa);
+            lgB = hiComp ? (L_GT - coreB) : coreB;
+        }
+
+        // Derive remaining 5 (c2 uses column constraint on M3, not row C)
+        int a2 = lgA  - a0 - a1;
+        int b2 = lgB  - b0 - b1;
+        int c0 = sz1  - a0 - b0;
+        int c1 = sz2  - a1 - b1;
+        int c2 = sz3  - a2 - b2;   // col M3: a2+b2+c2=sz3
 
         if (a2 < 0 || b2 < 0 || c0 < 0 || c1 < 0 || c2 < 0) continue;
 

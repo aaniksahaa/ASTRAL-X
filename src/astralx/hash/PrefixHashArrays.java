@@ -38,7 +38,7 @@ public class PrefixHashArrays {
     private final long[][] totalSum;  // [t][s]
     private final long[][] totalXor;  // [t][s]
 
-    // Hash of ALL taxa (union across all trees; same as any complete tree's total)
+    // Hash of ALL taxa (all n taxa in S; from first complete tree or computed from hasher)
     private final long[] allTaxaSum;  // [s]
     private final long[] allTaxaXor;  // [s]
 
@@ -71,16 +71,31 @@ public class PrefixHashArrays {
             }
         }
 
-        // allTaxa: use the first complete tree (all complete trees have same total)
+        // allTaxa: use first complete tree if available; otherwise sum from hasher directly
         allTaxaSum = new long[m];
         allTaxaXor = new long[m];
+        boolean foundComplete = false;
         for (Tree tree : trees) {
             if (tree.isComplete) {
                 for (int s = 0; s < m; s++) {
                     allTaxaSum[s] = totalSum[tree.treeIndex][s];
                     allTaxaXor[s] = totalXor[tree.treeIndex][s];
                 }
+                foundComplete = true;
                 break;
+            }
+        }
+        if (!foundComplete) {
+            int numTaxa = hasher.numTaxa();
+            for (int s = 0; s < m; s++) {
+                long sum = 0L, xor = 0L;
+                for (int tid = 0; tid < numTaxa; tid++) {
+                    long h = hasher.get(s, tid);
+                    sum += h;
+                    xor ^= h;
+                }
+                allTaxaSum[s] = sum;
+                allTaxaXor[s] = xor;
             }
         }
 

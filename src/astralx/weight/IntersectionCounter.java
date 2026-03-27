@@ -59,4 +59,27 @@ public final class IntersectionCounter {
         int core = coreIntersect(tGT, loGT, hiGT, tC, loC, hiC);
         return cComp ? (sizeGTRange - core) : core;
     }
+
+    /**
+     * |A ∩ Lg_GT| — how many of the gene-tree's leaves fall inside cluster A.
+     *
+     * For a super-complement cluster A = S\sub(u):
+     *   |A ∩ Lg_GT| = L_GT - |sub(u) ∩ Lg_GT|  (since M ⊆ Lg_GT ⊆ S)
+     * For a plain cluster A = sub(u):
+     *   |A ∩ Lg_GT| = |sub(u) ∩ Lg_GT|
+     *
+     * Used to compute the correct row sum for the A-row of the intersection matrix
+     * when tGT is an incomplete gene tree (L_GT < n).
+     * For complete gene trees (L_GT == n) this returns sizeA directly.
+     *
+     * @param tGT   gene tree
+     * @param tC    exemplar tree for cluster A
+     * @param loC, hiC  range of A in tC's postorder array (the un-complemented range)
+     * @param cComp true if A is a complement cluster (A = S\[loC,hiC))
+     */
+    public static int intersectWithFullTree(Tree tGT, Tree tC, int loC, int hiC, boolean cComp) {
+        int L_GT = tGT.leafCount;
+        int core = coreIntersect(tGT, 0, L_GT, tC, loC, hiC);
+        return cComp ? (L_GT - core) : core;
+    }
 }

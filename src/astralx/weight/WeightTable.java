@@ -224,12 +224,18 @@ public class WeightTable {
             int b0 = IntersectionCounter.intersect(tGT, lo1, hi1, tB, cB.left, cB.right, cB.complement, sz1);
             int b1 = IntersectionCounter.intersect(tGT, lo2, hi2, tB, cB.left, cB.right, cB.complement, sz2);
 
+            // Row sums: for incomplete gene trees, |A∩Lg_GT| < sizeA; must compute explicitly
+            int lgA = tGT.isComplete ? sizeA
+                    : IntersectionCounter.intersectWithFullTree(tGT, tA, cA.left, cA.right, cA.complement);
+            int lgB = tGT.isComplete ? sizeB
+                    : IntersectionCounter.intersectWithFullTree(tGT, tB, cB.left, cB.right, cB.complement);
+
             // Derive remaining 5
-            int a2 = sizeA - a0 - a1;          // row constraint on A
-            int b2 = sizeB - b0 - b1;          // row constraint on B
-            int c0 = sz1 - a0 - b0;            // column constraint (complete trees)
-            int c1 = sz2 - a1 - b1;
-            int c2 = sz3 - c0 - c1;            // row constraint on C (via M3)
+            int a2 = lgA - a0 - a1;            // row constraint on A (w.r.t. Lg_GT)
+            int b2 = lgB - b0 - b1;            // row constraint on B
+            int c0 = sz1 - a0 - b0;            // column constraint M1
+            int c1 = sz2 - a1 - b1;            // column constraint M2
+            int c2 = sz3 - a2 - b2;            // column constraint M3 (correct formula)
 
             // All values must be non-negative for a valid intersection matrix
             if (a2 < 0 || b2 < 0 || c0 < 0 || c1 < 0 || c2 < 0) continue;

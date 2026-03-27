@@ -91,7 +91,7 @@ public class ClusterTable {
 
     /**
      * Post-order walk. For every node (including leaves, but excluding root)
-     * register the subtree cluster and (for internal/complement nodes) its complement.
+     * register the subtree cluster and its super-complement S\[lo,hi).
      */
     private void walkNodes(TreeNode node, int ti, int L,
                            PrefixHashArrays pref, int numTaxa, int[] count) {
@@ -109,10 +109,10 @@ public class ClusterTable {
         registerCluster(ti, lo, hi, false, rangeSize, L, pref, numTaxa);
         count[0]++;
 
-        // ── 2. Complement: Lg \ [lo, hi) ─────────────────────────────────────
-        int compSize = L - rangeSize;
-        if (compSize > 0) {  // skip if complement is empty (won't happen for non-root)
-            registerCluster(ti, lo, hi, true, compSize, L, pref, numTaxa);
+        // ── 2. Super-complement: S \ [lo, hi) (w.r.t. ALL taxa, not just Lg) ──
+        int superCompSize = numTaxa - rangeSize;
+        if (superCompSize > 0) {  // skip empty (only if rangeSize == numTaxa, impossible here)
+            registerCluster(ti, lo, hi, true, superCompSize, numTaxa, pref, numTaxa);
             count[0]++;
         }
     }
@@ -129,8 +129,9 @@ public class ClusterTable {
                 rawSums[s] = pref.rangeSum(ti, s, lo, hi);
                 rawXors[s] = pref.rangeXor(ti, s, lo, hi);
             } else {
-                rawSums[s] = pref.compSum(ti, s, lo, hi);
-                rawXors[s] = pref.compXor(ti, s, lo, hi);
+                // Super-complement w.r.t. ALL taxa (S \ [lo,hi))
+                rawSums[s] = pref.superCompSum(ti, s, lo, hi);
+                rawXors[s] = pref.superCompXor(ti, s, lo, hi);
             }
         }
 
