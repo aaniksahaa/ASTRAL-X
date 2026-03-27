@@ -14,7 +14,7 @@
 
 ./run-bulk-simulated.sh --method astralx --num-replicates 5 --opts-list "--search-mode local;--search-mode full"
 
-./collect-stats-simulated.sh --simphy-dir ./simphy --out as.csv
+./collect-stats-simulated.sh --simphy-dir ./simphy --out astralx-scale-taxa.csv
 
 
 ###############################################################################
