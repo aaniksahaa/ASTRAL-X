@@ -49,6 +49,8 @@ Optional:
   --spmin              Population size minimum
   --spmax              Population size maximum
   --use-legacy-layout  Use legacy simphy layout
+  If the expected simulated dataset is missing, this script will first invoke
+  ./sim.sh with matching parameters to generate the required replicate.
   --fresh              Force rerun even if stat-astralx.csv exists
   --no-time-monitor    Disable time monitoring
   --no-gpu-monitor     Disable GPU monitoring
@@ -125,8 +127,47 @@ if [[ "$FRESH" == false && -f "$STAT_FILE" ]]; then
 fi
 
 if [[ ! -f "$ALL_GT_FILE" ]]; then
-  echo "Error: gene-tree file not found at $ALL_GT_FILE"
-  exit 6
+  if [[ "$USE_LEGACY_LAYOUT" == true ]]; then
+    echo "Error: gene-tree file not found at $ALL_GT_FILE"
+    echo "Automatic simulation bootstrap is not supported with --use-legacy-layout."
+    exit 6
+  fi
+
+  echo "Gene-tree file not found at $ALL_GT_FILE"
+  echo "==> Bootstrapping missing simulated dataset via ./sim.sh"
+
+  REPLICATE_COUNT=1
+  if [[ "$REPLICATE" =~ ^R([0-9]+)$ ]]; then
+    REPLICATE_COUNT="${BASH_REMATCH[1]}"
+  elif [[ "$REPLICATE" =~ ^[0-9]+$ ]]; then
+    REPLICATE_COUNT="$REPLICATE"
+    REPLICATE="R${REPLICATE}"
+    SIMPHY_RUN_DIR="${SIMPHY_RUN_DIR%/*}/R${REPLICATE_COUNT}"
+    STAT_FILE="${SIMPHY_RUN_DIR%/}/stat-astralx.csv"
+    LOCK_FILE="${SIMPHY_RUN_DIR%/}/.astralx.lock"
+    ALL_GT_FILE="${SIMPHY_RUN_DIR%/}/all_gt.tre"
+    TRUE_SPECIES_TREE="${SIMPHY_RUN_DIR%/}/s_tree.trees"
+    OUT_ASTRALX="${SIMPHY_RUN_DIR%/}/out-astralx.tre"
+    RUN_LOG="${SIMPHY_RUN_DIR%/}/.astralx_run.log"
+  fi
+
+  SIM_CMD=(./sim.sh -t "$TAXA_NUM" -g "$GENE_TREES" -r "$REPLICATE" -rs "$REPLICATE_COUNT" --sb "$SB" --spmin "$SPMIN" --spmax "$SPMAX")
+  if [[ "$SIMPHY_DIR_SET" == true ]]; then
+    SIM_CMD+=(--simphy-dir "$SIMPHY_DIR")
+  fi
+  if [[ "$SIMPHY_DATA_DIR_SET" == true ]]; then
+    SIM_CMD+=(--simphy-data-dir "$SIMPHY_DATA_DIR")
+  fi
+  if [[ "$FRESH" == true ]]; then
+    SIM_CMD+=(--fresh)
+  fi
+
+  "${SIM_CMD[@]}"
+
+  if [[ ! -f "$ALL_GT_FILE" ]]; then
+    echo "Error: dataset bootstrap completed but gene-tree file is still missing at $ALL_GT_FILE"
+    exit 6
+  fi
 fi
 
 mkdir -p "${SIMPHY_RUN_DIR%/}"

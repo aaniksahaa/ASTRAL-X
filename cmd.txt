@@ -19,6 +19,9 @@ bash build.sh
 # Run ASTRAL-X on that simulated replicate and write stat-astralx.csv
 ./test-astralx-simulated.sh -t 100 -g 100 --sb 0.000001 --spmin 100000 --spmax 200000 -r R1 --fresh
 
+./test-astralx-simulated.sh -t 100 -g 100 --sb 0.000001 --spmin 100000 --spmax 200000 -r R1 --fresh --astralx-opts "--search-mode local -vv"
+
+
 # Collect merged simulated stats
 ./collect-stats-simulated.sh --simphy-dir ./simphy --out /tmp/astralx-sim-stats.csv
 
