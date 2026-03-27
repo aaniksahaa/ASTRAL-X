@@ -220,7 +220,7 @@ for REPL in "${REPL_LIST[@]}"; do
   [[ -d "$REPL_DIR" ]] || continue
 
   if [[ "$TREE_TYPE" == "estimated" ]]; then
-    GT_FILE="${REPL_DIR}/estimatedgenetrees/estimatedgenetrees.tre"
+    GT_FILE="${REPL_DIR}/estimatedgenetrees/estimatedgenetrees.rooted.tre"
   else
     GT_FILE="${REPL_DIR}/truegenetrees"
   fi
