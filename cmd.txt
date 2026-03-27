@@ -1,33 +1,28 @@
-# Build Java classes
+# ASTRAL-X working commands
+
+# Build
 bash build.sh
 
-# ── Automated test (runs Mode 1 + Mode 2 on GPU, prints RF vs true tree) ─────
-bash test_rf.sh 37          # 37-taxa dataset
-bash test_rf.sh 48          # 48-taxa dataset
-bash test_rf.sh 200         # 200-taxa dataset
-bash test_rf.sh all         # all three datasets in sequence
+# Core runner
+./run.sh -i all_gt_bs_rooted_37.tre -o /tmp/astralx37_local.tre -vv
+./run.sh -i all_gt_bs_rooted_37.tre -o /tmp/astralx37_full.tre --search-mode full -vv
 
-# Build CUDA JNI shared libraries (once, or after changing .cu files)
-bash build_native.sh
+# Compatibility wrapper
+./run-astralx.sh -i all_gt_bs_rooted_37.tre -o /tmp/astralx37_full_via_wrapper.tre --search-mode full -vv
 
-# ── 37-taxa ──────────────────────────────────────────────────────────────────
+# Monitored standard run on 37 taxa
+./run-astralx-with-monitor.sh -i all_gt_bs_rooted_37.tre -o /tmp/astralx37_monitored.tre --search-mode full -vv --no-notify --no-build
 
-# Mode 1 (tree-local DP, GPU weight)
-java -Djava.library.path=native -cp build astralx.Main -i all_gt_bs_rooted_37.tre -o astralx_species_tree_37.newick --gpu -vv
+# Simulate 100 taxa, 100 gene trees, 1 replicate
+./sim.sh -t 100 -g 100 --sb 0.000001 --spmin 100000 --spmax 200000 -rs 1 --fresh
 
-# Mode 2 (cross-tree DP, GPU weight + GPU DP search)
-java -Djava.library.path=native -cp build astralx.Main -i all_gt_bs_rooted_37.tre -o astralx_species_tree_37_full.newick --gpu --search-mode full -vv
+# Run ASTRAL-X on that simulated replicate and write stat-astralx.csv
+./test-astralx-simulated.sh -t 100 -g 100 --sb 0.000001 --spmin 100000 --spmax 200000 -r R1 --fresh
 
-# ── 100-taxa ─────────────────────────────────────────────────────────────────
+# Collect merged simulated stats
+./collect-stats-simulated.sh --simphy-dir ./simphy --out /tmp/astralx-sim-stats.csv
 
-java -Djava.library.path=native -cp build astralx.Main -i all_gt_bs_rooted_100.tre -o astralx_species_tree_100.newick --gpu -vv
-java -Djava.library.path=native -cp build astralx.Main -i all_gt_bs_rooted_100.tre -o astralx_species_tree_100_full.newick --gpu --search-mode full -vv
-
-# ── 200-taxa ─────────────────────────────────────────────────────────────────
-
-java -Djava.library.path=native -cp build astralx.Main -i all_gt_bs_rooted_200.tre -o astralx_species_tree_200.newick --gpu -vv
-java -Djava.library.path=native -cp build astralx.Main -i all_gt_bs_rooted_200.tre -o astralx_species_tree_200_full.newick --gpu --search-mode full -vv
-
-# CPU fallback (no GPU needed)
-java -cp build astralx.Main -i all_gt_bs_rooted_200.tre -o astralx_species_tree_200_cpu.newick -vv
-java -cp build astralx.Main -i all_gt_bs_rooted_200.tre -o astralx_species_tree_200_cpu_full.newick --search-mode full -vv
+# Example output locations from the validated run above
+simphy/data/t_100_g_100_sb_0.000001_spmin_100000_spmax_200000/R1/out-astralx.tre
+simphy/data/t_100_g_100_sb_0.000001_spmin_100000_spmax_200000/R1/out-astralx_stats.csv
+simphy/data/t_100_g_100_sb_0.000001_spmin_100000_spmax_200000/R1/stat-astralx.csv
