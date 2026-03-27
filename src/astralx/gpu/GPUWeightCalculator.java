@@ -57,6 +57,8 @@ public class GPUWeightCalculator {
      * @param numTaxa        total taxon count (registry size)
      * @param totalN         total taxon count (same as numTaxa, passed to kernel)
      * @param batchSizeHint  0=auto, -1=no batching, >0=exact batch size
+     * @param vramFraction   fraction of free VRAM to use when batchSizeHint==0
+     *                       (e.g. 0.75 means use 75%, reserve 25% as headroom)
      * @return long[numSplits] where result[i] = 2 * score(split i)
      */
     public static native long[] computeWeightsGPU(
@@ -69,6 +71,7 @@ public class GPUWeightCalculator {
         int numTrees,
         int numTaxa,
         int totalN,
-        int batchSizeHint
+        int batchSizeHint,
+        double vramFraction
     );
 }

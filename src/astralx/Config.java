@@ -30,6 +30,22 @@ public class Config {
      */
     private int gpuBatchSize = 0;
 
+    /**
+     * Explicit number of GPU batches (highest priority when > 0).
+     * batchSize is computed as ceil(numSplits / gpuNumBatches) at runtime.
+     * Overrides gpuBatchSize and the auto-VRAM logic.
+     *   0 (default) — not set; fall back to gpuBatchSize or auto.
+     */
+    private int gpuNumBatches = 0;
+
+    /**
+     * Fraction of free VRAM to occupy when computing auto batch size.
+     * Default 0.75 means use 75% of free VRAM, reserving 25% as headroom
+     * for driver overhead, kernel stack, and page tables.
+     * Configured via --gpu-vram-occupancy-factor.  Must be in (0, 1].
+     */
+    private double gpuVramFraction = 0.75;
+
     private Config() {}
 
     public static Config getInstance() {
@@ -59,6 +75,10 @@ public class Config {
     public void setGpuBatch(boolean b)        { this.gpuBatch = b; }
     public int getGpuBatchSize()              { return gpuBatchSize; }
     public void setGpuBatchSize(int s)        { this.gpuBatchSize = s; }
+    public int getGpuNumBatches()             { return gpuNumBatches; }
+    public void setGpuNumBatches(int n)       { this.gpuNumBatches = Math.max(1, n); }
+    public double getGpuVramFraction()        { return gpuVramFraction; }
+    public void setGpuVramFraction(double f)  { this.gpuVramFraction = Math.max(0.01, Math.min(1.0, f)); }
 
     // Testing flags
     private boolean verifyParse = false;

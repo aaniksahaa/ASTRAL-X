@@ -184,7 +184,7 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsGPU(
     jintArray jOrderings, jintArray jInvIndex,
     jint numSplits, jint numParts,
     jint numTrees, jint numTaxa, jint totalN,
-    jint batchSizeHint)
+    jint batchSizeHint, jdouble vramFraction)
 {
     // -------------------------------------------------------------------------
     // Pin host arrays
@@ -232,8 +232,8 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsGPU(
         // Auto: query free VRAM after static upload
         size_t freeVRAM = 0, totalVRAM = 0;
         cudaMemGetInfo(&freeVRAM, &totalVRAM);
-        // Reserve 25% headroom for driver, kernel stack, page tables
-        size_t usable = (size_t)((double)freeVRAM * 0.75);
+        // vramFraction is the usable portion; remainder is headroom for driver etc.
+        size_t usable = (size_t)((double)freeVRAM * (double)vramFraction);
         // 48 bytes per split: 10 ints (40 B split data) + 8 B score
         size_t perSplitBytes = 10 * sizeof(int) + sizeof(long long);
         long long autoSize = (long long)(usable / perSplitBytes);
@@ -241,10 +241,10 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsGPU(
         if (autoSize > (long long)numSplits) autoSize = (long long)numSplits;
         batchSize = (int)autoSize;
         fprintf(stderr,
-            "[ASTRAL-X GPU] adaptive batch: freeVRAM=%.2f GB, usable=%.2f GB, "
-            "perSplit=%zu B → batchSize=%d  (numSplits=%d, numBatches=%d)\n",
-            freeVRAM / 1e9, usable / 1e9, perSplitBytes,
-            batchSize, numSplits,
+            "[ASTRAL-X GPU] adaptive batch: freeVRAM=%.2f GB, occupancy=%.0f%%, "
+            "usable=%.2f GB, perSplit=%zu B → batchSize=%d  (numSplits=%d, numBatches=%d)\n",
+            freeVRAM / 1e9, (double)vramFraction * 100.0, usable / 1e9,
+            perSplitBytes, batchSize, numSplits,
             (numSplits + batchSize - 1) / batchSize);
     }
 

@@ -70,14 +70,32 @@ public class WeightTable {
                          && GPUWeightCalculator.tryLoad();
 
         if (useGPU) {
-            // batchSizeHint: 0 = auto (VRAM-adaptive), -1 = no batching, >0 = exact size
-            int batchSizeHint = Config.getInstance().isGpuBatch()
-                ? Config.getInstance().getGpuBatchSize()   // 0 = auto, >0 = manual
-                : -1;                                       // disabled = single launch
-            Logging.info("Weight table: using GPU path (%d splits, %d partitions, batchHint=%s)",
-                numSplits, partList.size(),
-                batchSizeHint == -1 ? "off" : batchSizeHint == 0 ? "auto" : String.valueOf(batchSizeHint));
-            computeScoresGPU(splitList, partList, clusterTable, trees, scoreArray, batchSizeHint);
+            // Resolve batchSizeHint (priority: no-batch > num-batches > batch-size > auto)
+            //   -1  = no batching (single launch)
+            //    0  = auto (VRAM-adaptive, fraction passed separately)
+            //   >0  = exact splits-per-batch
+            Config cfg = Config.getInstance();
+            int batchSizeHint;
+            String batchDesc;
+            if (!cfg.isGpuBatch()) {
+                batchSizeHint = -1;
+                batchDesc = "off (single launch)";
+            } else if (cfg.getGpuNumBatches() > 0) {
+                // Explicit batch count → compute batchSize = ceil(numSplits / N)
+                int N = cfg.getGpuNumBatches();
+                batchSizeHint = (numSplits + N - 1) / N;
+                batchDesc = N + " batches → batchSize=" + batchSizeHint;
+            } else if (cfg.getGpuBatchSize() > 0) {
+                batchSizeHint = cfg.getGpuBatchSize();
+                batchDesc = "explicit batchSize=" + batchSizeHint;
+            } else {
+                batchSizeHint = 0;  // auto
+                batchDesc = String.format("auto (occupancy=%.0f%%)", cfg.getGpuVramFraction() * 100);
+            }
+            Logging.info("Weight table: GPU path  splits=%d  partitions=%d  batching=%s",
+                numSplits, partList.size(), batchDesc);
+            computeScoresGPU(splitList, partList, clusterTable, trees, scoreArray,
+                             batchSizeHint, cfg.getGpuVramFraction());
         } else {
             if (Config.getInstance().getComputeMode() == Config.ComputeMode.GPU) {
                 Logging.info("GPU library not available, falling back to CPU");
@@ -124,7 +142,8 @@ public class WeightTable {
                                    ClusterTable clusterTable,
                                    List<Tree> trees,
                                    long[] scoreArray,
-                                   int batchSizeHint) {
+                                   int batchSizeHint,
+                                   double vramFraction) {
         int numSplits = splitList.size();
         int numParts  = partList.size();
         int numTrees  = trees.size();
@@ -194,7 +213,7 @@ public class WeightTable {
         long[] twoScores = GPUWeightCalculator.computeWeightsGPU(
             splitsData, partsData, orderings, invIndex,
             numSplits, numParts, numTrees, n, n,
-            batchSizeHint);
+            batchSizeHint, vramFraction);
         long gpuMs = (System.nanoTime() - t1) / 1_000_000;
         Logging.info("  GPU kernel returned in %d ms", gpuMs);
 

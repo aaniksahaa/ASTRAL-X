@@ -132,8 +132,14 @@ public class Main {
                 case "-m","--seeds"    -> { if (++i>=args.length) return false; cfg.setNumHashSeeds(Integer.parseInt(args[i])); }
                 case "--rooted"        -> cfg.setTreatAsUnrooted(false);
                 case "--unrooted"      -> cfg.setTreatAsUnrooted(true);
-                case "--no-gpu-batch"  -> cfg.setGpuBatch(false);
-                case "--gpu-batch-size" -> { if (++i>=args.length) return false; cfg.setGpuBatchSize(Integer.parseInt(args[i])); }
+                case "--no-gpu-batch"    -> cfg.setGpuBatch(false);
+                case "--gpu-batch-size"  -> { if (++i>=args.length) return false; cfg.setGpuBatchSize(Integer.parseInt(args[i])); }
+                case "--gpu-batches"     -> { if (++i>=args.length) return false; cfg.setGpuNumBatches(Integer.parseInt(args[i])); }
+                case "--gpu-vram-occupancy-factor" -> {
+                    if (++i>=args.length) return false;
+                    // occupancy = usable fraction of free VRAM (e.g. 0.75)
+                    cfg.setGpuVramFraction(Double.parseDouble(args[i]));
+                }
                 case "--verify-parse"  -> cfg.setVerifyParse(true);
                 case "--verify-hash"      -> cfg.setVerifyHash(true);
                 case "--verify-clusters"    -> cfg.setVerifyClusters(true);
