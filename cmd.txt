@@ -110,26 +110,26 @@ bash build.sh
 ###############################################################################
 
 # Estimated gene trees, one setting
-./run-a10k.sh --data-dir /home/user/10k-astral-dataset --tree-type estimated --opts "--search-mode full"
+./run-a10k.sh --data-dir data/10k-astral-dataset --tree-type estimated --opts "--search-mode full"
 
 # Estimated gene trees, both local and full search
-./run-a10k.sh --data-dir /home/user/10k-astral-dataset --tree-type estimated --opts-list "--search-mode local;--search-mode full"
+./run-a10k.sh --data-dir data/10k-astral-dataset --tree-type estimated --opts-list "--search-mode local;--search-mode full"
 
 # Estimated gene trees, selected replicate range
-./run-a10k.sh --data-dir /home/user/10k-astral-dataset --tree-type estimated --start-rep 1 --end-rep 5 --opts "--search-mode full"
+./run-a10k.sh --data-dir data/10k-astral-dataset --tree-type estimated --start-rep 1 --end-rep 5 --opts "--search-mode full"
 
 # True gene trees, selected replicate list
-./run-a10k.sh --data-dir /home/user/10k-astral-dataset --tree-type true --replicates "R1,R3,R5" --opts "--search-mode local"
+./run-a10k.sh --data-dir data/10k-astral-dataset --tree-type true --replicates "R1,R3,R5" --opts "--search-mode local"
 
 # True gene trees, selected replicate list, both settings
-./run-a10k.sh --data-dir /home/user/10k-astral-dataset --tree-type true --replicates "R1,R3,R5" --opts-list "--search-mode local;--search-mode full"
+./run-a10k.sh --data-dir data/10k-astral-dataset --tree-type true --replicates "R1,R3,R5" --opts-list "--search-mode local;--search-mode full"
 
 
 ###############################################################################
 # A10K stats collection
 ###############################################################################
 
-./collect-scores-a10k.sh --data-dir /home/user/10k-astral-dataset --start-rep 1 --end-rep 20
+./collect-scores-a10k.sh --data-dir data/10k-astral-dataset --start-rep 1 --end-rep 20
 
 
 ###############################################################################
@@ -143,5 +143,5 @@ simphy/data/t_100_g_100_sb_0.000001_spmin_100000_spmax_200000/R1/astralx_outputs
 simphy/data/t_100_g_100_sb_0.000001_spmin_100000_spmax_200000/R1/astralx_outputs/search-mode_local/stat-astralx.csv
 
 # A10K
-/home/user/10k-astral-dataset/10k-simphy/R1/astralx_outputs/estimated/search-mode_full/stat-astralx.csv
-/home/user/10k-astral-dataset/10k-simphy/R1/astralx_outputs/estimated/search-mode_local/stat-astralx.csv
+data/10k-astral-dataset/10k-simphy/R1/astralx_outputs/estimated/search-mode_full/stat-astralx.csv
+data/10k-astral-dataset/10k-simphy/R1/astralx_outputs/estimated/search-mode_local/stat-astralx.csv
