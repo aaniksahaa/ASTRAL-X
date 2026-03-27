@@ -124,11 +124,11 @@ SB_LIST=(0.000001)
 SPMIN_LIST=(50000)
 SPMAX_LIST=(1000000)
 
-# T_LIST=(1000 2500 5000 7500 10000 25000 50000)
-# G_LIST=(1000)
-# SB_LIST=(0.000001)
-# SPMIN_LIST=(100000)
-# SPMAX_LIST=(200000)
+T_LIST=(1000 2500 5000 7500 10000 25000)
+G_LIST=(1000)
+SB_LIST=(0.000001)
+SPMIN_LIST=(100000)
+SPMAX_LIST=(200000)
 
 
 # T_LIST=(30000 40000)
@@ -184,6 +184,69 @@ if [[ ${#ASTRALX_OPTS_LIST[@]} -eq 0 ]]; then
 fi
 
 echo "Starting bulk runs..."
+
+for t in "${T_LIST[@]}"; do
+  for g in "${G_LIST[@]}"; do
+    for sb in "${SB_LIST[@]}"; do
+      for spmin in "${SPMIN_LIST[@]}"; do
+        for spmax in "${SPMAX_LIST[@]}"; do
+
+          echo ">>> Running: t=$t g=$g sb=$sb spmin=$spmin spmax=$spmax (method=$METHOD)"
+          
+          ./sim.sh -rs $NUM_REPLICATES $BASE_DIR_ARG -t "$t" -g "$g" --sb "$sb" --spmin "$spmin" --spmax "$spmax" --fresh
+          
+          # Run replicates
+          for ((i=1; i<=NUM_REPLICATES; i++)); do
+            echo "  Running replicate R$i with $METHOD"
+            
+            for ASTRALX_OPTS_ITEM in "${ASTRALX_OPTS_LIST[@]}"; do
+              TEST_CMD=(./test-astralx-simulated.sh -r "R$i" $BASE_DIR_ARG -t "$t" -g "$g" --sb "$sb" --spmin "$spmin" --spmax "$spmax" $FRESH_ARG)
+              if [[ -n "$ASTRALX_OPTS_ITEM" ]]; then
+                TEST_CMD+=(--opts "$ASTRALX_OPTS_ITEM")
+              fi
+              "${TEST_CMD[@]}"
+            done
+          done
+
+        done
+      done
+    done
+  done
+done
+
+echo "All runs finished."
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+T_LIST=(1000)
+G_LIST=(1000 2500 5000 7500 10000 25000)
+SB_LIST=(0.000001)
+SPMIN_LIST=(100000)
+SPMAX_LIST=(200000)
+
+
+
+
+
+
+
+
+
+
+
+
+echo "Starting bulk runs... phase 2"
 
 for t in "${T_LIST[@]}"; do
   for g in "${G_LIST[@]}"; do
