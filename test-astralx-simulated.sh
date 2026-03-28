@@ -94,8 +94,11 @@ build_setting_name_from_opts() {
   if [[ ${#parts[@]} -eq 0 ]]; then
     printf 'default'
   else
-    local IFS='__'
-    printf '%s' "${parts[*]}"
+    local result=""
+    for part in "${parts[@]}"; do
+      if [[ -z "$result" ]]; then result="$part"; else result="${result}___${part}"; fi
+    done
+    printf '%s' "$result"
   fi
 }
 

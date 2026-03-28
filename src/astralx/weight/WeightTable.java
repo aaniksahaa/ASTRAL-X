@@ -88,18 +88,21 @@ public class WeightTable {
                 batchSizeHint = cfg.getGpuBatchSize();
                 batchDesc = "explicit batchSize=" + batchSizeHint;
             } else {
-                // Default: parts-relative sizing via vram-control-factor
-                //   mem(batch) = F × mem(parts)
-                //   batchSize  = F × numParts × 36 B / 48 B
-                double F        = cfg.getGpuVramControlFactor();
-                long   partsMem = (long) partList.size() * 9 * Integer.BYTES; // numParts × 36 B
-                long   batchMem = (long)(F * partsMem);
-                long   perSplit = 10L * Integer.BYTES + Long.BYTES;            // 48 B/split
-                batchSizeHint   = (int) Math.max(1, Math.min(numSplits, batchMem / perSplit));
-                int numBatches  = (numSplits + batchSizeHint - 1) / batchSizeHint;
+                // Default: resident-relative sizing via vram-control-factor
+                //   resident = orderings + invIndex + parts  (the true static VRAM floor)
+                //   mem(batch) = F × mem(resident)
+                //   batchSize  = F × residentMem / 48 B
+                double F           = cfg.getGpuVramControlFactor();
+                long   partsMem    = (long) partList.size()  *  9 * Integer.BYTES; // numParts × 36 B
+                long   orderingMem = (long) trees.size() * n *  4 * Integer.BYTES; // orderings + invIndex
+                long   residentMem = partsMem + orderingMem;
+                long   batchMem    = (long)(F * residentMem);
+                long   perSplit    = 10L * Integer.BYTES + Long.BYTES;              // 48 B/split
+                batchSizeHint      = (int) Math.max(1, Math.min(numSplits, batchMem / perSplit));
+                int numBatches     = (numSplits + batchSizeHint - 1) / batchSizeHint;
                 batchDesc = String.format(
-                    "vram-control-factor=%.3f  parts=%.1f MB  batch=%.1f MB  → %d batches",
-                    F, partsMem / 1e6, batchMem / 1e6, numBatches);
+                    "vram-control-factor=%.3f  resident=%.1f MB (parts=%.1f orderings=%.1f)  batch=%.1f MB  → %d batches",
+                    F, residentMem / 1e6, partsMem / 1e6, orderingMem / 1e6, batchMem / 1e6, numBatches);
             }
             Logging.info("Weight table: GPU path  splits=%d  partitions=%d  batching=%s",
                 numSplits, partList.size(), batchDesc);

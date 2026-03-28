@@ -42,28 +42,27 @@ public class Config {
     /**
      * VRAM control factor for GPU weight-calculation split batching.
      *
-     * The partitions array (gene-tree tripartitions) always resides in VRAM
-     * for the full duration of the weight-calculation phase; it is the
-     * irreducible memory floor of that phase.  This factor F controls the
-     * batch buffer size *relative* to that resident floor:
+     * The static resident data (orderings + invIndex + parts) always occupies
+     * VRAM for the full duration of the weight-calculation phase and cannot be
+     * reduced by batching — it is the true irreducible VRAM floor.  This factor
+     * F controls the batch buffer size relative to that total resident footprint:
      *
-     *   mem(batch) = F × mem(parts)
-     *   batchSize  = F × numParts × 36 B / 48 B  =  F × numParts × 0.75
+     *   resident   = mem(orderings) + mem(invIndex) + mem(parts)
+     *              = 2 × numTrees × numTaxa × 4 B  +  numParts × 36 B
+     *   mem(batch) = F × resident
+     *   batchSize  = F × resident / 48 B
      *
-     * Total dynamic VRAM ≈  orderings + invIndex  +  (1 + F) × mem(parts)
+     * Total peak VRAM ≈  (1 + F) × resident
      *
      * Key properties:
      *   • Hardware-independent: same batchSize on any GPU.
-     *   • F = 1.0 (default): batch buffer = parts size; predictable 2× overhead.
-     *   • F < 1: more batches, lower peak VRAM; but floor is always mem(parts).
-     *   • F > 1 would make the batch buffer larger than parts — not useful and
-     *     therefore clamped to 1.0.
-     *   • Even F = 0.01 cannot reduce total VRAM below orderings+invIndex+parts.
+     *   • F = 1.0 (default): batch memory = resident; total VRAM = 2× resident.
+     *   • F < 1: smaller batch, more rounds; reduces peak toward the resident floor.
+     *   • Even F = 0.01 cannot reduce total VRAM below the resident floor itself.
      *
      * Priority: --no-gpu-batch  >  --gpu-batches  >  --gpu-batch-size  >  --gpu-vram-control-factor
      *
-     * Default 1.0 (active).  Set to ≤ 0 internally to disable (not exposed to users).
-     * Configured via --gpu-vram-control-factor.  Must be in (0, 1].
+     * Default 1.0 (active).  Configured via --gpu-vram-control-factor.  Must be in (0, 1].
      */
     private double gpuVramControlFactor = 1.0;
 
