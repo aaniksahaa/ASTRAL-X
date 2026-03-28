@@ -40,31 +40,37 @@ public class Config {
 
 
     /**
-     * VRAM control factor for GPU weight-calculation split batching.
+     * Fraction of free VRAM (after static upload) to use for the batch buffer.
+     * This is the DEFAULT auto batching mode — the native code queries free VRAM
+     * via cudaMemGetInfo after uploading static data, then allocates:
      *
-     * The static resident data (orderings + invIndex + parts) always occupies
-     * VRAM for the full duration of the weight-calculation phase and cannot be
-     * reduced by batching — it is the true irreducible VRAM floor.  This factor
-     * F controls the batch buffer size relative to that total resident footprint:
+     *   batchSize = floor(freeVRAM × gpuVramFraction / 48 B)
+     *
+     * This adapts automatically to whatever GPU and dataset are in use.
+     * Default 0.75 (use 75% of remaining free VRAM for splits + scores buffers,
+     * leaving 25% headroom for driver, kernel stack, page tables).
+     *
+     * Configured via --gpu-vram-occupancy-factor.  Must be in (0, 1].
+     */
+    private double gpuVramFraction = 0.75;
+
+    /**
+     * VRAM control factor for GPU weight-calculation split batching.
+     * Manual override — resident-relative sizing:
      *
      *   resident   = mem(orderings) + mem(invIndex) + mem(parts)
-     *              = 2 × numTrees × numTaxa × 4 B  +  numParts × 36 B
      *   mem(batch) = F × resident
      *   batchSize  = F × resident / 48 B
      *
-     * Total peak VRAM ≈  (1 + F) × resident
+     * Hardware-independent (same batchSize on any GPU).  Only active when
+     * explicitly set via --gpu-vram-control-factor; otherwise the auto
+     * free-VRAM adaptive path (gpuVramFraction) is used.
      *
-     * Key properties:
-     *   • Hardware-independent: same batchSize on any GPU.
-     *   • F = 1.0 (default): batch memory = resident; total VRAM = 2× resident.
-     *   • F < 1: smaller batch, more rounds; reduces peak toward the resident floor.
-     *   • Even F = 0.01 cannot reduce total VRAM below the resident floor itself.
-     *
-     * Priority: --no-gpu-batch  >  --gpu-batches  >  --gpu-batch-size  >  --gpu-vram-control-factor
-     *
-     * Default 1.0 (active).  Configured via --gpu-vram-control-factor.  Must be in (0, 1].
+     * Priority: --no-gpu-batch  >  --gpu-batches  >  --gpu-batch-size
+     *         >  --gpu-vram-control-factor  >  auto (--gpu-vram-occupancy-factor)
      */
-    private double gpuVramControlFactor = 1.0;
+    private double gpuVramControlFactor    = 1.0;
+    private boolean gpuVramControlFactorSet = false;
 
     /**
      * GPU output buffer size for the cross-tree DP state-space construction phase
@@ -116,8 +122,11 @@ public class Config {
     public void setGpuBatchSize(int s)        { this.gpuBatchSize = s; }
     public int getGpuNumBatches()             { return gpuNumBatches; }
     public void setGpuNumBatches(int n)       { this.gpuNumBatches = Math.max(1, n); }
-    public double getGpuVramControlFactor()      { return gpuVramControlFactor; }
-    public void setGpuVramControlFactor(double f){ this.gpuVramControlFactor = Math.max(0.001, Math.min(1.0, f)); }
+    public double getGpuVramFraction()            { return gpuVramFraction; }
+    public void setGpuVramFraction(double f)      { this.gpuVramFraction = Math.max(0.01, Math.min(1.0, f)); }
+    public double getGpuVramControlFactor()       { return gpuVramControlFactor; }
+    public boolean isGpuVramControlFactorSet()    { return gpuVramControlFactorSet; }
+    public void setGpuVramControlFactor(double f) { this.gpuVramControlFactor = Math.max(0.001, Math.min(1.0, f)); this.gpuVramControlFactorSet = true; }
     /** Raw byte count of the GPU DP output buffer. */
     public long getGpuDpOutputCapBytes()      { return gpuDpOutputCapBytes; }
 

@@ -45,9 +45,11 @@ Optional:
   --seeds, -m        Number of hash seeds
   --rooted           Treat input as rooted
   --unrooted         Treat input as unrooted
-  --no-gpu-batch     Disable GPU batching
-  --gpu-batch-size   GPU batch size
-  --gpu-batches      Number of GPU batches
+  --no-gpu-batch              Disable GPU batching
+  --gpu-batch-size            GPU batch size (manual)
+  --gpu-batches               Number of GPU batches (manual)
+  --gpu-vram-occupancy-factor Fraction of free VRAM to use for batching (default: 0.75)
+  --gpu-vram-control-factor   Resident-relative batch sizing override
   -v|-vv|-vvv        Verbosity
   --xms SIZE         Java min heap (default: ${XMS})
   --xmx SIZE         Java max heap (default: ${XMX})
@@ -96,7 +98,7 @@ while [[ $# -gt 0 ]]; do
       COMPUTE_MODE_SET=true
       shift
       ;;
-    --search-mode|-t|--threads|-m|--seeds|--gpu-batch-size|--gpu-batches|--gpu-vram-control-factor|--gpu-dp-state-space-construction-output-cap)
+    --search-mode|-t|--threads|-m|--seeds|--gpu-batch-size|--gpu-batches|--gpu-vram-control-factor|--gpu-vram-occupancy-factor|--gpu-dp-state-space-construction-output-cap)
       PROGRAM_ARGS+=("$1" "$2")
       shift 2
       ;;

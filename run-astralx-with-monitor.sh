@@ -61,7 +61,7 @@ while [[ $# -gt 0 ]]; do
       ASTRALX_ARGS+=("$1")
       shift
       ;;
-    --search-mode|-t|--threads|-m|--seeds|--gpu-batch-size|--gpu-batches|--gpu-vram-control-factor|--gpu-dp-state-space-construction-output-cap)
+    --search-mode|-t|--threads|-m|--seeds|--gpu-batch-size|--gpu-batches|--gpu-vram-control-factor|--gpu-vram-occupancy-factor|--gpu-dp-state-space-construction-output-cap)
       ASTRALX_ARGS+=("$1" "$2")
       shift 2
       ;;

@@ -193,16 +193,25 @@ public class Banner {
             batchStr = c(WHT, cfg.getGpuNumBatches() + " batches") + c(DIM, "  (manual)");
         } else if (cfg.getGpuBatchSize() > 0) {
             batchStr = c(WHT, "batch-size " + cfg.getGpuBatchSize()) + c(DIM, "  (manual)");
+        } else if (cfg.isGpuVramControlFactorSet()) {
+            batchStr = c(WHT, "vram-control-factor") + c(DIM, "  (resident-relative)");
         } else {
-            batchStr = c(WHT, "vram-control-factor") + c(DIM, "  (parts-relative)");
+            batchStr = c(WHT, "auto") + c(DIM, "  (free-VRAM adaptive)");
         }
         out.println("    " + row("Weight batching",          batchStr));
 
-        // VRAM control factor (the primary batching knob)
-        out.println("    " + row("  VRAM control factor",    gpuMode
-                ? c(WHT, String.format("%.3f", cfg.getGpuVramControlFactor()))
-                  + c(DIM, "  →  mem(batch) = F × mem(parts)")
-                : naTag));
+        // Batching sub-parameter: show the active knob
+        if (gpuMode && cfg.isGpuBatch()) {
+            if (cfg.isGpuVramControlFactorSet()) {
+                out.println("    " + row("  VRAM control factor",
+                    c(WHT, String.format("%.3f", cfg.getGpuVramControlFactor()))
+                    + c(DIM, "  →  mem(batch) = F × mem(resident)")));
+            } else if (cfg.getGpuNumBatches() <= 0 && cfg.getGpuBatchSize() <= 0) {
+                out.println("    " + row("  VRAM occupancy factor",
+                    c(WHT, String.format("%.2f", cfg.getGpuVramFraction()))
+                    + c(DIM, "  →  batch = freeVRAM × factor")));
+            }
+        }
 
 
         // DP state-space cap (only meaningful for GPU + FULL search)

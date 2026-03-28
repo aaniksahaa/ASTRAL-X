@@ -71,9 +71,11 @@ public class WeightTable {
 
         if (useGPU) {
             // Resolve batchSizeHint
-            //   Priority: no-batch  >  gpu-batches  >  gpu-batch-size  >  vram-control-factor
+            //   Priority: no-batch  >  gpu-batches  >  gpu-batch-size
+            //           > gpu-vram-control-factor (explicit)  >  auto (gpu-vram-occupancy-factor)
             //   -1  = no batching (single launch)
-            //   >0  = exact splits-per-batch (always resolved here; native never sees 0)
+            //    0  = auto: native queries free VRAM and computes batch size itself
+            //   >0  = exact splits-per-batch resolved here; native uses it directly
             Config cfg = Config.getInstance();
             int batchSizeHint;
             String batchDesc;
@@ -87,11 +89,8 @@ public class WeightTable {
             } else if (cfg.getGpuBatchSize() > 0) {
                 batchSizeHint = cfg.getGpuBatchSize();
                 batchDesc = "explicit batchSize=" + batchSizeHint;
-            } else {
-                // Default: resident-relative sizing via vram-control-factor
-                //   resident = orderings + invIndex + parts  (the true static VRAM floor)
-                //   mem(batch) = F × mem(resident)
-                //   batchSize  = F × residentMem / 48 B
+            } else if (cfg.isGpuVramControlFactorSet()) {
+                // Manual resident-relative sizing:  mem(batch) = F × mem(resident)
                 double F           = cfg.getGpuVramControlFactor();
                 long   partsMem    = (long) partList.size()  *  9 * Integer.BYTES; // numParts × 36 B
                 long   orderingMem = (long) trees.size() * n *  4 * Integer.BYTES; // orderings + invIndex
@@ -103,13 +102,17 @@ public class WeightTable {
                 batchDesc = String.format(
                     "vram-control-factor=%.3f  resident=%.1f MB (parts=%.1f orderings=%.1f)  batch=%.1f MB  → %d batches",
                     F, residentMem / 1e6, partsMem / 1e6, orderingMem / 1e6, batchMem / 1e6, numBatches);
+            } else {
+                // Default: auto — pass 0 to native; native queries free VRAM after static upload
+                // and computes batchSize = floor(freeVRAM * vramFraction / 48 B)
+                batchSizeHint = 0;
+                batchDesc = String.format("auto (free-VRAM adaptive, occupancy=%.0f%%)",
+                    cfg.getGpuVramFraction() * 100);
             }
             Logging.info("Weight table: GPU path  splits=%d  partitions=%d  batching=%s",
                 numSplits, partList.size(), batchDesc);
-            // vramFraction is kept in the native signature for legacy compatibility
-            // but is never used (batchSizeHint is always resolved above, never 0).
             computeScoresGPU(splitList, partList, clusterTable, trees, scoreArray,
-                             batchSizeHint, 0.75);
+                             batchSizeHint, cfg.getGpuVramFraction());
         } else {
             if (Config.getInstance().getComputeMode() == Config.ComputeMode.GPU) {
                 Logging.info("GPU library not available, falling back to CPU");
