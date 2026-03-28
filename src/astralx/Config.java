@@ -38,13 +38,34 @@ public class Config {
      */
     private int gpuNumBatches = 0;
 
+
     /**
-     * Fraction of free VRAM to occupy when computing auto batch size.
-     * Default 0.75 means use 75% of free VRAM, reserving 25% as headroom
-     * for driver overhead, kernel stack, and page tables.
-     * Configured via --gpu-vram-occupancy-factor.  Must be in (0, 1].
+     * VRAM control factor for GPU weight-calculation split batching.
+     *
+     * The partitions array (gene-tree tripartitions) always resides in VRAM
+     * for the full duration of the weight-calculation phase; it is the
+     * irreducible memory floor of that phase.  This factor F controls the
+     * batch buffer size *relative* to that resident floor:
+     *
+     *   mem(batch) = F × mem(parts)
+     *   batchSize  = F × numParts × 36 B / 48 B  =  F × numParts × 0.75
+     *
+     * Total dynamic VRAM ≈  orderings + invIndex  +  (1 + F) × mem(parts)
+     *
+     * Key properties:
+     *   • Hardware-independent: same batchSize on any GPU.
+     *   • F = 1.0 (default): batch buffer = parts size; predictable 2× overhead.
+     *   • F < 1: more batches, lower peak VRAM; but floor is always mem(parts).
+     *   • F > 1 would make the batch buffer larger than parts — not useful and
+     *     therefore clamped to 1.0.
+     *   • Even F = 0.01 cannot reduce total VRAM below orderings+invIndex+parts.
+     *
+     * Priority: --no-gpu-batch  >  --gpu-batches  >  --gpu-batch-size  >  --gpu-vram-control-factor
+     *
+     * Default 1.0 (active).  Set to ≤ 0 internally to disable (not exposed to users).
+     * Configured via --gpu-vram-control-factor.  Must be in (0, 1].
      */
-    private double gpuVramFraction = 0.75;
+    private double gpuVramControlFactor = 1.0;
 
     /**
      * GPU output buffer size for the cross-tree DP state-space construction phase
@@ -96,8 +117,8 @@ public class Config {
     public void setGpuBatchSize(int s)        { this.gpuBatchSize = s; }
     public int getGpuNumBatches()             { return gpuNumBatches; }
     public void setGpuNumBatches(int n)       { this.gpuNumBatches = Math.max(1, n); }
-    public double getGpuVramFraction()        { return gpuVramFraction; }
-    public void setGpuVramFraction(double f)  { this.gpuVramFraction = Math.max(0.01, Math.min(1.0, f)); }
+    public double getGpuVramControlFactor()      { return gpuVramControlFactor; }
+    public void setGpuVramControlFactor(double f){ this.gpuVramControlFactor = Math.max(0.001, Math.min(1.0, f)); }
     /** Raw byte count of the GPU DP output buffer. */
     public long getGpuDpOutputCapBytes()      { return gpuDpOutputCapBytes; }
 

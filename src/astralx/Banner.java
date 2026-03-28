@@ -183,25 +183,27 @@ public class Banner {
         out.println();
 
         // ── GPU parameters ─────────────────────────────────────────────────
-        // Weight batching
+        // Weight batching mode
         String batchStr;
         if (!gpuMode) {
             batchStr = naTag;
         } else if (!cfg.isGpuBatch()) {
-            batchStr = c(WHT, "disabled");
+            batchStr = c(WHT, "disabled  (single launch)");
         } else if (cfg.getGpuNumBatches() > 0) {
-            batchStr = c(WHT, cfg.getGpuNumBatches() + " batches") + c(DIM, "  (--gpu-batches)");
+            batchStr = c(WHT, cfg.getGpuNumBatches() + " batches") + c(DIM, "  (manual)");
         } else if (cfg.getGpuBatchSize() > 0) {
-            batchStr = c(WHT, "batch-size " + cfg.getGpuBatchSize()) + c(DIM, "  (--gpu-batch-size)");
+            batchStr = c(WHT, "batch-size " + cfg.getGpuBatchSize()) + c(DIM, "  (manual)");
         } else {
-            batchStr = c(WHT, "auto") + c(DIM, "  (adaptive from free VRAM)");
+            batchStr = c(WHT, "vram-control-factor") + c(DIM, "  (parts-relative)");
         }
-        out.println("    " + row("Weight batching",    batchStr));
+        out.println("    " + row("Weight batching",          batchStr));
 
-        // VRAM occupancy fraction
-        out.println("    " + row("VRAM occupancy",     gpuMode
-                ? c(WHT, String.format("%.0f%%", cfg.getGpuVramFraction() * 100))
+        // VRAM control factor (the primary batching knob)
+        out.println("    " + row("  VRAM control factor",    gpuMode
+                ? c(WHT, String.format("%.3f", cfg.getGpuVramControlFactor()))
+                  + c(DIM, "  →  mem(batch) = F × mem(parts)")
                 : naTag));
+
 
         // DP state-space cap (only meaningful for GPU + FULL search)
         boolean dpRelevant = gpuMode && cfg.getSearchMode() == Config.SearchMode.FULL;
