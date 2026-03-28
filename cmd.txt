@@ -17,6 +17,8 @@
 ./collect-stats-simulated.sh --simphy-dir ./simphy --out astralx-scale-taxa.csv
 
 
+./run.sh -i all_gt_bs_rooted_37.tre --gpu --gpu-batches 10 -vv --search-mode full
+
 ###############################################################################
 # Build
 ###############################################################################

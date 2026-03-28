@@ -329,6 +329,36 @@ Java_astralx_gpu_GPUDPBuilder_findCrossTreeTransitionsGPU(
         cudaMemcpy(d_outCount, &zero, sizeof(int), cudaMemcpyHostToDevice);
     }
 
+    // Analytical VRAM budget: log all allocations for this phase
+    {
+        size_t clusterDataBytes = (size_t)N * mSeeds * 2 * sizeof(long long)
+                                + (size_t)N * sizeof(int);
+        size_t htBytes = (size_t)HT_SIZE * mSeeds * 2 * sizeof(long long)
+                       + (size_t)HT_SIZE * 2 * sizeof(int);
+        size_t outBufBytes = (size_t)maxPerRound * 3 * sizeof(int);
+        size_t idxBufBytes = (size_t)N * 2 * sizeof(int);
+        size_t totalBytes  = clusterDataBytes + htBytes + outBufBytes + idxBufBytes;
+        size_t freeNow = 0, totalVRAM = 0;
+        cudaMemGetInfo(&freeNow, &totalVRAM);
+        fprintf(stderr,
+            "[ASTRAL-X GPU] DP cross-tree allocations:\n"
+            "  N=%d  HT_SIZE=%d  mSeeds=%d  maxPerRound=%d\n"
+            "  cluster data : %6.1f MB\n"
+            "  hash table   : %6.1f MB\n"
+            "  output buf   : %6.1f MB  (%d triples max)\n"
+            "  index bufs   : %6.1f MB\n"
+            "  ─────────────────────────────────────────\n"
+            "  DP total     : %6.1f MB   (VRAM free now: %.1f MB / %.1f MB)\n",
+            N, HT_SIZE, mSeeds, maxPerRound,
+            clusterDataBytes / 1e6,
+            htBytes          / 1e6,
+            outBufBytes      / 1e6, maxPerRound,
+            idxBufBytes      / 1e6,
+            totalBytes       / 1e6,
+            freeNow / 1e6, totalVRAM / 1e6);
+        fflush(stderr);
+    }
+
     // ── Host accumulator for all found triples ────────────────────────────────
     std::vector<int> accum; // (idxA, idxB, idxRes) interleaved
     accum.reserve(std::min(N * 10, 1000000));
@@ -382,10 +412,32 @@ Java_astralx_gpu_GPUDPBuilder_findCrossTreeTransitionsGPU(
             cudaMemcpy(&outCount, d_outCount, sizeof(int), cudaMemcpyDeviceToHost);
 
             if (outCount > maxPerRound) {
+                int lost = outCount - maxPerRound;
                 fprintf(stderr,
-                    "[astralx_dp] WARNING: output overflow in sub-batch (sz=%d, "
-                    "aOff=%d, got %d > %d). Some transitions lost.\n",
-                    sz, aOff, outCount, maxPerRound);
+                    "\n"
+                    "  ╔══════════════════════════════════════════════════════════════╗\n"
+                    "  ║           !!!  CRITICAL WARNING  !!!                        ║\n"
+                    "  ╠══════════════════════════════════════════════════════════════╣\n"
+                    "  ║  GPU OUTPUT BUFFER OVERFLOW IN CROSS-TREE DP PHASE          ║\n"
+                    "  ║                                                              ║\n"
+                    "  ║  Sub-batch produced %d triples but the GPU output\n"
+                    "  ║  buffer cap is %d (%.0f MB).  %d transitions\n"
+                    "  ║  have been SILENTLY DROPPED.                                 ║\n"
+                    "  ║                                                              ║\n"
+                    "  ║  CONSEQUENCE: the DP search space is INCOMPLETE.  Missing   ║\n"
+                    "  ║  candidate splits may degrade the inferred species tree.     ║\n"
+                    "  ║                                                              ║\n"
+                    "  ║  Context:  size-bin sz=%d,  aOff=%d                          ║\n"
+                    "  ║                                                              ║\n"
+                    "  ║  TO FIX: rerun with --gpu-dp-state-space-construction-output-cap  ║\n"
+                    "  ║  set to a larger value, e.g.  --gpu-dp-state-space-...  1g  ║\n"
+                    "  ║  or report this dataset to the ASTRAL-X maintainers.        ║\n"
+                    "  ╚══════════════════════════════════════════════════════════════╝\n"
+                    "\n",
+                    outCount,
+                    maxPerRound, (double)maxPerRound * 3 * sizeof(int) / 1e6, lost,
+                    sz, aOff);
+                fflush(stderr);
                 outCount = maxPerRound;
             }
 

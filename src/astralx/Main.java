@@ -4,6 +4,7 @@ import astralx.cluster.ClusterTable;
 import astralx.dp.DPTable;
 import astralx.dp.Inference;
 import astralx.gpu.GPUDPBuilder;
+import astralx.gpu.GPUWeightCalculator;
 import astralx.partition.PartitionTable;
 import astralx.weight.WeightTable;
 import astralx.hash.PrefixHashArrays;
@@ -30,8 +31,10 @@ public class Main {
 
         try {
             // ── Phase 1: Parse gene trees ─────────────────────────────────────
+            long t1 = PhaseLogger.begin("Phase 1  Parse gene trees", false);
             TaxonRegistry registry = new TaxonRegistry();
             List<Tree> trees = TreeParser.parseGeneTrees(cfg.getInputFile(), registry);
+            PhaseLogger.end("Phase 1  Parse gene trees", t1, false);
 
             if (cfg.isVerifyParse()) {
                 Phase1Verifier.dump(trees, registry, cfg.getOutputFile());
@@ -39,9 +42,11 @@ public class Main {
             }
 
             // ── Phase 2: Taxon hashing + prefix arrays ────────────────────────
+            long t2 = PhaseLogger.begin("Phase 2  Taxon hashing", false);
             TaxonHasher hasher = new TaxonHasher(
                 registry.size(), cfg.getNumHashSeeds(), cfg.getBaseSeed());
             PrefixHashArrays pref = new PrefixHashArrays(trees, hasher);
+            PhaseLogger.end("Phase 2  Taxon hashing", t2, false);
 
             if (cfg.isVerifyHash()) {
                 Phase2Verifier.dump(trees, registry, hasher, pref, cfg.getOutputFile());
@@ -49,7 +54,9 @@ public class Main {
             }
 
             // ── Phase 3: Cluster extraction -> X ─────────────────────────────
+            long t3 = PhaseLogger.begin("Phase 3  Cluster extraction", false);
             ClusterTable clusterTable = new ClusterTable(trees, pref, registry.size());
+            PhaseLogger.end("Phase 3  Cluster extraction", t3, false);
 
             if (cfg.isVerifyClusters()) {
                 Phase3Verifier.dump(trees, registry, pref, clusterTable, cfg.getOutputFile());
@@ -57,7 +64,9 @@ public class Main {
             }
 
             // ── Phase 4: Gene-tree tripartition extraction ────────────────────
+            long t4 = PhaseLogger.begin("Phase 4  Tripartition extraction", false);
             PartitionTable partTable = new PartitionTable(trees, pref);
+            PhaseLogger.end("Phase 4  Tripartition extraction", t4, false);
 
             if (cfg.isVerifyPartitions()) {
                 Phase4Verifier.dump(trees, registry, pref, partTable, cfg.getOutputFile());
@@ -65,13 +74,17 @@ public class Main {
             }
 
             // ── Phase 5: DP search space (tree-local transitions) ─────────────
+            long t5 = PhaseLogger.begin("Phase 5  DP local transitions", false);
             DPTable dpTable = new DPTable(trees, pref, clusterTable);
+            PhaseLogger.end("Phase 5  DP local transitions", t5, false);
 
             // ── Phase 5b: Cross-tree transitions (Mode 2, optional) ───────────
             if (cfg.getSearchMode() == Config.SearchMode.FULL) {
                 boolean gpuDP = (cfg.getComputeMode() == Config.ComputeMode.GPU)
                                 && GPUDPBuilder.tryLoad();
+                long t5b = PhaseLogger.begin("Phase 5b Cross-tree transitions", gpuDP);
                 dpTable.addCrossTreeTransitions(clusterTable, gpuDP);
+                PhaseLogger.end("Phase 5b Cross-tree transitions", t5b, gpuDP);
             }
 
             if (cfg.isVerifyDPSpace()) {
@@ -80,7 +93,11 @@ public class Main {
             }
 
             // ── Phase 6: Weight calculation ───────────────────────────────────
+            boolean gpuWeight = (cfg.getComputeMode() == Config.ComputeMode.GPU)
+                                && GPUWeightCalculator.isLoaded();
+            long t6 = PhaseLogger.begin("Phase 6  Weight calculation", gpuWeight);
             WeightTable weightTable = new WeightTable(dpTable, partTable, clusterTable, trees);
+            PhaseLogger.end("Phase 6  Weight calculation", t6, gpuWeight);
 
             if (cfg.isVerifyWeights()) {
                 Phase6Verifier.dump(trees, registry, clusterTable, dpTable, weightTable, cfg.getOutputFile());
@@ -88,8 +105,10 @@ public class Main {
             }
 
             // ── Phase 7: Inference DP + tree reconstruction ───────────────────
+            long t7 = PhaseLogger.begin("Phase 7  Inference", false);
             Inference inference = new Inference();
             String speciesTree = inference.run(dpTable, weightTable, clusterTable, trees, registry);
+            PhaseLogger.end("Phase 7  Inference", t7, false);
 
             // Write or print the species tree
             if (cfg.getOutputFile() != null) {
@@ -137,6 +156,7 @@ public class Main {
                     // occupancy = usable fraction of free VRAM (e.g. 0.75)
                     cfg.setGpuVramFraction(Double.parseDouble(args[i]));
                 }
+                case "--gpu-dp-state-space-construction-output-cap" -> { if (++i>=args.length) return false; cfg.setGpuDpStateSpaceConstructionOutputCap(args[i]); }
                 case "--verify-parse"  -> cfg.setVerifyParse(true);
                 case "--verify-hash"      -> cfg.setVerifyHash(true);
                 case "--verify-clusters"    -> cfg.setVerifyClusters(true);

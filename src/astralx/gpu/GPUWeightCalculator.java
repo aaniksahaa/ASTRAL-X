@@ -74,4 +74,10 @@ public class GPUWeightCalculator {
         int batchSizeHint,
         double vramFraction
     );
+
+    /**
+     * Query GPU free and total VRAM via cudaMemGetInfo.
+     * Returns long[2] = {freeMiB, totalMiB}, or null if unavailable.
+     */
+    public static native long[] queryVRAMMiB();
 }

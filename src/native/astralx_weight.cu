@@ -32,6 +32,7 @@
  */
 
 #include <stdio.h>
+#include <time.h>
 #include <cuda_runtime.h>
 #include <jni.h>
 
@@ -175,7 +176,66 @@ __global__ void computeWeightsKernel(
 // JNI entry point
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Progress-bar helpers (host-side, used in the batch loop)
+// ---------------------------------------------------------------------------
+
+static double wb_now_sec(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+}
+
+// Format a duration in seconds as "4s", "1m23s", "2h05m"
+static void wb_fmt_duration(double secs, char* buf, int buflen) {
+    int s = (int)secs;
+    if (s < 60)
+        snprintf(buf, buflen, "%ds", s);
+    else if (s < 3600)
+        snprintf(buf, buflen, "%dm%02ds", s / 60, s % 60);
+    else
+        snprintf(buf, buflen, "%dh%02dm", s / 3600, (s % 3600) / 60);
+}
+
+// Build a Unicode block progress bar into buf (must hold BAR_W*3+1 bytes).
+// Filled portion uses █ (U+2588), remainder uses ░ (U+2591).
+#define WB_BAR_W 28
+static void wb_build_bar(char* buf, int done, int total) {
+    int filled = (total > 0) ? (int)((double)done / total * WB_BAR_W + 0.5) : 0;
+    if (filled > WB_BAR_W) filled = WB_BAR_W;
+    int pos = 0;
+    for (int i = 0; i < WB_BAR_W; i++) {
+        if (i < filled) {
+            buf[pos++] = '\xe2'; buf[pos++] = '\x96'; buf[pos++] = '\x88'; // █
+        } else {
+            buf[pos++] = '\xe2'; buf[pos++] = '\x96'; buf[pos++] = '\x91'; // ░
+        }
+    }
+    buf[pos] = '\0';
+}
+
+// ---------------------------------------------------------------------------
+
 extern "C" {
+
+// ---------------------------------------------------------------------------
+// queryVRAMMiB: lightweight VRAM probe for Java-side phase logging
+// ---------------------------------------------------------------------------
+JNIEXPORT jlongArray JNICALL
+Java_astralx_gpu_GPUWeightCalculator_queryVRAMMiB(JNIEnv* env, jclass cls)
+{
+    size_t freeBytes = 0, totalBytes = 0;
+    cudaError_t err = cudaMemGetInfo(&freeBytes, &totalBytes);
+    if (err != cudaSuccess) return NULL;
+    jlong data[2] = {
+        (jlong)(freeBytes  / (1024ULL * 1024ULL)),
+        (jlong)(totalBytes / (1024ULL * 1024ULL))
+    };
+    jlongArray result = env->NewLongArray(2);
+    if (!result) return NULL;
+    env->SetLongArrayRegion(result, 0, 2, data);
+    return result;
+}
 
 JNIEXPORT jlongArray JNICALL
 Java_astralx_gpu_GPUWeightCalculator_computeWeightsGPU(
@@ -209,6 +269,27 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsGPU(
     cudaMemcpy(dParts,     hParts,     partsSz,    cudaMemcpyHostToDevice);
     cudaMemcpy(dOrderings, hOrderings, orderingSz, cudaMemcpyHostToDevice);
     cudaMemcpy(dInvIndex,  hInvIndex,  orderingSz, cudaMemcpyHostToDevice);
+
+    // Analytical VRAM budget: show exactly what is resident on-device
+    {
+        size_t staticTotal = partsSz + 2 * orderingSz;
+        size_t freeAfterStatic = 0, totalVRAM = 0;
+        cudaMemGetInfo(&freeAfterStatic, &totalVRAM);
+        fprintf(stderr,
+            "[ASTRAL-X GPU] weight static data uploaded:\n"
+            "  orderings : %6.1f MB\n"
+            "  invIndex  : %6.1f MB\n"
+            "  parts     : %6.1f MB\n"
+            "  ─────────────────────\n"
+            "  static total : %6.1f MB   (VRAM free after: %.1f MB / %.1f MB)\n",
+            orderingSz / 1e6,
+            orderingSz / 1e6,
+            partsSz    / 1e6,
+            staticTotal / 1e6,
+            freeAfterStatic / 1e6,
+            totalVRAM / 1e6);
+        fflush(stderr);
+    }
 
     // -------------------------------------------------------------------------
     // Determine batch size
@@ -277,6 +358,22 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsGPU(
         return NULL;
     }
 
+    // Log final batch configuration
+    {
+        int numBatchesPlan = (numSplits + batchSize - 1) / batchSize;
+        size_t splitBufMB = (size_t)batchSize * 10 * sizeof(int);
+        size_t scoreBufMB = (size_t)batchSize * sizeof(long long);
+        fprintf(stderr,
+            "[ASTRAL-X GPU] weight batch buffers:\n"
+            "  splits buf  : %6.1f MB  (%d splits × 40 B)\n"
+            "  scores buf  : %6.1f MB  (%d splits × 8 B)\n"
+            "  batches     : %d  (batchSize=%d, numSplits=%d)\n",
+            splitBufMB / 1e6, batchSize,
+            scoreBufMB / 1e6, batchSize,
+            numBatchesPlan, batchSize, numSplits);
+        fflush(stderr);
+    }
+
     // -------------------------------------------------------------------------
     // Host result buffer — accumulates scores across all batches
     // -------------------------------------------------------------------------
@@ -285,8 +382,10 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsGPU(
     // -------------------------------------------------------------------------
     // Batch loop: stream splits in, stream scores out
     // -------------------------------------------------------------------------
-    int blockSize  = 256;
-    int numBatches = (numSplits + batchSize - 1) / batchSize;
+    int    blockSize  = 256;
+    int    numBatches = (numSplits + batchSize - 1) / batchSize;
+    double t_loop_start = wb_now_sec();
+    char   bar_buf[WB_BAR_W * 3 + 1];
 
     for (int b = 0; b < numBatches; b++) {
         int offset   = b * batchSize;
@@ -317,20 +416,42 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsGPU(
                    (size_t)curBatch * sizeof(long long),
                    cudaMemcpyDeviceToHost);
 
-        // Progress (only shown when there are multiple batches)
+        // ── tqdm-style progress bar (multi-batch only) ────────────────────
         if (numBatches > 1) {
-            fprintf(stderr,
-                "\r[ASTRAL-X GPU] weight batch %d/%d  (splits %d–%d, %.1f%%)",
-                b + 1, numBatches,
-                offset, offset + curBatch - 1,
-                100.0 * (b + 1) / numBatches);
+            double elapsed  = wb_now_sec() - t_loop_start;
+            double avg_sec  = elapsed / (b + 1);
+            int    rem      = numBatches - (b + 1);
+            double pct      = 100.0 * (b + 1) / numBatches;
+            wb_build_bar(bar_buf, b + 1, numBatches);
+
+            if (rem == 0) {
+                // Final batch: end the line with total time
+                char dur_buf[32];
+                wb_fmt_duration(elapsed, dur_buf, sizeof(dur_buf));
+                fprintf(stderr,
+                    "\r  [GPU] weight  [%s]  %d/%d  100%%  done in %s"
+                    "                    \n",   // trailing spaces clear any leftover ETA text
+                    bar_buf, numBatches, numBatches, dur_buf);
+            } else if (b == 0) {
+                // First batch done: show ETA from first sample
+                char eta_buf[32];
+                wb_fmt_duration(avg_sec * rem, eta_buf, sizeof(eta_buf));
+                fprintf(stderr,
+                    "\r  [GPU] weight  [%s]  %d/%d  %5.1f%%  "
+                    "%.2fs/batch  ETA: %-8s",
+                    bar_buf, b + 1, numBatches, pct, avg_sec, eta_buf);
+            } else {
+                // Subsequent batches: rolling average ETA
+                char eta_buf[32];
+                wb_fmt_duration(avg_sec * rem, eta_buf, sizeof(eta_buf));
+                fprintf(stderr,
+                    "\r  [GPU] weight  [%s]  %d/%d  %5.1f%%  "
+                    "%.2fs/batch  ETA: %-8s",
+                    bar_buf, b + 1, numBatches, pct, avg_sec, eta_buf);
+            }
             fflush(stderr);
         }
-    }
-    if (numBatches > 1) {
-        fprintf(stderr, "\n");
-        fflush(stderr);
-    }
+    }   // end batch loop
 
     // -------------------------------------------------------------------------
     // Build Java long[] result

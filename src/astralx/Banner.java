@@ -26,10 +26,23 @@ public class Banner {
 
     private static final boolean USE_COLOR = detectColor();
 
+    /** Exposed so PhaseLogger and other classes can share the same colour decision. */
+    public static boolean useColor() { return USE_COLOR; }
+
     private static boolean detectColor() {
         if (System.getenv("NO_COLOR")    != null) return false;
         if (System.getenv("FORCE_COLOR") != null) return true;
-        return System.console() != null;
+        // System.console() requires stdin+stdout to be ttys, so it returns null when
+        // the JVM is spawned by a script (even if the terminal is visible).
+        // Fall back to checking whether stderr's file descriptor points to a tty.
+        if (System.console() != null) return true;
+        try {
+            String fd2 = java.nio.file.Files.readSymbolicLink(
+                java.nio.file.Paths.get("/proc/self/fd/2")).toString();
+            return fd2.startsWith("/dev/pts") || fd2.startsWith("/dev/tty");
+        } catch (Exception e) {
+            return false;
+        }
     }
 
     private static String c(String code, String text) {
@@ -81,7 +94,6 @@ public class Banner {
 
         // ── Title box ──────────────────────────────────────────────────────
         String title = "ASTRAL-X  v" + Main.VERSION;
-        // inner content width = w - 2  (one space padding each side inside ║…║)
         int inner = w - 2;
         int lpad  = (inner - title.length()) / 2;
         int rpad  = inner - title.length() - lpad;
@@ -97,7 +109,6 @@ public class Banner {
         out.println("  " + c(BOLD + CYAN, "╚" + "═".repeat(w) + "╝"));
         out.println();
 
-        // separator used for section headers
         String sep = "─".repeat(w - 2);
 
         // ── System section ─────────────────────────────────────────────────
@@ -130,50 +141,91 @@ public class Banner {
 
         // ── Run configuration section ───────────────────────────────────────
         out.println("  " + c(BOLD, "Run Configuration") + "  " + c(DIM, sep.substring(0, sep.length() - 15)));
-
-        String inputPath = cfg.getInputFile();
-        if (inputPath != null) {
-            String[] parts = inputPath.replace('\\', '/').split("/");
-            String display = parts.length > 2
-                ? "…/" + parts[parts.length - 2] + "/" + parts[parts.length - 1]
-                : inputPath;
-            out.println("    " + row("Input",   c(WHT, display)));
-        }
+        out.println();
 
         boolean gpuMode = cfg.getComputeMode() == Config.ComputeMode.GPU;
-        out.println("    " + row("Compute",
-            gpuMode ? c(GRN, "GPU") + batchDetail(cfg)
-                    : c(WHT, "CPU") + "  ·  threads: " + c(WHT, String.valueOf(using))));
+        String naTag    = c(DIM, "(n/a)");
 
-        out.println("    " + row("Search",  c(WHT, cfg.getSearchMode().name().toLowerCase())));
+        // ── I/O ────────────────────────────────────────────────────────────
+        String inputPath = cfg.getInputFile();
+        String displayInput = "(none)";
+        if (inputPath != null) {
+            String[] parts = inputPath.replace('\\', '/').split("/");
+            displayInput = parts.length > 2
+                ? "…/" + parts[parts.length - 2] + "/" + parts[parts.length - 1]
+                : inputPath;
+        }
+        out.println("    " + row("Input file",    c(WHT, displayInput)));
+        String outputPath = cfg.getOutputFile();
+        out.println("    " + row("Output file",   outputPath != null
+                                                  ? c(WHT, outputPath)
+                                                  : c(DIM, "(stdout)")));
+        out.println();
+
+        // ── Compute ────────────────────────────────────────────────────────
+        out.println("    " + row("Compute mode",   gpuMode ? c(GRN, "GPU") : c(WHT, "CPU")));
+        out.println("    " + row("CPU threads",    c(available == using ? WHT : YLW, String.valueOf(using))
+                                                  + c(DIM, "  (" + available + " available)")));
+        out.println("    " + row("Tree treatment", c(WHT, cfg.getTreatAsUnrooted() ? "unrooted" : "rooted")));
+        out.println();
+
+        // ── Search ─────────────────────────────────────────────────────────
+        out.println("    " + row("Search mode",   c(WHT, cfg.getSearchMode().name().toLowerCase())));
+        out.println("    " + row("Hash seeds",    c(WHT, String.valueOf(cfg.getNumHashSeeds()))));
 
         String verbStr = switch (cfg.getVerbosity()) {
             case Logging.QUIET -> c(DIM, "quiet");
             case Logging.DEBUG -> c(YLW, "debug");
             case Logging.TRACE -> c(YLW, "trace");
-            default            -> "info";
+            default            -> c(WHT, "info");
         };
-        out.println("    " + row("Seeds", c(WHT, String.valueOf(cfg.getNumHashSeeds()))
-                + "   " + c(DIM, "verbosity") + "  " + verbStr));
+        out.println("    " + row("Verbosity",     verbStr));
+        out.println();
 
+        // ── GPU parameters ─────────────────────────────────────────────────
+        // Weight batching
+        String batchStr;
+        if (!gpuMode) {
+            batchStr = naTag;
+        } else if (!cfg.isGpuBatch()) {
+            batchStr = c(WHT, "disabled");
+        } else if (cfg.getGpuNumBatches() > 0) {
+            batchStr = c(WHT, cfg.getGpuNumBatches() + " batches") + c(DIM, "  (--gpu-batches)");
+        } else if (cfg.getGpuBatchSize() > 0) {
+            batchStr = c(WHT, "batch-size " + cfg.getGpuBatchSize()) + c(DIM, "  (--gpu-batch-size)");
+        } else {
+            batchStr = c(WHT, "auto") + c(DIM, "  (adaptive from free VRAM)");
+        }
+        out.println("    " + row("Weight batching",    batchStr));
+
+        // VRAM occupancy fraction
+        out.println("    " + row("VRAM occupancy",     gpuMode
+                ? c(WHT, String.format("%.0f%%", cfg.getGpuVramFraction() * 100))
+                : naTag));
+
+        // DP state-space cap (only meaningful for GPU + FULL search)
+        boolean dpRelevant = gpuMode && cfg.getSearchMode() == Config.SearchMode.FULL;
+        out.println("    " + row("DP state-space construction memory cap (GPU)", dpRelevant
+                ? c(WHT, fmtBytes(cfg.getGpuDpOutputCapBytes()))
+                  + c(DIM, "  (" + cfg.getGpuDpOutputCapTriples() + " triples)")
+                : naTag));
+
+        out.println();
         out.println("  " + c(DIM, "─".repeat(w)));
         out.println();
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
+    // Label column width for Run Configuration rows
     private static String row(String label, String value) {
-        return String.format("%-10s %s", c(DIM, label), value);
+        return String.format("%-46s %s", c(DIM, label), value);
     }
 
-    private static String batchDetail(Config cfg) {
-        if (!cfg.isGpuBatch())
-            return "  " + c(DIM, "(batching off)");
-        if (cfg.getGpuNumBatches() > 0)
-            return "  " + c(DIM, "· batches: " + cfg.getGpuNumBatches());
-        if (cfg.getGpuBatchSize() > 0)
-            return "  " + c(DIM, "· batch-size: " + cfg.getGpuBatchSize());
-        return "  " + c(DIM, String.format("· batching: auto  (occupancy %.0f%%)",
-                cfg.getGpuVramFraction() * 100));
+    private static String fmtBytes(long bytes) {
+        if (bytes >= 1_000_000_000L) return String.format("%.1f GB", bytes / 1e9);
+        if (bytes >= 1_000_000L)     return String.format("%.0f MB", bytes / 1e6);
+        if (bytes >= 1_000L)         return String.format("%.0f KB", bytes / 1e3);
+        return bytes + " B";
     }
 }

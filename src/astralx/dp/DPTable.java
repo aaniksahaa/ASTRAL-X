@@ -1,5 +1,6 @@
 package astralx.dp;
 
+import astralx.Config;
 import astralx.Logging;
 import astralx.cluster.ClusterHash;
 import astralx.cluster.ClusterTable;
@@ -248,9 +249,9 @@ public class DPTable {
         }
 
         // ── Compute maxPerRound to bound GPU output buffer ────────────────────
-        // maxPerRound = 10M triples max = 10M * 12 bytes = 120 MB on GPU
-        // Sub-batching within each round ensures this is never exceeded.
-        int maxPerRound = 10_000_000;
+        // Default 120 MB = 10M triples.  Configurable via --gpu-dp-state-space-construction-output-cap.
+        // Sub-batching within each round normally ensures this is never exceeded.
+        int maxPerRound = Config.getInstance().getGpuDpOutputCapTriples();
 
         // ── Call GPU ──────────────────────────────────────────────────────────
         Logging.debug("  GPU cross-tree search: N=%d clusters, maxSize=%d", N, maxSize);

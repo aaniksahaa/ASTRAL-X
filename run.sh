@@ -96,7 +96,7 @@ while [[ $# -gt 0 ]]; do
       COMPUTE_MODE_SET=true
       shift
       ;;
-    --search-mode|-t|--threads|-m|--seeds|--gpu-batch-size|--gpu-batches)
+    --search-mode|-t|--threads|-m|--seeds|--gpu-batch-size|--gpu-batches|--gpu-dp-state-space-construction-output-cap)
       PROGRAM_ARGS+=("$1" "$2")
       shift 2
       ;;

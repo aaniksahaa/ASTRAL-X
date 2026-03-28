@@ -46,6 +46,25 @@ public class Config {
      */
     private double gpuVramFraction = 0.75;
 
+    /**
+     * GPU output buffer size for the cross-tree DP state-space construction phase
+     * (Phase 5b), stored in bytes.  Each transition triple occupies 12 bytes
+     * (3 × sizeof(int)), so the number of triples the buffer can hold is
+     * gpuDpOutputCapBytes / 12.
+     *
+     * Default: 120 MB = 10 000 000 triples.
+     *
+     * Sub-batching normally guarantees no overflow, but if a dataset has an
+     * extraordinarily large single size-bin the kernel will overflow and print
+     * a CRITICAL WARNING.  Raise this value (e.g. "1g") to avoid the overflow
+     * at the cost of more VRAM.
+     *
+     * Configured via --gpu-dp-state-space-construction-output-cap.
+     * Accepts memory-unit suffixes: k/K (×10³), m/M (×10⁶), g/G (×10⁹).
+     * Examples: "120m"  "1.2g"  "500k"  "1500000000"
+     */
+    private long gpuDpOutputCapBytes = 120_000_000L; // 120 MB default
+
     private Config() {}
 
     public static Config getInstance() {
@@ -79,6 +98,41 @@ public class Config {
     public void setGpuNumBatches(int n)       { this.gpuNumBatches = Math.max(1, n); }
     public double getGpuVramFraction()        { return gpuVramFraction; }
     public void setGpuVramFraction(double f)  { this.gpuVramFraction = Math.max(0.01, Math.min(1.0, f)); }
+    /** Raw byte count of the GPU DP output buffer. */
+    public long getGpuDpOutputCapBytes()      { return gpuDpOutputCapBytes; }
+
+    /**
+     * Number of transition triples the GPU output buffer can hold
+     * (= bytes / 12, clamped to at least 1).
+     */
+    public int getGpuDpOutputCapTriples()     { return (int) Math.max(1, gpuDpOutputCapBytes / 12); }
+
+    /**
+     * Set the GPU DP output-buffer cap from a human-readable memory string.
+     * Accepts optional suffixes k/K (×1 000), m/M (×1 000 000), g/G (×1 000 000 000).
+     * A bare integer is interpreted as bytes.
+     * Examples: "120m", "1.2g", "500k", "1500000000"
+     */
+    public void setGpuDpStateSpaceConstructionOutputCap(String spec) {
+        String s = spec.trim().toLowerCase();
+        double value;
+        long multiplier;
+        if (s.endsWith("g")) {
+            value = Double.parseDouble(s.substring(0, s.length() - 1));
+            multiplier = 1_000_000_000L;
+        } else if (s.endsWith("m")) {
+            value = Double.parseDouble(s.substring(0, s.length() - 1));
+            multiplier = 1_000_000L;
+        } else if (s.endsWith("k")) {
+            value = Double.parseDouble(s.substring(0, s.length() - 1));
+            multiplier = 1_000L;
+        } else {
+            value = Double.parseDouble(s);
+            multiplier = 1L;
+        }
+        long bytes = (long)(value * multiplier);
+        this.gpuDpOutputCapBytes = Math.max(12L, bytes); // at least 1 triple
+    }
 
     // Testing flags
     private boolean verifyParse = false;
