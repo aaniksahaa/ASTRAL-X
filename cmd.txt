@@ -11,7 +11,7 @@
 #     --opts "--search-mode local"  -> search-mode_local
 #     --opts "--search-mode full"   -> search-mode_full
 
-
+ 
 ./run-bulk-simulated.sh --method astralx --num-replicates 5 --opts-list "--search-mode local;--search-mode full"
 
 ./collect-stats-simulated.sh --simphy-dir ./simphy --out astralx-scale-taxa.csv
