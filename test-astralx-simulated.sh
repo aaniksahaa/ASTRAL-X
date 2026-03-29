@@ -5,6 +5,10 @@
 
 set -euo pipefail
 
+# Propagate terminal color preference to Java subprocesses even when stderr is
+# piped through tee further down the call chain.
+[[ -t 1 || -t 2 ]] && export FORCE_COLOR=1
+
 NTFY_CHANNEL_NAME="${NTFY_CHANNEL_NAME:-anik-phylo}"
 
 TAXA_NUM=""

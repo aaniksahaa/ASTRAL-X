@@ -5,6 +5,12 @@
 
 set -euo pipefail
 
+# Propagate terminal color preference to Java subprocesses even when stderr is
+# piped through tee.  Evaluated here, before any pipe redirection is applied to
+# this script's file descriptors, so [[ -t ]] correctly reflects whether a real
+# terminal is connected.  Java's Banner.detectColor() honours FORCE_COLOR.
+[[ -t 1 || -t 2 ]] && export FORCE_COLOR=1
+
 NTFY_CHANNEL_NAME="${NTFY_CHANNEL_NAME:-anik-phylo}"
 
 INPUT_FILE=""
