@@ -89,7 +89,23 @@ public class Config {
      * Accepts memory-unit suffixes: k/K (×10³), m/M (×10⁶), g/G (×10⁹).
      * Examples: "120m"  "1.2g"  "500k"  "1500000000"
      */
-    private long gpuDpOutputCapBytes = 120_000_000L; // 120 MB default
+    private long gpuDpOutputCapBytes = 128_000_000L; // 128 MB default
+
+    /**
+     * Minimum seconds between DP progress bar updates.
+     * Configured via --gpu-dp-state-space-progress-time-interval.
+     */
+    private double gpuDpProgressInterval = 1.0;
+
+    /**
+     * Maximum number of progress bar print steps for DP phase.
+     * When > 0, switches to step-based mode (% advancement) and disables the
+     * time-interval trigger entirely.
+     * 0 = not set; use time-interval mode.
+     * Default: 1000 (step mode, print every 0.1% advancement).
+     * Configured via --gpu-dp-state-space-progress-max-steps.
+     */
+    private int gpuDpProgressMaxSteps = 1000;
 
     private Config() {}
 
@@ -162,6 +178,11 @@ public class Config {
         long bytes = (long)(value * multiplier);
         this.gpuDpOutputCapBytes = Math.max(12L, bytes); // at least 1 triple
     }
+
+    public double getGpuDpProgressInterval()          { return gpuDpProgressInterval; }
+    public void setGpuDpProgressInterval(double v)    { this.gpuDpProgressInterval = Math.max(0.0, v); }
+    public int getGpuDpProgressMaxSteps()             { return gpuDpProgressMaxSteps; }
+    public void setGpuDpProgressMaxSteps(int v)       { this.gpuDpProgressMaxSteps = Math.max(1, v); }
 
     // Testing flags
     private boolean verifyParse = false;

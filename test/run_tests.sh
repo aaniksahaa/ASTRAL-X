@@ -1,20 +1,40 @@
 #!/usr/bin/env bash
-# run_tests.sh — Run all ASTRAL-X Python verifier test cases.
+# run_tests.sh — Run all ASTRAL-X test cases.
 #
-# Usage:  bash test/run_tests.sh [TC_FILTER]
+# For each test input:
+#   1. Run verify_weights.py (independent Python reimplementation) → expected score
+#   2. Run ASTRAL-X binary with the configured flags → actual score
+#   3. PASS only if both succeed and scores match
+#   4. If a tc*_true.tre file exists, also compute RF distance on the ASTRAL-X output
+#
+# Usage:  bash test/run_tests.sh [TC_FILTER] [--search-mode local|full] [--cpu|--gpu]
 #   TC_FILTER (optional): pattern to match test names, e.g. "tc1" or "tc1[23]"
-#
-# Each TC_* is run against verify_weights.py.
-# If a tc*_true.tre file exists the inferred tree is compared (RF distance).
 #
 # Exit code: 0 if all tests pass, 1 if any fail.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 INPUT_DIR="${SCRIPT_DIR}/input"
 VERIFIER="${SCRIPT_DIR}/verify_weights.py"
-FILTER="${1:-tc[0-9]*}"
+
+BUILD_DIR="${ROOT_DIR}/build"
+NATIVE_DIR="${ROOT_DIR}/native"
+
+FILTER="tc[0-9]*"
+COMPUTE_MODE="--gpu"
+SEARCH_MODE="local"
+
+# Parse args
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --cpu)          COMPUTE_MODE="--cpu"; shift ;;
+        --gpu)          COMPUTE_MODE="--gpu"; shift ;;
+        --search-mode)  SEARCH_MODE="$2"; shift 2 ;;
+        *)              FILTER="$1"; shift ;;
+    esac
+done
 
 GREEN='\033[0;32m'
 RED='\033[0;31m'
@@ -24,56 +44,80 @@ NC='\033[0m'
 
 pass=0
 fail=0
-skip=0
+
+ASTRALX_CMD=(java -Djava.library.path="$NATIVE_DIR" -cp "$BUILD_DIR" astralx.Main
+             $COMPUTE_MODE --search-mode "$SEARCH_MODE")
 
 run_tc () {
     local input="$1"
     local name
     name="$(basename "$input" .tre)"
-    local tc_id="${name%%_*}"   # e.g. "tc1"
+    local tc_id="${name%%_*}"
 
-    # skip true-tree files
     [[ "$name" == *_true ]] && return 0
-
-    # True tree for RF comparison (optional)
-    local true_file="${INPUT_DIR}/${tc_id}_true.tre"
-    local compare_arg=""
-    if [[ -f "$true_file" ]]; then
-        local true_newick
-        true_newick="$(cat "$true_file")"
-        compare_arg="--compare ${true_newick}"
-    fi
 
     printf "  %-45s" "$name"
 
-    local out
-    # shellcheck disable=SC2086
-    if out="$(python3 "$VERIFIER" "$input" $compare_arg 2>&1)"; then
-        local score line
-        score=$(echo "$out" | grep -oP 'quartet score = \K[0-9]+' || true)
-        if [[ -n "$score" ]]; then
-            printf "${GREEN}PASS${NC}  score=%-10s" "$score"
-        else
-            printf "${GREEN}PASS${NC}  "
-        fi
-        if [[ -n "$compare_arg" ]]; then
-            local rf
-            rf=$(echo "$out" | grep -oP 'RF = \K[0-9]+' || true)
-            [[ -n "$rf" ]] && printf "RF=%-4s" "$rf"
-        fi
-        echo
-        ((pass++)) || true
-    else
-        printf "${RED}FAIL${NC}\n"
-        echo "$out" | tail -5 | sed 's/^/    /'
+    # ── Step 1: Python verifier → expected score ──────────────────────────────
+    local verifier_out expected_score
+    if ! verifier_out="$(python3 "$VERIFIER" "$input" 2>&1)"; then
+        printf "${RED}FAIL${NC}  verifier error\n"
+        echo "$verifier_out" | tail -3 | sed 's/^/    /'
         ((fail++)) || true
+        return 0
     fi
+    expected_score=$(echo "$verifier_out" | grep -oP 'quartet score = \K[0-9]+' || true)
+    if [[ -z "$expected_score" ]]; then
+        printf "${RED}FAIL${NC}  verifier gave no score\n"
+        ((fail++)) || true
+        return 0
+    fi
+
+    # ── Step 2: ASTRAL-X binary → actual score ────────────────────────────────
+    local astralx_out actual_score astralx_tree
+    if ! astralx_out="$("${ASTRALX_CMD[@]}" -i "$input" 2>&1)"; then
+        printf "${RED}FAIL${NC}  ASTRAL-X crashed\n"
+        echo "$astralx_out" | tail -5 | sed 's/^/    /'
+        ((fail++)) || true
+        return 0
+    fi
+    actual_score=$(echo "$astralx_out" | grep -oP 'optimal quartet score = \K[0-9]+' || true)
+    astralx_tree=$(echo "$astralx_out" | grep -v '^\[' | grep -v '^[[:space:]]' | grep ';' | tail -1 || true)
+
+    if [[ -z "$actual_score" ]]; then
+        printf "${RED}FAIL${NC}  ASTRAL-X gave no score\n"
+        echo "$astralx_out" | tail -5 | sed 's/^/    /'
+        ((fail++)) || true
+        return 0
+    fi
+
+    # ── Step 3: Compare scores ────────────────────────────────────────────────
+    if [[ "$actual_score" != "$expected_score" ]]; then
+        printf "${RED}FAIL${NC}  score mismatch: expected=${expected_score} got=${actual_score}\n"
+        ((fail++)) || true
+        return 0
+    fi
+
+    # ── Step 4: RF distance (optional) ───────────────────────────────────────
+    local rf_str=""
+    local true_file="${INPUT_DIR}/${tc_id}_true.tre"
+    if [[ -f "$true_file" && -n "$astralx_tree" ]]; then
+        local true_newick
+        true_newick="$(cat "$true_file")"
+        local rf_out
+        rf_out="$(python3 "$VERIFIER" "$input" --compare "$true_newick" 2>&1)" || true
+        local rf
+        rf=$(echo "$rf_out" | grep -oP 'RF = \K[0-9]+' || true)
+        [[ -n "$rf" ]] && rf_str="RF=${rf}"
+    fi
+
+    printf "${GREEN}PASS${NC}  score=%-10s %s\n" "$actual_score" "$rf_str"
+    ((pass++)) || true
 }
 
 echo -e "\n${BOLD}=== ASTRAL-X Test Suite ===${NC}"
-echo
+printf "  mode: %s  search: %s\n\n" "$COMPUTE_MODE" "$SEARCH_MODE"
 
-# Collect matching inputs (exclude true-tree files and non-TC files)
 mapfile -t inputs < <(
     find "$INPUT_DIR" -maxdepth 1 -name "${FILTER}_*.tre" ! -name "*_true.tre" | sort
 )

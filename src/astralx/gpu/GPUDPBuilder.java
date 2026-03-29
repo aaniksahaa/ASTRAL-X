@@ -45,14 +45,16 @@ public class GPUDPBuilder {
      *         Returns null if native library call fails.
      */
     public static native int[] findCrossTreeTransitionsGPU(
-        long[] clusterSums,
-        long[] clusterXors,
-        int[]  clusterSizes,
-        int    numClusters,
-        int    m,
-        int[]  sortedBySize,
-        int[]  binStart,
-        int    maxSize,
-        int    maxPerRound
+        long[]  clusterSums,
+        long[]  clusterXors,
+        int[]   clusterSizes,
+        int     numClusters,
+        int     m,
+        int[]   sortedBySize,
+        int[]   binStart,
+        int     maxSize,
+        int     maxPerRound,
+        double  progressInterval,
+        int     progressMaxSteps
     );
 }

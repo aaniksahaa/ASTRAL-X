@@ -154,6 +154,8 @@ public class Main {
                 case "--gpu-vram-control-factor"   -> { if (++i>=args.length) return false; cfg.setGpuVramControlFactor(Double.parseDouble(args[i])); }
                 case "--gpu-vram-occupancy-factor" -> { if (++i>=args.length) return false; cfg.setGpuVramFraction(Double.parseDouble(args[i])); }
                 case "--gpu-dp-state-space-construction-output-cap" -> { if (++i>=args.length) return false; cfg.setGpuDpStateSpaceConstructionOutputCap(args[i]); }
+                case "--gpu-dp-state-space-progress-time-interval"  -> { if (++i>=args.length) return false; cfg.setGpuDpProgressInterval(Double.parseDouble(args[i])); }
+                case "--gpu-dp-state-space-progress-max-steps"      -> { if (++i>=args.length) return false; cfg.setGpuDpProgressMaxSteps(Integer.parseInt(args[i])); }
                 case "--verify-parse"  -> cfg.setVerifyParse(true);
                 case "--verify-hash"      -> cfg.setVerifyHash(true);
                 case "--verify-clusters"    -> cfg.setVerifyClusters(true);

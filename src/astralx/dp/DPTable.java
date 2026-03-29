@@ -251,7 +251,9 @@ public class DPTable {
         // ── Compute maxPerRound to bound GPU output buffer ────────────────────
         // Default 120 MB = 10M triples.  Configurable via --gpu-dp-state-space-construction-output-cap.
         // Sub-batching within each round normally ensures this is never exceeded.
-        int maxPerRound = Config.getInstance().getGpuDpOutputCapTriples();
+        int    maxPerRound    = Config.getInstance().getGpuDpOutputCapTriples();
+        double progressInterval  = Config.getInstance().getGpuDpProgressInterval();
+        int    progressMaxSteps  = Config.getInstance().getGpuDpProgressMaxSteps();
 
         // ── Call GPU ──────────────────────────────────────────────────────────
         Logging.debug("  GPU cross-tree search: N=%d clusters, maxSize=%d", N, maxSize);
@@ -259,7 +261,7 @@ public class DPTable {
             clusterSums, clusterXors, clusterSizes,
             N, m,
             sortedBySize, binStart, maxSize,
-            maxPerRound);
+            maxPerRound, progressInterval, progressMaxSteps);
 
         if (raw == null) {
             Logging.info("  GPU cross-tree search returned null, falling back to CPU");

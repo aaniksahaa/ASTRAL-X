@@ -48,6 +48,39 @@
 #include <vector>
 #include <algorithm>
 
+// ─── Progress-bar helpers (host-side) ────────────────────────────────────────
+
+static double dp_now_sec(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+}
+
+static void dp_fmt_duration(double secs, char* buf, int buflen) {
+    int s = (int)secs;
+    if (s < 60)
+        snprintf(buf, buflen, "%ds", s);
+    else if (s < 3600)
+        snprintf(buf, buflen, "%dm%02ds", s / 60, s % 60);
+    else
+        snprintf(buf, buflen, "%dh%02dm", s / 3600, (s % 3600) / 60);
+}
+
+#define DP_BAR_W 28
+static void dp_build_bar(char* buf, int done, int total) {
+    int filled = (total > 0) ? (int)((double)done / total * DP_BAR_W + 0.5) : 0;
+    if (filled > DP_BAR_W) filled = DP_BAR_W;
+    int pos = 0;
+    for (int i = 0; i < DP_BAR_W; i++) {
+        if (i < filled) {
+            buf[pos++] = '\xe2'; buf[pos++] = '\x96'; buf[pos++] = '\x88'; // █
+        } else {
+            buf[pos++] = '\xe2'; buf[pos++] = '\x96'; buf[pos++] = '\x91'; // ░
+        }
+    }
+    buf[pos] = '\0';
+}
+
 // ─── Constants ───────────────────────────────────────────────────────────────
 #define BLOCK_SIZE    256
 #define MAX_M         4       // max supported hash seeds (m ≤ 4)
@@ -234,20 +267,24 @@ extern "C"
 JNIEXPORT jintArray JNICALL
 Java_astralx_gpu_GPUDPBuilder_findCrossTreeTransitionsGPU(
     JNIEnv* env, jclass cls,
-    jlongArray jClusterSums,   // [N*m]
-    jlongArray jClusterXors,   // [N*m]
-    jintArray  jClusterSizes,  // [N]
+    jlongArray jClusterSums,        // [N*m]
+    jlongArray jClusterXors,        // [N*m]
+    jintArray  jClusterSizes,       // [N]
     jint       jN,
     jint       jM,
-    jintArray  jSortedBySize,  // [N]
-    jintArray  jBinStart,      // [maxSize+2]
+    jintArray  jSortedBySize,       // [N]
+    jintArray  jBinStart,           // [maxSize+2]
     jint       jMaxSize,
-    jint       jMaxPerRound)   // GPU output buffer size per sub-batch
+    jint       jMaxPerRound,        // GPU output buffer size per sub-batch
+    jdouble    jProgressInterval,   // min seconds between progress bar updates
+    jint       jProgressMaxSteps)   // max number of progress bar lines
 {
-    const int N          = (int)jN;
-    const int mSeeds     = (int)jM;
-    const int maxSz      = (int)jMaxSize;
-    const int maxPerRound= (int)jMaxPerRound;
+    const int    N              = (int)jN;
+    const int    mSeeds         = (int)jM;
+    const int    maxSz          = (int)jMaxSize;
+    const int    maxPerRound    = (int)jMaxPerRound;
+    const double progressInterval  = (double)jProgressInterval;
+    const int    progressMaxSteps  = (int)jProgressMaxSteps;
     const int HT_SIZE    = (int)(std::max(16, N * 4)); // load factor 0.25
 
     if (N == 0) {
@@ -363,7 +400,36 @@ Java_astralx_gpu_GPUDPBuilder_findCrossTreeTransitionsGPU(
     std::vector<int> accum; // (idxA, idxB, idxRes) interleaved
     accum.reserve(std::min(N * 10, 1000000));
 
+    // ── Count active size bins for progress reporting ─────────────────────────
+    int activeBins = 0;
+    for (int sz = 1; sz * 2 <= maxSz; sz++) {
+        int bCount      = hBinStart[sz + 1] - hBinStart[sz];
+        int twoSz       = 2 * sz;
+        int aStart      = (twoSz <= maxSz + 1) ? hBinStart[twoSz] : N;
+        int aTotalCount = N - aStart;
+        if (bCount > 0 && aTotalCount > 0) activeBins++;
+    }
+
+    fprintf(stderr,
+        "[ASTRAL-X GPU] DP cross-tree search starting:\n"
+        "  clusters     : %d\n"
+        "  active bins  : %d  (size range 1..%d)\n"
+        "  output buf   : %d triples / sub-batch  (cap = %.0f MB)\n",
+        N, activeBins, maxSz / 2,
+        maxPerRound, (double)maxPerRound * 3 * sizeof(int) / 1e6);
+    fflush(stderr);
+
     // ── Round-by-round size-binned search ─────────────────────────────────────
+    // Two mutually exclusive progress modes (chosen at runtime):
+    //   progressMaxSteps > 0  →  step mode:  print every (100/maxSteps)% advancement
+    //   progressMaxSteps == 0 →  time mode:  print every progressInterval seconds
+    const bool step_mode = (progressMaxSteps > 0);
+    int    activeDone       = 0;
+    double t_loop_start     = dp_now_sec();
+    double t_last_print     = t_loop_start - progressInterval; // force first eligible (time mode)
+    double last_pct_printed = step_mode ? -(100.0 / progressMaxSteps) : 0.0; // force first eligible (step mode)
+    char   dp_bar_buf[DP_BAR_W * 3 + 1];
+
     for (int sz = 1; sz * 2 <= maxSz; sz++) {
         // bin[sz]: sortedBySize[ binStart[sz] .. binStart[sz+1] )
         int bStart = hBinStart[sz];
@@ -371,15 +437,17 @@ Java_astralx_gpu_GPUDPBuilder_findCrossTreeTransitionsGPU(
         int bCount = bEnd - bStart;
         if (bCount == 0) continue;
 
-        // Upload bin[sz] indices to d_bIdx
-        cudaMemcpy(d_bIdx, hSorted + bStart, (size_t)bCount * sizeof(int),
-                   cudaMemcpyHostToDevice);
-
         // large clusters: size >= 2*sz → sortedBySize[ binStart[2*sz] .. N )
         int twoSz   = 2 * sz;
         int aStart  = (twoSz <= maxSz + 1) ? (int)hBinStart[twoSz] : N;
         int aTotalCount = N - aStart;
         if (aTotalCount == 0) continue;
+
+        activeDone++;
+
+        // Upload bin[sz] indices to d_bIdx
+        cudaMemcpy(d_bIdx, hSorted + bStart, (size_t)bCount * sizeof(int),
+                   cudaMemcpyHostToDevice);
 
         // Sub-batch the A clusters so each kernel's output fits in maxPerRound
         int batchA = (bCount > 0) ? std::max(1, maxPerRound / bCount) : aTotalCount;
@@ -448,6 +516,51 @@ Java_astralx_gpu_GPUDPBuilder_findCrossTreeTransitionsGPU(
                            (size_t)outCount * 3 * sizeof(int), cudaMemcpyDeviceToHost);
             }
         }
+
+        // ── Progress bar ──────────────────────────────────────────────────────
+        if (activeBins > 1) {
+            int    rem     = activeBins - activeDone;
+            bool   is_last = (rem == 0);
+            double pct     = 100.0 * activeDone / activeBins;
+            double now     = dp_now_sec();
+            bool   should_print;
+            if (step_mode)
+                should_print = is_last || (pct - last_pct_printed >= 100.0 / progressMaxSteps);
+            else
+                should_print = is_last || (now - t_last_print >= progressInterval);
+            if (should_print) {
+                t_last_print     = now;
+                last_pct_printed = pct;
+                double elapsed   = now - t_loop_start;
+                int    found     = (int)(accum.size() / 3);
+                dp_build_bar(dp_bar_buf, activeDone, activeBins);
+                char dur_buf[32];
+                dp_fmt_duration(elapsed, dur_buf, sizeof(dur_buf));
+                if (is_last) {
+                    // Final: end with newline, pad to clear any previous line
+                    fprintf(stderr,
+                        "\r  [GPU] dp      [%s]  %d/%d  100%%  %-8s  found: %-12d\n",
+                        dp_bar_buf, activeBins, activeBins, dur_buf, found);
+                } else {
+                    // Intermediate: \r with fixed-width fields so line never shrinks
+                    fprintf(stderr,
+                        "\r  [GPU] dp      [%s]  %4d/%-4d  %5.1f%%  elapsed: %-8s  found: %-12d",
+                        dp_bar_buf, activeDone, activeBins, pct, dur_buf, found);
+                }
+                fflush(stderr);
+            }
+        }
+    }
+
+    // Final one-liner when only a single active bin (no bar was printed)
+    if (activeBins <= 1) {
+        double elapsed = dp_now_sec() - t_loop_start;
+        char dur_buf[32];
+        dp_fmt_duration(elapsed, dur_buf, sizeof(dur_buf));
+        fprintf(stderr,
+            "  [GPU] dp      done in %s  found: %d transitions\n",
+            dur_buf, (int)(accum.size() / 3));
+        fflush(stderr);
     }
 
     // ── Cleanup device memory ─────────────────────────────────────────────────
