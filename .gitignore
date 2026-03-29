@@ -3,3 +3,12 @@ simphy/data/
 data/*
 
 
+*.class
+
+*.log
+
+backups/
+
+*.zip
+
+
