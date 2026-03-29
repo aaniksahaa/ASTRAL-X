@@ -184,6 +184,11 @@ public class Config {
     public int getGpuDpProgressMaxSteps()             { return gpuDpProgressMaxSteps; }
     public void setGpuDpProgressMaxSteps(int v)       { this.gpuDpProgressMaxSteps = Math.max(1, v); }
 
+    // Completion flags
+    private boolean autoCompleteIncompleteTrees = false;
+    public boolean isAutoCompleteIncompleteTrees()          { return autoCompleteIncompleteTrees; }
+    public void setAutoCompleteIncompleteTrees(boolean v)   { this.autoCompleteIncompleteTrees = v; }
+
     // Testing flags
     private boolean verifyParse = false;
     public boolean isVerifyParse()          { return verifyParse; }
@@ -208,4 +213,8 @@ public class Config {
     private boolean verifyWeights = false;
     public boolean isVerifyWeights()           { return verifyWeights; }
     public void setVerifyWeights(boolean v)    { this.verifyWeights = v; }
+
+    private boolean verifyDistanceMatrix = false;
+    public boolean isVerifyDistanceMatrix()          { return verifyDistanceMatrix; }
+    public void setVerifyDistanceMatrix(boolean v)   { this.verifyDistanceMatrix = v; }
 }

@@ -1,6 +1,9 @@
 package astralx;
 
 import astralx.cluster.ClusterTable;
+import astralx.completion.DistanceMatrix;
+import astralx.completion.DistanceMatrixBuilder;
+import astralx.completion.TreeCompleter;
 import astralx.dp.DPTable;
 import astralx.dp.Inference;
 import astralx.gpu.GPUDPBuilder;
@@ -39,6 +42,25 @@ public class Main {
             if (cfg.isVerifyParse()) {
                 Phase1Verifier.dump(trees, registry, cfg.getOutputFile());
                 return;
+            }
+
+            // ── Phase 1b: Auto-complete incomplete gene trees (optional) ──────
+            long incompleteCount = trees.stream().filter(t -> !t.isComplete).count();
+
+            if (cfg.isVerifyDistanceMatrix()) {
+                // Build distance matrix (always CPU for now) and dump, then exit
+                DistanceMatrix dm = DistanceMatrixBuilder.buildCPU(trees, registry.size());
+                dumpDistanceMatrix(dm, registry);
+                return;
+            }
+
+            if (cfg.isAutoCompleteIncompleteTrees() && incompleteCount > 0) {
+                long t1b = PhaseLogger.begin("Phase 1b Auto-complete gene trees", false);
+                DistanceMatrix dm = DistanceMatrixBuilder.buildCPU(trees, registry.size());
+                trees = TreeCompleter.completeAll(trees, dm, registry.size());
+                PhaseLogger.end("Phase 1b Auto-complete gene trees", t1b, false);
+            } else if (cfg.isAutoCompleteIncompleteTrees()) {
+                Logging.info("Phase 1b: all gene trees already complete, skipping");
             }
 
             // ── Phase 2: Taxon hashing + prefix arrays ────────────────────────
@@ -162,11 +184,45 @@ public class Main {
                 case "--verify-partitions" -> cfg.setVerifyPartitions(true);
                 case "--verify-dp"         -> cfg.setVerifyDPSpace(true);
                 case "--verify-weights"    -> cfg.setVerifyWeights(true);
+                case "--verify-distance-matrix" -> cfg.setVerifyDistanceMatrix(true);
+                case "--autocomplete-incomplete-gene-trees" -> cfg.setAutoCompleteIncompleteTrees(true);
                 case "-h","--help"     -> { printUsage(); System.exit(0); }
                 default -> { System.err.println("Unknown arg: " + args[i]); return false; }
             }
         }
         return cfg.getInputFile() != null;
+    }
+
+    /**
+     * Print distance matrix to stdout in a machine-parseable format:
+     *   DISTANCE_MATRIX
+     *   n=<count>
+     *   taxa=name0,name1,...
+     *   row0=d00,d01,...
+     *   row1=d10,d11,...
+     *   ...
+     */
+    private static void dumpDistanceMatrix(astralx.completion.DistanceMatrix dm,
+                                            TaxonRegistry registry) {
+        int n = dm.n;
+        StringBuilder taxa = new StringBuilder("taxa=");
+        for (int i = 0; i < n; i++) {
+            if (i > 0) taxa.append(',');
+            taxa.append(registry.getName(i));
+        }
+        System.out.println("DISTANCE_MATRIX");
+        System.out.println("n=" + n);
+        System.out.println(taxa);
+        for (int i = 0; i < n; i++) {
+            StringBuilder row = new StringBuilder("row").append(i).append('=');
+            for (int j = 0; j < n; j++) {
+                if (j > 0) row.append(',');
+                double d = dm.dist[i * n + j];
+                if (d == Double.MAX_VALUE) row.append("inf");
+                else row.append(String.format("%.6f", d));
+            }
+            System.out.println(row);
+        }
     }
 
     private static void printUsage() {
