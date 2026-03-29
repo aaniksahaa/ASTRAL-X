@@ -41,8 +41,7 @@ sanitize_setting_part() {
 build_setting_name_from_opts() {
   local raw="$1"
   local -a tokens=()
-  local -a parts=()
-  local i key value
+  local i search_mode_val=""
 
   if [[ -z "${raw// }" ]]; then
     printf 'default'
@@ -52,53 +51,18 @@ build_setting_name_from_opts() {
   read -r -a tokens <<< "$raw"
   i=0
   while (( i < ${#tokens[@]} )); do
-    key="${tokens[$i]}"
-    case "$key" in
-      -v|-vv|-vvv|-q|--quiet)
-        ((i+=1))
-        continue
-        ;;
-      --*)
-        key="${key#--}"
-        if (( i + 1 < ${#tokens[@]} )) && [[ ! "${tokens[$((i + 1))]}" =~ ^- ]]; then
-          value="${tokens[$((i + 1))]}"
-          parts+=("$(sanitize_setting_part "$key")_$(sanitize_setting_part "$value")")
-          ((i+=2))
-        else
-          parts+=("$(sanitize_setting_part "$key")_true")
-          ((i+=1))
-        fi
-        ;;
-      -t)
-        if (( i + 1 < ${#tokens[@]} )); then
-          parts+=("threads_$(sanitize_setting_part "${tokens[$((i + 1))]}")")
-          ((i+=2))
-        else
-          ((i+=1))
-        fi
-        ;;
-      -m)
-        if (( i + 1 < ${#tokens[@]} )); then
-          parts+=("seeds_$(sanitize_setting_part "${tokens[$((i + 1))]}")")
-          ((i+=2))
-        else
-          ((i+=1))
-        fi
-        ;;
-      *)
-        ((i+=1))
-        ;;
-    esac
+    if [[ "${tokens[$i]}" == "--search-mode" ]] && (( i + 1 < ${#tokens[@]} )); then
+      search_mode_val="${tokens[$((i + 1))]}"
+      ((i+=2))
+    else
+      ((i+=1))
+    fi
   done
 
-  if [[ ${#parts[@]} -eq 0 ]]; then
-    printf 'default'
+  if [[ -n "$search_mode_val" ]]; then
+    printf 'search-mode_%s' "$(sanitize_setting_part "$search_mode_val")"
   else
-    local result=""
-    for part in "${parts[@]}"; do
-      if [[ -z "$result" ]]; then result="$part"; else result="${result}___${part}"; fi
-    done
-    printf '%s' "$result"
+    printf 'default'
   fi
 }
 
