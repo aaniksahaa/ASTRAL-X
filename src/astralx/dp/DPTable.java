@@ -8,6 +8,7 @@ import astralx.gpu.GPUDPBuilder;
 import astralx.hash.PrefixHashArrays;
 import astralx.tree.Tree;
 import astralx.tree.TreeNode;
+import astralx.util.ProgressBar;
 import astralx.util.Threading;
 
 import java.util.*;
@@ -49,9 +50,13 @@ public class DPTable {
         this.rootHash = clusterTable.getAllTaxaHash();
         this.n        = rootHash.size;
 
+        int treesDone = 0;
+        ProgressBar localBar = new ProgressBar("Local DP transitions", trees.size());
         for (Tree tree : trees) {
             extractFromTree(tree, pref);
+            localBar.update(++treesDone);
         }
+        localBar.done();
 
         // Count total unique splits
         for (Set<BipartitionSplit> s : transitions.values()) uniqueSplits += s.size();
@@ -178,6 +183,8 @@ public class DPTable {
         @SuppressWarnings("unchecked")
         Set<BipartitionSplit>[] perCluster = new Set[N];
 
+        java.util.concurrent.atomic.AtomicInteger cpuDone = new java.util.concurrent.atomic.AtomicInteger(0);
+        ProgressBar cpuBar = new ProgressBar("Cross-tree DP (CPU)", N);
         Threading.processRangeParallel(N, idx -> {
             ClusterHash hashA = allHashes.get(idx);
             int szA = hashA.size;
@@ -194,7 +201,9 @@ public class DPTable {
             }
 
             if (localSet != null) perCluster[idx] = localSet;
+            cpuBar.update(cpuDone.incrementAndGet());
         });
+        cpuBar.done();
 
         // Serial merge into transitions (different A → different keys, no map contention)
         for (int idx = 0; idx < N; idx++) {

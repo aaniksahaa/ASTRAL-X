@@ -2,6 +2,7 @@ package astralx.tree;
 
 import astralx.Logging;
 import astralx.taxon.TaxonRegistry;
+import astralx.util.ProgressBar;
 
 import java.io.*;
 import java.util.*;
@@ -54,9 +55,12 @@ public class TreeParser {
 
         // Pass 2 – parse each tree
         List<Tree> trees = new ArrayList<>(lines.size());
+        ProgressBar parseBar = new ProgressBar("Parsing trees", lines.size());
         for (int i = 0; i < lines.size(); i++) {
             trees.add(parseNewick(lines.get(i), i, registry));
+            parseBar.update(i + 1);
         }
+        parseBar.done();
 
         long ms = (System.nanoTime() - t0) / 1_000_000;
         Logging.info("Parsed %d gene trees in %d ms", trees.size(), ms);

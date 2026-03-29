@@ -2,6 +2,7 @@ package astralx.cluster;
 
 import astralx.Logging;
 import astralx.hash.PrefixHashArrays;
+import astralx.util.ProgressBar;
 import astralx.tree.Tree;
 import astralx.tree.TreeNode;
 
@@ -61,10 +62,13 @@ public class ClusterTable {
         allTaxaHash = new ClusterHash(atSums, atXors, numTaxa, m);
 
         int totalCandidates = 0;
-
+        int treesDone = 0;
+        ProgressBar bar = new ProgressBar("Cluster extraction", trees.size());
         for (Tree tree : trees) {
             totalCandidates += extractFromTree(tree, pref, numTaxa);
+            bar.update(++treesDone);
         }
+        bar.done();
 
         long ms = (System.nanoTime() - t0) / 1_000_000;
         Logging.info("Cluster extraction: %d candidates -> %d unique clusters in %d ms",

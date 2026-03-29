@@ -11,6 +11,7 @@ import astralx.gpu.GPUWeightCalculator;
 import astralx.partition.Partition;
 import astralx.partition.PartitionTable;
 import astralx.tree.Tree;
+import astralx.util.ProgressBar;
 import astralx.util.Threading;
 
 import java.util.*;
@@ -129,9 +130,13 @@ public class WeightTable {
                     Logging.trace("  => score=%d", scoreArray[idx]);
                 }
             } else {
+                java.util.concurrent.atomic.AtomicInteger wDone = new java.util.concurrent.atomic.AtomicInteger(0);
+                ProgressBar wBar = new ProgressBar("Scoring splits (CPU)", numSplits);
                 Threading.processRangeParallel(numSplits, idx -> {
                     scoreArray[idx] = computeScore(splitList.get(idx), partitions, clusterTable, trees);
+                    wBar.update(wDone.incrementAndGet());
                 });
+                wBar.done();
             }
         }
 

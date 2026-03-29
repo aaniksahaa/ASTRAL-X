@@ -2,6 +2,7 @@ package astralx.partition;
 
 import astralx.Logging;
 import astralx.cluster.ClusterHash;
+import astralx.util.ProgressBar;
 import astralx.hash.PrefixHashArrays;
 import astralx.tree.Tree;
 import astralx.tree.TreeNode;
@@ -41,9 +42,13 @@ public class PartitionTable {
         this.m = pref.numSeeds();
 
         int totalCandidates = 0;
+        int treesDone = 0;
+        ProgressBar bar = new ProgressBar("Tripartition extraction", trees.size());
         for (Tree tree : trees) {
             totalCandidates += extractFromTree(tree, pref);
+            bar.update(++treesDone);
         }
+        bar.done();
 
         long ms = (System.nanoTime() - t0) / 1_000_000;
         Logging.info("Partition extraction: %d candidates -> %d unique tripartitions in %d ms",
