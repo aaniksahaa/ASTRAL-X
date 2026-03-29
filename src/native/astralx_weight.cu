@@ -199,6 +199,12 @@ static void wb_fmt_duration(double secs, char* buf, int buflen) {
 
 // Build a Unicode block progress bar into buf (must hold BAR_W*3+1 bytes).
 // Filled portion uses █ (U+2588), remainder uses ░ (U+2591).
+static int wb_use_color(void) {
+    if (getenv("NO_COLOR"))    return 0;
+    if (getenv("FORCE_COLOR")) return 1;
+    return 0;
+}
+
 #define WB_BAR_W 28
 static void wb_build_bar(char* buf, int done, int total) {
     int filled = (total > 0) ? (int)((double)done / total * WB_BAR_W + 0.5) : 0;
@@ -385,6 +391,8 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsGPU(
     int    blockSize  = 256;
     int    numBatches = (numSplits + batchSize - 1) / batchSize;
     double t_loop_start = wb_now_sec();
+    const char* GRN = wb_use_color() ? "\033[32m" : "";
+    const char* RST = wb_use_color() ? "\033[0m"  : "";
     char   bar_buf[WB_BAR_W * 3 + 1];
 
     for (int b = 0; b < numBatches; b++) {
@@ -429,25 +437,25 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsGPU(
                 char dur_buf[32];
                 wb_fmt_duration(elapsed, dur_buf, sizeof(dur_buf));
                 fprintf(stderr,
-                    "\r  [GPU] weight  [%s]  %d/%d  100%%  done in %s"
+                    "\r  %s[GPU]%s weight  %s[%s]%s  %d/%d  100%%  done in %s"
                     "                    \n",   // trailing spaces clear any leftover ETA text
-                    bar_buf, numBatches, numBatches, dur_buf);
+                    GRN, RST, GRN, bar_buf, RST, numBatches, numBatches, dur_buf);
             } else if (b == 0) {
                 // First batch done: show ETA from first sample
                 char eta_buf[32];
                 wb_fmt_duration(avg_sec * rem, eta_buf, sizeof(eta_buf));
                 fprintf(stderr,
-                    "\r  [GPU] weight  [%s]  %d/%d  %5.1f%%  "
+                    "\r  %s[GPU]%s weight  %s[%s]%s  %d/%d  %5.1f%%  "
                     "%.2fs/batch  ETA: %-8s",
-                    bar_buf, b + 1, numBatches, pct, avg_sec, eta_buf);
+                    GRN, RST, GRN, bar_buf, RST, b + 1, numBatches, pct, avg_sec, eta_buf);
             } else {
                 // Subsequent batches: rolling average ETA
                 char eta_buf[32];
                 wb_fmt_duration(avg_sec * rem, eta_buf, sizeof(eta_buf));
                 fprintf(stderr,
-                    "\r  [GPU] weight  [%s]  %d/%d  %5.1f%%  "
+                    "\r  %s[GPU]%s weight  %s[%s]%s  %d/%d  %5.1f%%  "
                     "%.2fs/batch  ETA: %-8s",
-                    bar_buf, b + 1, numBatches, pct, avg_sec, eta_buf);
+                    GRN, RST, GRN, bar_buf, RST, b + 1, numBatches, pct, avg_sec, eta_buf);
             }
             fflush(stderr);
         }

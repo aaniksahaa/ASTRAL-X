@@ -66,6 +66,12 @@ static void dp_fmt_duration(double secs, char* buf, int buflen) {
         snprintf(buf, buflen, "%dh%02dm", s / 3600, (s % 3600) / 60);
 }
 
+static int dp_use_color(void) {
+    if (getenv("NO_COLOR"))    return 0;
+    if (getenv("FORCE_COLOR")) return 1;
+    return 0;
+}
+
 #define DP_BAR_W 28
 static void dp_build_bar(char* buf, int done, int total) {
     int filled = (total > 0) ? (int)((double)done / total * DP_BAR_W + 0.5) : 0;
@@ -424,6 +430,8 @@ Java_astralx_gpu_GPUDPBuilder_findCrossTreeTransitionsGPU(
     //   progressMaxSteps > 0  →  step mode:  print every (100/maxSteps)% advancement
     //   progressMaxSteps == 0 →  time mode:  print every progressInterval seconds
     const bool step_mode = (progressMaxSteps > 0);
+    const char* GRN = dp_use_color() ? "\033[32m" : "";
+    const char* RST = dp_use_color() ? "\033[0m"  : "";
     int    activeDone       = 0;
     double t_loop_start     = dp_now_sec();
     double t_last_print     = t_loop_start - progressInterval; // force first eligible (time mode)
@@ -539,13 +547,15 @@ Java_astralx_gpu_GPUDPBuilder_findCrossTreeTransitionsGPU(
                 if (is_last) {
                     // Final: end with newline, pad to clear any previous line
                     fprintf(stderr,
-                        "\r  [GPU] dp      [%s]  %d/%d  100%%  %-8s  found: %-12d\n",
-                        dp_bar_buf, activeBins, activeBins, dur_buf, found);
+                        "\r  %s[GPU]%s dp      %s[%s]%s  %d/%d  100%%  %-8s  found: %-12d\n",
+                        GRN, RST, GRN, dp_bar_buf, RST,
+                        activeBins, activeBins, dur_buf, found);
                 } else {
                     // Intermediate: \r with fixed-width fields so line never shrinks
                     fprintf(stderr,
-                        "\r  [GPU] dp      [%s]  %4d/%-4d  %5.1f%%  elapsed: %-8s  found: %-12d",
-                        dp_bar_buf, activeDone, activeBins, pct, dur_buf, found);
+                        "\r  %s[GPU]%s dp      %s[%s]%s  %4d/%-4d  %5.1f%%  elapsed: %-8s  found: %-12d",
+                        GRN, RST, GRN, dp_bar_buf, RST,
+                        activeDone, activeBins, pct, dur_buf, found);
                 }
                 fflush(stderr);
             }
@@ -558,8 +568,8 @@ Java_astralx_gpu_GPUDPBuilder_findCrossTreeTransitionsGPU(
         char dur_buf[32];
         dp_fmt_duration(elapsed, dur_buf, sizeof(dur_buf));
         fprintf(stderr,
-            "  [GPU] dp      done in %s  found: %d transitions\n",
-            dur_buf, (int)(accum.size() / 3));
+            "  %s[GPU]%s dp      done in %s  found: %d transitions\n",
+            GRN, RST, dur_buf, (int)(accum.size() / 3));
         fflush(stderr);
     }
 
