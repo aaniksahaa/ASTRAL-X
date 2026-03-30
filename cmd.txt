@@ -11,6 +11,16 @@
 #     --opts "--search-mode local"  -> search-mode_local
 #     --opts "--search-mode full"   -> search-mode_full
 
+
+# Generate incomplete trees first
+./sim_incomplete.sh -t 100 -g 100 --fraction 0.3
+
+# Then test on them
+./test-astralx-simulated.sh -t 100 -g 100 --incomplete --fresh
+./test-astralx-simulated.sh -t 100 -g 100 --incomplete --fresh --opts "--search-mode local -vv"
+
+./test-astralx-simulated.sh -t 100 -g 100 --incomplete --fresh --opts "--search-mode local -vv --autocomplete-incomplete-gene-trees"
+
  
  
 ./run-bulk-simulated.sh --method astralx --num-replicates 5 --opts-list "--search-mode local;--search-mode full"

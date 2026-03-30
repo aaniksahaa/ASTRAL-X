@@ -27,6 +27,7 @@ SPMAX="1500000"
 USE_LEGACY_LAYOUT=false
 ASTRALX_OPTS="--search-mode full -vv"
 FRESH=false
+INCOMPLETE=false
 TIME_MONITOR=true
 GPU_MONITOR=true
 NO_NOTIFY=false
@@ -92,6 +93,9 @@ Optional:
   --spmin              Population size minimum
   --spmax              Population size maximum
   --use-legacy-layout  Use legacy simphy layout
+  --incomplete         Use the incomplete-tree variant of the dataset
+                       (appends _incomplete to the dataset directory name;
+                        generate with sim_incomplete.sh first)
   If the expected simulated dataset is missing, this script will first invoke
   ./sim.sh with matching parameters to generate the required replicate.
   --fresh              Force rerun even if stat-astralx.csv exists
@@ -122,6 +126,7 @@ while [[ $# -gt 0 ]]; do
     --spmin) SPMIN="$2"; shift 2 ;;
     --spmax) SPMAX="$2"; shift 2 ;;
     --use-legacy-layout) USE_LEGACY_LAYOUT=true; shift ;;
+    --incomplete) INCOMPLETE=true; shift ;;
     --fresh) FRESH=true; shift ;;
     --no-time-monitor) TIME_MONITOR=false; shift ;;
     --no-gpu-monitor) GPU_MONITOR=false; shift ;;
@@ -161,6 +166,14 @@ else
   fi
 fi
 
+# When --incomplete is set, the dataset lives in the _incomplete variant directory.
+# e.g. simphy/data/t_100_g_100_sb_.../R1  →  simphy/data/t_100_g_100_sb_..._incomplete/R1
+if [[ "$INCOMPLETE" == true ]]; then
+  _REPL_BASE="$(basename "$SIMPHY_RUN_DIR")"
+  _DATASET_DIR="$(dirname "$SIMPHY_RUN_DIR")"
+  SIMPHY_RUN_DIR="${_DATASET_DIR}_incomplete/${_REPL_BASE}"
+fi
+
 ALL_GT_FILE="${SIMPHY_RUN_DIR%/}/all_gt.tre"
 TRUE_SPECIES_TREE="${SIMPHY_RUN_DIR%/}/s_tree.trees"
 RESULTS_DIR="${SIMPHY_RUN_DIR%/}/astralx_outputs/${SETTING_NAME}"
@@ -182,6 +195,13 @@ if [[ ! -f "$ALL_GT_FILE" ]]; then
   if [[ "$USE_LEGACY_LAYOUT" == true ]]; then
     echo "Error: gene-tree file not found at $ALL_GT_FILE"
     echo "Automatic simulation bootstrap is not supported with --use-legacy-layout."
+    exit 6
+  fi
+
+  if [[ "$INCOMPLETE" == true ]]; then
+    echo "Error: incomplete gene-tree file not found at $ALL_GT_FILE"
+    echo "Generate it first with:"
+    echo "  ./sim_incomplete.sh -t $TAXA_NUM -g $GENE_TREES [--fraction F] [--seed N]"
     exit 6
   fi
 
@@ -243,8 +263,7 @@ if [[ "$TIME_MONITOR" == false ]]; then CMD+=(--no-time-monitor); fi
 if [[ "$GPU_MONITOR" == false ]]; then CMD+=(--no-gpu-monitor); fi
 if [[ "$DEBUG" == 1 ]]; then CMD+=(--debug); fi
 if [[ -n "$ASTRALX_OPTS" ]]; then
-  read -r -a EXTRA_OPTS <<< "$ASTRALX_OPTS"
-  CMD+=("${EXTRA_OPTS[@]}")
+  CMD+=(--opts "$ASTRALX_OPTS")
 fi
 
 echo "==> Running ASTRAL-X"

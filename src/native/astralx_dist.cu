@@ -42,6 +42,7 @@
 #include <string.h>
 #include <math.h>
 #include <time.h>
+#include <unistd.h>
 
 // ── Utility: timing ──────────────────────────────────────────────────────────
 
@@ -56,6 +57,82 @@ static void dist_fmt_duration(double sec, char* buf, int bufsz) {
     s %= 60;
     if (m >= 60) snprintf(buf, bufsz, "%dh%02dm%02ds", m/60, m%60, s);
     else         snprintf(buf, bufsz, "%02d:%02d",     m, s);
+}
+
+// ── Utility: color detection (mirrors Banner.useColor()) ─────────────────────
+
+static int dist_use_color() {
+    if (getenv("NO_COLOR"))    return 0;
+    if (getenv("FORCE_COLOR")) return 1;
+    return isatty(STDERR_FILENO);
+}
+
+// ── Utility: styled progress bar (matches Java ProgressBar format) ────────────
+//
+// Format:
+//   "     ▸  Distance matrix (GPU)  [████████████░░░░░░░░░░░░░░░░]  done/total (pct%)  [elapsed<eta, rate]"
+//
+// Unicode: filled = U+2588 (█, 3 bytes UTF-8: 0xE2 0x96 0x88)
+//          empty  = U+2591 (░, 3 bytes UTF-8: 0xE2 0x96 0x91)
+//
+// ANSI: DIM="\033[2m"  GREEN="\033[32m"  YLW="\033[33m"  RST="\033[0m"
+
+static void dist_fmt_rate(double rate, char* buf, int bufsz) {
+    if (rate <= 0)       snprintf(buf, bufsz, "?it/s");
+    else if (rate >= 1)  snprintf(buf, bufsz, "%.1fit/s", rate);
+    else                 snprintf(buf, bufsz, "%.2fs/it", 1.0 / rate);
+}
+
+static void dist_print_progress(int work_done, int total_work, double elapsed,
+                                 int batch_idx, int num_batches, int color, int is_last) {
+    double pct  = (total_work > 0) ? 100.0 * work_done / total_work : 100.0;
+    double rate = (work_done > 0 && elapsed > 0) ? work_done / elapsed : 0.0;
+    double eta  = (rate > 0 && work_done < total_work) ? (total_work - work_done) / rate : 0.0;
+
+    char elapsed_buf[32], eta_buf[32], rate_buf[32];
+    dist_fmt_duration(elapsed, elapsed_buf, sizeof(elapsed_buf));
+    dist_fmt_duration(eta,     eta_buf,     sizeof(eta_buf));
+    dist_fmt_rate(rate, rate_buf, sizeof(rate_buf));
+
+    const int BAR_W = 28;
+    int filled = (int)(BAR_W * pct / 100.0);
+
+    // UTF-8 for █ (U+2588) and ░ (U+2591) — each is 3 bytes
+    const char* BLOCK_FULL  = "\xE2\x96\x88";  // █
+    const char* BLOCK_EMPTY = "\xE2\x96\x91";  // ░
+
+    // Build the bar string (28 × 3 bytes + brackets + null)
+    char bar[4 + BAR_W * 3 + 4];
+    int pos = 0;
+    bar[pos++] = '[';
+    for (int i = 0; i < BAR_W; i++) {
+        const char* ch = (i < filled) ? BLOCK_FULL : BLOCK_EMPTY;
+        bar[pos++] = ch[0]; bar[pos++] = ch[1]; bar[pos++] = ch[2];
+    }
+    bar[pos++] = ']'; bar[pos] = '\0';
+
+    if (color) {
+        // DIM ▸, plain label, GREEN bar, plain count/pct, DIM timing, YLW rate
+        fprintf(stderr,
+            "     \033[2m▸  \033[0mDistance matrix (GPU)  "
+            "\033[32m%s\033[0m"
+            "  %d/%d (%d%%)"
+            "  \033[2m[%s<%s, \033[0m\033[33m%s\033[0m\033[2m]\033[0m"
+            "\r",
+            bar,
+            work_done, total_work, (int)pct,
+            elapsed_buf, work_done > 0 ? eta_buf : "?",
+            rate_buf);
+    } else {
+        fprintf(stderr,
+            "     ▸  Distance matrix (GPU)  %s  %d/%d (%d%%)  [%s<%s, %s]\r",
+            bar,
+            work_done, total_work, (int)pct,
+            elapsed_buf, work_done > 0 ? eta_buf : "?",
+            rate_buf);
+    }
+    fflush(stderr);
+    if (is_last) fprintf(stderr, "\n");
 }
 
 // ── Utility: CUDA error check ─────────────────────────────────────────────────
@@ -258,6 +335,7 @@ Java_astralx_gpu_GPUDistanceMatrix_computeDistancesGPU(
     double t_last_print = t_start - progressInterval;  // print immediately
     double last_pct_printed = -1.0;
     const bool step_mode = (progressMaxSteps > 0);
+    int    use_color    = dist_use_color();
 
     // ── Outer loop: tree batches ──────────────────────────────────────────────
     for (int t0 = 0; t0 < numTrees; t0 += delta) {
@@ -335,28 +413,15 @@ Java_astralx_gpu_GPUDistanceMatrix_computeDistancesGPU(
                     should_print = is_last || (now - t_last_print >= progressInterval);
 
                 if (should_print) {
-                    char elapsed_buf[32];
-                    dist_fmt_duration(now - t_start, elapsed_buf, sizeof(elapsed_buf));
-                    int bar_w = 28, filled = (int)(bar_w * pct / 100.0);
-                    char bar[64]; int bi = 0;
-                    bar[bi++] = '[';
-                    for (int i = 0; i < bar_w; i++) bar[bi++] = (i < filled) ? '#' : '.';
-                    bar[bi++] = ']'; bar[bi] = '\0';
-                    fprintf(stderr,
-                        "     ▸  Distance matrix (GPU)  %s  %4d/%-4d  %5.1f%%  elapsed: %-8s  "
-                        "batch: %d/%d\r",
-                        bar,
-                        work_done, total_work, pct,
-                        elapsed_buf,
-                        (t0 / delta) + 1, num_batches);
-                    fflush(stderr);
+                    dist_print_progress(work_done, total_work, now - t_start,
+                                        (t0 / delta) + 1, num_batches,
+                                        use_color, is_last);
                     t_last_print       = now;
                     last_pct_printed   = pct;
                 }
             }
         }
     }
-    fprintf(stderr, "\n");  // end progress line
 
     // ── Release GPU buffers ───────────────────────────────────────────────────
     cudaFree(d_euler);

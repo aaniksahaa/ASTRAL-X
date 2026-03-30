@@ -50,6 +50,9 @@ Optional:
   --gpu-batches               Number of GPU batches (manual)
   --gpu-vram-occupancy-factor Fraction of free VRAM to use for batching (default: 0.75)
   --gpu-vram-control-factor   Resident-relative batch sizing override
+  --gpu-dist-tile-size        Tile size B for GPU distance matrix kernel
+  --verify-distance-matrix    Dump distance matrix and exit
+  --autocomplete-incomplete-gene-trees  Autocomplete incomplete gene trees before inference
   -v|-vv|-vvv        Verbosity
   --xms SIZE         Java min heap (default: ${XMS})
   --xmx SIZE         Java max heap (default: ${XMX})
@@ -98,11 +101,11 @@ while [[ $# -gt 0 ]]; do
       COMPUTE_MODE_SET=true
       shift
       ;;
-    --search-mode|-t|--threads|-m|--seeds|--gpu-batch-size|--gpu-batches|--gpu-vram-control-factor|--gpu-vram-occupancy-factor|--gpu-dp-state-space-construction-output-cap)
+    --search-mode|-t|--threads|-m|--seeds|--gpu-batch-size|--gpu-batches|--gpu-vram-control-factor|--gpu-vram-occupancy-factor|--gpu-dp-state-space-construction-output-cap|--gpu-dist-tile-size)
       PROGRAM_ARGS+=("$1" "$2")
       shift 2
       ;;
-    --rooted|--unrooted|--no-gpu-batch|--verify-parse|--verify-hash|--verify-clusters|--verify-partitions|--verify-dp|--verify-weights|-v|-vv|-vvv|-q|--quiet)
+    --rooted|--unrooted|--no-gpu-batch|--verify-parse|--verify-hash|--verify-clusters|--verify-partitions|--verify-dp|--verify-weights|--verify-distance-matrix|--autocomplete-incomplete-gene-trees|-v|-vv|-vvv|-q|--quiet)
       PROGRAM_ARGS+=("$1")
       shift
       ;;
