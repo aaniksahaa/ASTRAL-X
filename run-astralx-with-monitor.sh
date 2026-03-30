@@ -21,6 +21,7 @@ GPU_MONITOR=true
 NO_NOTIFY=false
 DEBUG=0
 ASTRALX_ARGS=()
+REFERENCE_SPECIES_TREE=""
 
 print_help() {
   cat <<EOF
@@ -39,6 +40,7 @@ Optional:
   --alg-opts "..."      Alias for --opts
   --astralx-opts "..."  Compatibility alias for --opts
   --stelar-opts "..."   Compatibility alias for --opts
+  --reference-species-tree  Reference species tree for RF rate calculation
   --no-time-monitor     Disable time monitoring
   --no-gpu-monitor      Disable GPU monitoring
   --no-notify, -nn      Disable ntfy notifications
@@ -58,6 +60,7 @@ while [[ $# -gt 0 ]]; do
       ASTRALX_ARGS+=("${TMP_OPTS[@]}")
       shift 2
       ;;
+    --reference-species-tree) REFERENCE_SPECIES_TREE="$2"; shift 2 ;;
     --no-time-monitor) TIME_MONITOR=false; shift ;;
     --no-gpu-monitor) GPU_MONITOR=false; shift ;;
     --no-notify|-nn) NO_NOTIFY=true; shift ;;
@@ -184,6 +187,9 @@ echo "Input file:     $INPUT_FILE"
 echo "Output file:    $OUTPUT_FILE"
 echo "ASTRAL-X root:  $ASTRALX_ROOT"
 echo "ASTRAL-X opts:  ${ASTRALX_ARGS[*]:-(defaults)}"
+if [[ -n "$REFERENCE_SPECIES_TREE" ]]; then
+  echo "Reference tree: $REFERENCE_SPECIES_TREE"
+fi
 echo "Time monitor:   $TIME_MONITOR"
 echo "GPU monitor:    $GPU_MONITOR"
 echo "Notifications:  $(if [[ "$NO_NOTIFY" == true ]]; then echo "disabled"; else echo "enabled"; fi)"
@@ -250,6 +256,20 @@ if [[ -f "$TIME_TMP" ]]; then
   fi
 fi
 
+RF_RATE="NA"
+if [[ -n "$REFERENCE_SPECIES_TREE" && -f "$OUTPUT_FILE" ]]; then
+  REFERENCE_SPECIES_TREE="$(realpath "$REFERENCE_SPECIES_TREE")"
+  if [[ -f "$REFERENCE_SPECIES_TREE" ]]; then
+    rf_output=$(cd "$ASTRALX_ROOT" && python3 rf.py "$OUTPUT_FILE" "$REFERENCE_SPECIES_TREE" 2>&1) || true
+    rf_line=$(echo "$rf_output" | grep -i "Robinson-Foulds distance" | tail -n1 || true)
+    if [[ -n "$rf_line" ]]; then
+      RF_RATE=$(echo "$rf_line" | grep -Eo '[0-9]+(\.[0-9]+)?' | tail -n1 || echo "NA")
+    fi
+  else
+    echo -e "${YELLOW}Warning: reference species tree not found at '$REFERENCE_SPECIES_TREE'; skipping RF.${NC}"
+  fi
+fi
+
 echo
 echo -e "${GREEN}=== ASTRAL-X Execution Summary ===${NC}"
 echo "Status:         $(if [[ $ASTRALX_EXIT_CODE -eq 0 ]]; then echo -e "${GREEN}SUCCESS${NC}"; else echo -e "${RED}FAILED (exit code $ASTRALX_EXIT_CODE)${NC}"; fi)"
@@ -257,26 +277,35 @@ echo "Running time:   ${RUNNING_TIME}s"
 echo "Max CPU RAM:    ${MAX_CPU_MB} MB"
 echo "Max GPU VRAM:   ${MAX_GPU_MB} MB"
 echo "Quartet score:  ${OPTIMAL_QUARTET_SCORE}"
+if [[ -n "$REFERENCE_SPECIES_TREE" ]]; then
+  echo "RF rate:        ${RF_RATE}"
+fi
 echo "Output exists:  $(if [[ -f "$OUTPUT_FILE" ]]; then echo "Yes"; else echo "No"; fi)"
 
 STATS_FILE="${OUTPUT_FILE%.*}_stats.csv"
-echo "algorithm,input_file,output_file,running_time_s,max_cpu_mb,max_gpu_mb,optimal_quartet_score,exit_code" > "$STATS_FILE"
-echo "astral-x,$(basename "$INPUT_FILE"),$(basename "$OUTPUT_FILE"),${RUNNING_TIME},${MAX_CPU_MB},${MAX_GPU_MB},${OPTIMAL_QUARTET_SCORE},${ASTRALX_EXIT_CODE}" >> "$STATS_FILE"
+echo "algorithm,input_file,output_file,running_time_s,max_cpu_mb,max_gpu_mb,optimal_quartet_score,rf_rate,exit_code" > "$STATS_FILE"
+echo "astral-x,$(basename "$INPUT_FILE"),$(basename "$OUTPUT_FILE"),${RUNNING_TIME},${MAX_CPU_MB},${MAX_GPU_MB},${OPTIMAL_QUARTET_SCORE},${RF_RATE},${ASTRALX_EXIT_CODE}" >> "$STATS_FILE"
 echo "Stats saved to: $STATS_FILE"
 
 if [[ "$NO_NOTIFY" == false ]] && command -v curl >/dev/null 2>&1; then
   STATUS_EMOJI=$(if [[ $ASTRALX_EXIT_CODE -eq 0 ]]; then echo "✅"; else echo "❌"; fi)
   STATUS_TEXT=$(if [[ $ASTRALX_EXIT_CODE -eq 0 ]]; then echo "completed"; else echo "failed (exit $ASTRALX_EXIT_CODE)"; fi)
-  curl -s -d "${STATUS_EMOJI} ASTRAL-X ${STATUS_TEXT}
+  NOTIFY_BODY="${STATUS_EMOJI} ASTRAL-X ${STATUS_TEXT}
 
 Running time: ${RUNNING_TIME}s
 Max CPU RAM: ${MAX_CPU_MB} MB
 Max GPU VRAM: ${MAX_GPU_MB} MB
-Quartet score: ${OPTIMAL_QUARTET_SCORE}
+Quartet score: ${OPTIMAL_QUARTET_SCORE}"
+  if [[ -n "$REFERENCE_SPECIES_TREE" ]]; then
+    NOTIFY_BODY+="
+RF rate: ${RF_RATE}"
+  fi
+  NOTIFY_BODY+="
 
 Input: $(basename "$INPUT_FILE")
 Output: $(basename "$OUTPUT_FILE")
-Stats: $(basename "$STATS_FILE")" "https://ntfy.sh/${NTFY_CHANNEL_NAME}" >/dev/null 2>&1 || true
+Stats: $(basename "$STATS_FILE")"
+  curl -s -d "$NOTIFY_BODY" "https://ntfy.sh/${NTFY_CHANNEL_NAME}" >/dev/null 2>&1 || true
 fi
 
 exit "$ASTRALX_EXIT_CODE"
