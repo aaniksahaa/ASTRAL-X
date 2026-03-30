@@ -63,11 +63,11 @@ while [[ $# -gt 0 ]]; do
     --no-notify|-nn) NO_NOTIFY=true; shift ;;
     --debug) DEBUG=1; shift ;;
     --help|-h) print_help; exit 0 ;;
-    --cpu|--gpu|--rooted|--unrooted|--no-gpu-batch|--verify-parse|--verify-hash|--verify-clusters|--verify-partitions|--verify-dp|--verify-weights|-v|-vv|-vvv|-q|--quiet)
+    --cpu|--gpu|--rooted|--unrooted|--no-gpu-batch|--verify-parse|--verify-hash|--verify-clusters|--verify-partitions|--verify-dp|--verify-weights|--verify-distance-matrix|--autocomplete-incomplete-gene-trees|-v|-vv|-vvv|-q|--quiet)
       ASTRALX_ARGS+=("$1")
       shift
       ;;
-    --search-mode|-t|--threads|-m|--seeds|--gpu-batch-size|--gpu-batches|--gpu-vram-control-factor|--gpu-vram-occupancy-factor|--gpu-dp-state-space-construction-output-cap)
+    --search-mode|-t|--threads|-m|--seeds|--gpu-batch-size|--gpu-batches|--gpu-vram-control-factor|--gpu-vram-occupancy-factor|--gpu-dp-state-space-construction-output-cap|--gpu-dist-tile-size)
       ASTRALX_ARGS+=("$1" "$2")
       shift 2
       ;;
