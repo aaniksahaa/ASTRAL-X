@@ -199,47 +199,56 @@ if [[ ! -f "$ALL_GT_FILE" ]]; then
   fi
 
   if [[ "$INCOMPLETE" == true ]]; then
-    echo "Error: incomplete gene-tree file not found at $ALL_GT_FILE"
-    echo "Generate it first with:"
-    echo "  ./sim_incomplete.sh -t $TAXA_NUM -g $GENE_TREES [--fraction F] [--seed N]"
-    exit 6
-  fi
+    echo "Incomplete gene-tree file not found at $ALL_GT_FILE"
+    echo "==> Bootstrapping missing incomplete dataset via ./sim_incomplete.sh"
 
-  echo "Gene-tree file not found at $ALL_GT_FILE"
-  echo "==> Bootstrapping missing simulated dataset via ./sim.sh"
+    REPLICATE_COUNT=1
+    if [[ "$REPLICATE" =~ ^R([0-9]+)$ ]]; then
+      REPLICATE_COUNT="${BASH_REMATCH[1]}"
+    fi
 
-  REPLICATE_COUNT=1
-  if [[ "$REPLICATE" =~ ^R([0-9]+)$ ]]; then
-    REPLICATE_COUNT="${BASH_REMATCH[1]}"
-  elif [[ "$REPLICATE" =~ ^[0-9]+$ ]]; then
-    REPLICATE_COUNT="$REPLICATE"
-    REPLICATE="R${REPLICATE}"
-    SIMPHY_RUN_DIR="${SIMPHY_RUN_DIR%/*}/R${REPLICATE_COUNT}"
-    ALL_GT_FILE="${SIMPHY_RUN_DIR%/}/all_gt.tre"
-    TRUE_SPECIES_TREE="${SIMPHY_RUN_DIR%/}/s_tree.trees"
-    RESULTS_DIR="${SIMPHY_RUN_DIR%/}/astralx_outputs/${SETTING_NAME}"
-    STAT_FILE="${RESULTS_DIR%/}/stat-astralx.csv"
-    LOCK_FILE="${RESULTS_DIR%/}/.astralx.lock"
-    OUT_ASTRALX="${RESULTS_DIR%/}/out-astralx.tre"
-    RUN_LOG="${RESULTS_DIR%/}/.astralx_run.log"
-  fi
+    SIM_INC_CMD=(./sim_incomplete.sh -t "$TAXA_NUM" -g "$GENE_TREES" -rs "$REPLICATE_COUNT" --sb "$SB" --spmin "$SPMIN" --spmax "$SPMAX")
+    if [[ "$SIMPHY_DIR_SET" == true ]];      then SIM_INC_CMD+=(--simphy-dir      "$SIMPHY_DIR");      fi
+    if [[ "$SIMPHY_DATA_DIR_SET" == true ]]; then SIM_INC_CMD+=(--simphy-data-dir "$SIMPHY_DATA_DIR"); fi
+    if [[ "$FRESH" == true ]];               then SIM_INC_CMD+=(--fresh-inc);                          fi
 
-  SIM_CMD=(./sim.sh -t "$TAXA_NUM" -g "$GENE_TREES" -r "$REPLICATE" -rs "$REPLICATE_COUNT" --sb "$SB" --spmin "$SPMIN" --spmax "$SPMAX")
-  if [[ "$SIMPHY_DIR_SET" == true ]]; then
-    SIM_CMD+=(--simphy-dir "$SIMPHY_DIR")
-  fi
-  if [[ "$SIMPHY_DATA_DIR_SET" == true ]]; then
-    SIM_CMD+=(--simphy-data-dir "$SIMPHY_DATA_DIR")
-  fi
-  if [[ "$FRESH" == true ]]; then
-    SIM_CMD+=(--fresh)
-  fi
+    "${SIM_INC_CMD[@]}"
 
-  "${SIM_CMD[@]}"
+    if [[ ! -f "$ALL_GT_FILE" ]]; then
+      echo "Error: bootstrap completed but incomplete gene-tree file is still missing at $ALL_GT_FILE"
+      exit 6
+    fi
+  else
+    echo "Gene-tree file not found at $ALL_GT_FILE"
+    echo "==> Bootstrapping missing simulated dataset via ./sim.sh"
 
-  if [[ ! -f "$ALL_GT_FILE" ]]; then
-    echo "Error: dataset bootstrap completed but gene-tree file is still missing at $ALL_GT_FILE"
-    exit 6
+    REPLICATE_COUNT=1
+    if [[ "$REPLICATE" =~ ^R([0-9]+)$ ]]; then
+      REPLICATE_COUNT="${BASH_REMATCH[1]}"
+    elif [[ "$REPLICATE" =~ ^[0-9]+$ ]]; then
+      REPLICATE_COUNT="$REPLICATE"
+      REPLICATE="R${REPLICATE}"
+      SIMPHY_RUN_DIR="${SIMPHY_RUN_DIR%/*}/R${REPLICATE_COUNT}"
+      ALL_GT_FILE="${SIMPHY_RUN_DIR%/}/all_gt.tre"
+      TRUE_SPECIES_TREE="${SIMPHY_RUN_DIR%/}/s_tree.trees"
+      RESULTS_DIR="${SIMPHY_RUN_DIR%/}/astralx_outputs/${SETTING_NAME}"
+      STAT_FILE="${RESULTS_DIR%/}/stat-astralx.csv"
+      LOCK_FILE="${RESULTS_DIR%/}/.astralx.lock"
+      OUT_ASTRALX="${RESULTS_DIR%/}/out-astralx.tre"
+      RUN_LOG="${RESULTS_DIR%/}/.astralx_run.log"
+    fi
+
+    SIM_CMD=(./sim.sh -t "$TAXA_NUM" -g "$GENE_TREES" -r "$REPLICATE" -rs "$REPLICATE_COUNT" --sb "$SB" --spmin "$SPMIN" --spmax "$SPMAX")
+    if [[ "$SIMPHY_DIR_SET" == true ]];      then SIM_CMD+=(--simphy-dir      "$SIMPHY_DIR");      fi
+    if [[ "$SIMPHY_DATA_DIR_SET" == true ]]; then SIM_CMD+=(--simphy-data-dir "$SIMPHY_DATA_DIR"); fi
+    if [[ "$FRESH" == true ]];               then SIM_CMD+=(--fresh);                              fi
+
+    "${SIM_CMD[@]}"
+
+    if [[ ! -f "$ALL_GT_FILE" ]]; then
+      echo "Error: dataset bootstrap completed but gene-tree file is still missing at $ALL_GT_FILE"
+      exit 6
+    fi
   fi
 fi
 
