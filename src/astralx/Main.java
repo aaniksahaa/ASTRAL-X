@@ -81,6 +81,7 @@ public class Main {
                 Phase2Verifier.dump(trees, registry, hasher, pref, cfg.getOutputFile());
                 return;
             }
+            hasher = null; // no longer needed after prefix arrays are built
 
             // ── Phase 3: Cluster extraction -> X ─────────────────────────────
             long t3 = PhaseLogger.begin("Phase 3  Cluster extraction", false);
@@ -120,6 +121,16 @@ public class Main {
                 Phase5Verifier.dump(trees, registry, pref, clusterTable, dpTable, cfg.getOutputFile());
                 return;
             }
+            pref = null; // no longer needed after Phase 5; free ~3 GB before Phase 6
+
+            // Hint JVM to collect Phase 3-5 intermediates before Phase 6 allocates its working set.
+            // System.gc() is a hint — JVM may ignore it if -XX:+DisableExplicitGC is set.
+            long gcHeapBefore = Runtime.getRuntime().totalMemory() - Runtime.getRuntime().freeMemory();
+            System.gc();
+            long gcHeapAfter = Runtime.getRuntime().totalMemory() - Runtime.getRuntime().freeMemory();
+            Logging.debug("Pre-Phase-6 GC hint: heap %d MB → %d MB (freed %d MB)",
+                gcHeapBefore / 1_000_000, gcHeapAfter / 1_000_000,
+                (gcHeapBefore - gcHeapAfter) / 1_000_000);
 
             // ── Phase 6: Weight calculation ───────────────────────────────────
             boolean gpuWeight = (cfg.getComputeMode() == Config.ComputeMode.GPU)
