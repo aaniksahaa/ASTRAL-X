@@ -189,6 +189,16 @@ public class Config {
     public boolean isAutoCompleteIncompleteTrees()          { return autoCompleteIncompleteTrees; }
     public void setAutoCompleteIncompleteTrees(boolean v)   { this.autoCompleteIncompleteTrees = v; }
 
+    /**
+     * Tile side-length B for the GPU distance-matrix kernel.
+     * Controls GPU VRAM for the output tile: B² × 12 bytes.
+     * Default 0 = auto: B = min(n, ceil(sqrt(n * k))), capped by available VRAM.
+     * Configured via --gpu-dist-tile-size.
+     */
+    private int gpuDistTileSizeB = 0;
+    public int  getGpuDistTileSizeB()          { return gpuDistTileSizeB; }
+    public void setGpuDistTileSizeB(int b)     { this.gpuDistTileSizeB = Math.max(0, b); }
+
     // Testing flags
     private boolean verifyParse = false;
     public boolean isVerifyParse()          { return verifyParse; }

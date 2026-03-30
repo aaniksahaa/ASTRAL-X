@@ -2,6 +2,7 @@
 # Build all CUDA JNI shared libraries for ASTRAL-X.
 #   native/libastralx_weight.so  -- GPU weight calculation kernel
 #   native/libastralx_dp.so      -- GPU cross-tree DP transition search kernel
+#   native/libastralx_dist.so    -- GPU distance matrix kernel (Euler tour + RMQ)
 set -e
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
@@ -37,6 +38,13 @@ SRC_DP="$ROOT/src/native/astralx_dp.cu"
 OUT_DP="$ROOT/native/libastralx_dp.so"
 echo "  Building    : $SRC_DP  ->  $OUT_DP"
 nvcc "${NVCC_FLAGS[@]}" -o "$OUT_DP" "$SRC_DP"
+echo "  OK"
+
+# ── Distance matrix kernel ────────────────────────────────────────────────────
+SRC_DM="$ROOT/src/native/astralx_dist.cu"
+OUT_DM="$ROOT/native/libastralx_dist.so"
+echo "  Building    : $SRC_DM  ->  $OUT_DM"
+nvcc "${NVCC_FLAGS[@]}" -o "$OUT_DM" "$SRC_DM"
 echo "  OK"
 
 echo "=== Native build complete ==="
