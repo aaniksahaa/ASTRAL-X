@@ -25,6 +25,7 @@ NATIVE_DIR="${ROOT_DIR}/native"
 FILTER="tc[0-9]*"
 COMPUTE_MODE="--gpu"
 SEARCH_MODE="local"
+SKIP_BUILD=0
 
 # Parse args
 while [[ $# -gt 0 ]]; do
@@ -32,6 +33,7 @@ while [[ $# -gt 0 ]]; do
         --cpu)          COMPUTE_MODE="--cpu"; shift ;;
         --gpu)          COMPUTE_MODE="--gpu"; shift ;;
         --search-mode)  SEARCH_MODE="$2"; shift 2 ;;
+        --no-build)     SKIP_BUILD=1; shift ;;
         *)              FILTER="$1"; shift ;;
     esac
 done
@@ -117,6 +119,19 @@ run_tc () {
 
 echo -e "\n${BOLD}=== ASTRAL-X Test Suite ===${NC}"
 printf "  mode: %s  search: %s\n\n" "$COMPUTE_MODE" "$SEARCH_MODE"
+
+# ── Build ─────────────────────────────────────────────────────────────────────
+if [[ $SKIP_BUILD -eq 0 ]]; then
+    echo "  Building Java..."
+    bash "$ROOT_DIR/build.sh" > /dev/null \
+        && echo "  Build Java   OK" \
+        || { echo -e "  ${RED}Build Java   FAILED${NC}"; exit 1; }
+    echo "  Building native (CUDA)..."
+    bash "$ROOT_DIR/build_native.sh" > /dev/null \
+        && echo "  Build native OK" \
+        || { echo -e "  ${RED}Build native FAILED${NC}"; exit 1; }
+    echo
+fi
 
 mapfile -t inputs < <(
     find "$INPUT_DIR" -maxdepth 1 -name "${FILTER}_*.tre" ! -name "*_true.tre" | sort

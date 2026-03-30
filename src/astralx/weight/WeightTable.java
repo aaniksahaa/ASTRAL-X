@@ -239,6 +239,13 @@ public class WeightTable {
         long gpuMs = (System.nanoTime() - t1) / 1_000_000;
         Logging.info("  GPU kernel returned in %d ms", gpuMs);
 
+        // Input arrays are no longer needed after the kernel returns; free them
+        // before the twoScores loop so GC can reclaim ~7 GB while we fill scoreArray.
+        splitsData = null;
+        partsData  = null;
+        orderings  = null;
+        invIndex   = null;
+
         // twoScores[i] = 2 * score; divide by 2
         for (int i = 0; i < numSplits; i++) {
             scoreArray[i] = twoScores[i] / 2L;
