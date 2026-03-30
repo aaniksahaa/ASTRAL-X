@@ -12,6 +12,28 @@
 #     --opts "--search-mode full"   -> search-mode_full
 
 
+
+# angio 
+
+# complete local
+./run-astralx-with-monitor.sh -i data/all_gt_angio.tre -o data/out-astralx-angio-complete-local.tre --opts "--search-mode local -vv --autocomplete-incomplete-gene-trees" --reference-species-tree data/s_tree_angio.tre
+
+# complete full
+./run-astralx-with-monitor.sh -i data/all_gt_angio.tre -o data/out-astralx-angio-complete-full.tre --opts "--search-mode full -vv --autocomplete-incomplete-gene-trees" --reference-species-tree data/s_tree_angio.tre
+
+# incomplete local
+./run-astralx-with-monitor.sh -i data/all_gt_angio.tre -o data/out-astralx-angio-incomplete-local.tre --opts "--search-mode local -vv" --reference-species-tree data/s_tree_angio.tre
+
+# incomplete full
+./run-astralx-with-monitor.sh -i data/all_gt_angio.tre -o data/out-astralx-angio-incomplete-full.tre --opts "--search-mode full -vv" --reference-species-tree data/s_tree_angio.tre
+
+
+# test on custom input and output 
+
+./run-astralx-with-monitor.sh -i all_gt_bs_rooted_37.tre -o out-37-astralx.tre --opts "--search-mode local -vv --autocomplete-incomplete-gene-trees" --reference-species-tree true_37.tre
+
+
+
 # testing on simulated incomplete trees 
 ./test-astralx-simulated.sh --incomplete -t 200 -g 100 --sb 0.000001 --spmin 100000 --spmax 200000 -r R1 --astralx-opts "--search-mode local -vv --xmx 12g --autocomplete-incomplete-gene-trees"
  
