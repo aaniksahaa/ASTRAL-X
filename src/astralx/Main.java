@@ -46,28 +46,33 @@ public class Main {
             }
 
             // ── Phase 1b: Auto-complete incomplete gene trees (optional) ──────
-            long incompleteCount = trees.stream().filter(t -> !t.isComplete).count();
+            // Entered only when --autocomplete-incomplete-gene-trees or
+            // --verify-distance-matrix is explicitly requested.  The baseline
+            // (complete trees, no flag) skips this block entirely — no library
+            // load, no stream scan, zero overhead.
+            if (cfg.isAutoCompleteIncompleteTrees() || cfg.isVerifyDistanceMatrix()) {
+                boolean gpuDist = (cfg.getComputeMode() == Config.ComputeMode.GPU)
+                                  && GPUDistanceMatrix.tryLoad();
 
-            boolean gpuDist = (cfg.getComputeMode() == Config.ComputeMode.GPU)
-                              && GPUDistanceMatrix.tryLoad();
+                if (cfg.isVerifyDistanceMatrix()) {
+                    DistanceMatrix dm = gpuDist
+                        ? DistanceMatrixBuilder.buildGPU(trees, registry.size())
+                        : DistanceMatrixBuilder.buildCPU(trees, registry.size());
+                    dumpDistanceMatrix(dm, registry);
+                    return;
+                }
 
-            if (cfg.isVerifyDistanceMatrix()) {
-                DistanceMatrix dm = gpuDist
-                    ? DistanceMatrixBuilder.buildGPU(trees, registry.size())
-                    : DistanceMatrixBuilder.buildCPU(trees, registry.size());
-                dumpDistanceMatrix(dm, registry);
-                return;
-            }
-
-            if (cfg.isAutoCompleteIncompleteTrees() && incompleteCount > 0) {
-                long t1b = PhaseLogger.begin("Phase 1b Auto-complete gene trees", gpuDist);
-                DistanceMatrix dm = gpuDist
-                    ? DistanceMatrixBuilder.buildGPU(trees, registry.size())
-                    : DistanceMatrixBuilder.buildCPU(trees, registry.size());
-                trees = TreeCompleter.completeAll(trees, dm, registry.size());
-                PhaseLogger.end("Phase 1b Auto-complete gene trees", t1b, gpuDist);
-            } else if (cfg.isAutoCompleteIncompleteTrees()) {
-                Logging.info("Phase 1b: all gene trees already complete, skipping");
+                long incompleteCount = trees.stream().filter(t -> !t.isComplete).count();
+                if (incompleteCount > 0) {
+                    long t1b = PhaseLogger.begin("Phase 1b Auto-complete gene trees", gpuDist);
+                    DistanceMatrix dm = gpuDist
+                        ? DistanceMatrixBuilder.buildGPU(trees, registry.size())
+                        : DistanceMatrixBuilder.buildCPU(trees, registry.size());
+                    trees = TreeCompleter.completeAll(trees, dm, registry.size());
+                    PhaseLogger.end("Phase 1b Auto-complete gene trees", t1b, gpuDist);
+                } else {
+                    Logging.info("Phase 1b: all gene trees already complete, skipping");
+                }
             }
 
             // ── Phase 2: Taxon hashing + prefix arrays ────────────────────────
