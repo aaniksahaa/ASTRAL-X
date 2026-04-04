@@ -323,6 +323,8 @@ echo "Wrote stats to $STAT_FILE"
 if [[ "$NO_NOTIFY" == false ]] && command -v curl >/dev/null 2>&1; then
   STATUS_EMOJI=$(if [[ $ASTRALX_EXIT_CODE -eq 0 ]]; then echo "✅"; else echo "❌"; fi)
   STATUS_TEXT=$(if [[ $ASTRALX_EXIT_CODE -eq 0 ]]; then echo "completed"; else echo "failed (exit $ASTRALX_EXIT_CODE)"; fi)
+  CSV_HEADER="alg,setting,num-taxa,gene-trees,replicate,sb,spmin,spmax,rf-rate,optimal-quartet-score,running-time-s,max-cpu-mb,max-gpu-mb"
+  CSV_ROW="astralx,${SETTING_NAME},${TAXA_NUM},${GENE_TREES},${REPLICATE},${SB},${SPMIN},${SPMAX},${RF_RATE},${OPTIMAL_QUARTET_SCORE},${RUNNING_TIME},${MAX_CPU_MB},${MAX_GPU_MB}"
   curl -s -d "${STATUS_EMOJI} ASTRAL-X ${STATUS_TEXT} for ${TAXA_NUM} taxa and ${GENE_TREES} gene trees
 
 RF Rate: ${RF_RATE}
@@ -330,6 +332,9 @@ Quartet score: ${OPTIMAL_QUARTET_SCORE}
 Running time: ${RUNNING_TIME}s
 Max CPU RAM: ${MAX_CPU_MB} MB
 Max GPU VRAM: ${MAX_GPU_MB} MB
+
+${CSV_HEADER}
+${CSV_ROW}
 
 Stats: ${STAT_FILE}" "https://ntfy.sh/${NTFY_CHANNEL_NAME}" >/dev/null 2>&1 || true
 fi
