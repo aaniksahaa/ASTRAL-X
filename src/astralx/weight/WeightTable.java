@@ -54,8 +54,17 @@ public class WeightTable {
 
     // -------------------------------------------------------------------------
 
+    /**
+     * @param clusterTrees  completed gene trees — used for cluster exemplar position lookups
+     *                      (Cluster.treeIndex refers into this list)
+     * @param partTrees     original (pre-completion) gene trees — used for gene-tree quartet
+     *                      scoring (Partition.treeIndex refers into this list).
+     *                      When --autocomplete-incomplete-gene-trees is NOT active,
+     *                      partTrees == clusterTrees (same reference) and behavior is unchanged.
+     */
     public WeightTable(DPTable dpTable, PartitionTable partTable,
-                       ClusterTable clusterTable, List<Tree> trees) {
+                       ClusterTable clusterTable,
+                       List<Tree> clusterTrees, List<Tree> partTrees) {
         long t0 = System.nanoTime();
         this.n = clusterTable.getAllTaxaHash().size;
 
@@ -66,6 +75,13 @@ public class WeightTable {
 
         List<PartitionTable.Entry> partList = new ArrayList<>(partTable.entries());
         long[] scoreArray = new long[numSplits];
+
+        // When clusterTrees != partTrees (autocomplete active), the GPU path packs both
+        // sets of orderings/invIndex into a combined array (slots 0..k-1 = completed,
+        // slots k..2k-1 = original) and offsets partition tree indices by k.
+        // numGpuTrees reflects the combined size for VRAM budget calculations.
+        boolean splitTrees = (clusterTrees != partTrees);
+        int numGpuTrees = splitTrees ? clusterTrees.size() * 2 : clusterTrees.size();
 
         boolean useGPU = (Config.getInstance().getComputeMode() == Config.ComputeMode.GPU)
                          && GPUWeightCalculator.tryLoad();
@@ -94,7 +110,7 @@ public class WeightTable {
                 // Manual resident-relative sizing:  mem(batch) = F × mem(resident)
                 double F           = cfg.getGpuVramControlFactor();
                 long   partsMem    = (long) partList.size()  *  9 * Integer.BYTES; // numParts × 36 B
-                long   orderingMem = (long) trees.size() * n *  4 * Integer.BYTES; // orderings + invIndex
+                long   orderingMem = (long) numGpuTrees * n  *  4 * Integer.BYTES; // orderings + invIndex
                 long   residentMem = partsMem + orderingMem;
                 long   batchMem    = (long)(F * residentMem);
                 long   perSplit    = 10L * Integer.BYTES + Long.BYTES;              // 48 B/split
@@ -112,8 +128,8 @@ public class WeightTable {
             }
             Logging.info("Weight table: GPU path  splits=%d  partitions=%d  batching=%s",
                 numSplits, partList.size(), batchDesc);
-            computeScoresGPU(splitList, partList, clusterTable, trees, scoreArray,
-                             batchSizeHint, cfg.getGpuVramFraction());
+            computeScoresGPU(splitList, partList, clusterTable, clusterTrees, partTrees,
+                             numGpuTrees, scoreArray, batchSizeHint, cfg.getGpuVramFraction());
         } else {
             if (Config.getInstance().getComputeMode() == Config.ComputeMode.GPU) {
                 Logging.info("GPU library not available, falling back to CPU");
@@ -126,14 +142,15 @@ public class WeightTable {
                     BipartitionSplit sp = splitList.get(idx);
                     Logging.trace("SPLIT sz=%d|%d  lo=%s  hi=%s",
                         sp.lo.size, sp.hi.size, sp.lo, sp.hi);
-                    scoreArray[idx] = computeScore(sp, partitions, clusterTable, trees);
+                    scoreArray[idx] = computeScore(sp, partitions, clusterTable, clusterTrees, partTrees);
                     Logging.trace("  => score=%d", scoreArray[idx]);
                 }
             } else {
                 java.util.concurrent.atomic.AtomicInteger wDone = new java.util.concurrent.atomic.AtomicInteger(0);
                 ProgressBar wBar = new ProgressBar("Scoring splits (CPU)", numSplits);
                 Threading.processRangeParallel(numSplits, idx -> {
-                    scoreArray[idx] = computeScore(splitList.get(idx), partitions, clusterTable, trees);
+                    scoreArray[idx] = computeScore(splitList.get(idx), partitions, clusterTable,
+                                                   clusterTrees, partTrees);
                     wBar.update(wDone.incrementAndGet());
                 });
                 wBar.done();
@@ -159,18 +176,37 @@ public class WeightTable {
      * Flatten all data to primitive arrays, call the CUDA kernel via JNI,
      * and write results (score = twoScore/2) into scoreArray.
      */
+    /**
+     * GPU weight calculation.
+     *
+     * When clusterTrees == partTrees (no autocomplete), the orderings/invIndex array has
+     * numGpuTrees = k slots (indices 0..k-1) and partition treeIndex values are unchanged.
+     *
+     * When clusterTrees != partTrees (autocomplete active), numGpuTrees = 2k:
+     *   slots 0..k-1   → completed tree orderings/invIndex  (for cluster lookups)
+     *   slots k..2k-1  → original tree orderings/invIndex   (for gene-tree/partition lookups)
+     * Partition treeIndex values are stored as (p.treeIndex + k) so the kernel naturally
+     * reads from the original-tree half of the combined array — no kernel changes needed.
+     */
     private void computeScoresGPU(List<BipartitionSplit> splitList,
                                    List<PartitionTable.Entry> partList,
                                    ClusterTable clusterTable,
-                                   List<Tree> trees,
+                                   List<Tree> clusterTrees,
+                                   List<Tree> partTrees,
+                                   int numGpuTrees,
                                    long[] scoreArray,
                                    int batchSizeHint,
                                    double vramFraction) {
-        int numSplits = splitList.size();
-        int numParts  = partList.size();
-        int numTrees  = trees.size();
+        int numSplits      = splitList.size();
+        int numParts       = partList.size();
+        int numClusterTrees = clusterTrees.size();
+        boolean splitTrees = (clusterTrees != partTrees);
+        // partTreeOffset: added to p.treeIndex when packing partsData so the kernel
+        // indexes into the original-tree half of the combined orderings/invIndex.
+        int partTreeOffset = splitTrees ? numClusterTrees : 0;
 
         // --- splits: numSplits * 10 ints ---
+        // Cluster treeIndex values are 0..k-1 (completed trees), unchanged.
         // [loTree, loLeft, loRight, loComp, loSize, hiTree, hiLeft, hiRight, hiComp, hiSize]
         int[] splitsData = new int[numSplits * 10];
         for (int i = 0; i < numSplits; i++) {
@@ -196,13 +232,15 @@ public class WeightTable {
         }
 
         // --- partitions: numParts * 9 ints ---
+        // treeIndex is stored as (p.treeIndex + partTreeOffset) so the kernel reads
+        // from the original-tree half when splitTrees is true.
         // [treeIdx, lo1, hi1, lo2, hi2, sz1, sz2, sz3, frequency]
         int[] partsData = new int[numParts * 9];
         for (int j = 0; j < numParts; j++) {
             PartitionTable.Entry pe = partList.get(j);
             Partition p = pe.exemplar;
             int base = j * 9;
-            partsData[base + 0] = p.treeIndex;
+            partsData[base + 0] = p.treeIndex + partTreeOffset;
             partsData[base + 1] = p.leftStart;
             partsData[base + 2] = p.leftEnd;
             partsData[base + 3] = p.rightStart;
@@ -213,14 +251,20 @@ public class WeightTable {
             partsData[base + 8] = pe.frequency;
         }
 
-        // --- orderings + invIndex: numTrees * n ints each ---
+        // --- orderings + invIndex: numGpuTrees * n ints each ---
         // orderings[t*n + pos]   = postorderArray[pos]
         // invIndex [t*n + taxon] = positionMap[taxon]  (-1 if absent)
-        int[] orderings = new int[numTrees * n];
-        int[] invIndex  = new int[numTrees * n];
+        //
+        // Layout when splitTrees:
+        //   slots 0..k-1   filled from clusterTrees (completed)
+        //   slots k..2k-1  filled from partTrees (original)
+        // Layout when !splitTrees: same list fills slots 0..k-1 (identical to before).
+        int[] orderings = new int[numGpuTrees * n];
+        int[] invIndex  = new int[numGpuTrees * n];
         Arrays.fill(invIndex, -1);
-        for (int t = 0; t < numTrees; t++) {
-            Tree tree = trees.get(t);
+        // Completed trees → slots 0..k-1
+        for (int t = 0; t < numClusterTrees; t++) {
+            Tree tree = clusterTrees.get(t);
             int base = t * n;
             for (int pos = 0; pos < tree.leafCount; pos++) {
                 orderings[base + pos] = tree.postorderArray[pos];
@@ -229,12 +273,26 @@ public class WeightTable {
                 invIndex[base + taxon] = tree.positionMap[taxon];
             }
         }
+        // Original trees → slots k..2k-1 (only when splitTrees)
+        if (splitTrees) {
+            int numPartTrees = partTrees.size();
+            for (int t = 0; t < numPartTrees; t++) {
+                Tree tree = partTrees.get(t);
+                int base = (numClusterTrees + t) * n;
+                for (int pos = 0; pos < tree.leafCount; pos++) {
+                    orderings[base + pos] = tree.postorderArray[pos];
+                }
+                for (int taxon = 0; taxon < n; taxon++) {
+                    invIndex[base + taxon] = tree.positionMap[taxon];
+                }
+            }
+        }
 
         // --- call GPU ---
         long t1 = System.nanoTime();
         long[] twoScores = GPUWeightCalculator.computeWeightsGPU(
             splitsData, partsData, orderings, invIndex,
-            numSplits, numParts, numTrees, n, n,
+            numSplits, numParts, numGpuTrees, n, n,
             batchSizeHint, vramFraction);
         long gpuMs = (System.nanoTime() - t1) / 1_000_000;
         Logging.info("  GPU kernel returned in %d ms", gpuMs);
@@ -258,7 +316,8 @@ public class WeightTable {
 
     private long computeScore(BipartitionSplit split,
                                Collection<PartitionTable.Entry> partitions,
-                               ClusterTable clusterTable, List<Tree> trees) {
+                               ClusterTable clusterTable,
+                               List<Tree> clusterTrees, List<Tree> partTrees) {
         // Retrieve exemplars for A (lo half) and B (hi half)
         ClusterTable.Entry eA = clusterTable.get(split.lo);
         ClusterTable.Entry eB = clusterTable.get(split.hi);
@@ -266,8 +325,9 @@ public class WeightTable {
 
         Cluster cA = eA.exemplar;
         Cluster cB = eB.exemplar;
-        Tree tA = trees.get(cA.treeIndex);
-        Tree tB = trees.get(cB.treeIndex);
+        // Cluster positions are in completed trees; use clusterTrees for position lookup.
+        Tree tA = clusterTrees.get(cA.treeIndex);
+        Tree tB = clusterTrees.get(cB.treeIndex);
         int sizeA = cA.size;
         int sizeB = cB.size;
         int sizeC = n - sizeA - sizeB;
@@ -277,7 +337,8 @@ public class WeightTable {
 
         for (PartitionTable.Entry pe : partitions) {
             Partition p = pe.exemplar;
-            Tree tGT = trees.get(p.treeIndex);
+            // Partition positions are in original trees; use partTrees for gene-tree lookup.
+            Tree tGT = partTrees.get(p.treeIndex);
 
             // M1 = [leftStart, leftEnd), M2 = [rightStart, rightEnd)
             int lo1 = p.leftStart,  hi1 = p.leftEnd;   // M1 range

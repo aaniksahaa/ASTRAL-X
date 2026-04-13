@@ -50,6 +50,15 @@ public class Main {
             // --verify-distance-matrix is explicitly requested.  The baseline
             // (complete trees, no flag) skips this block entirely — no library
             // load, no stream scan, zero overhead.
+            //
+            // IMPORTANT: originalTrees is saved BEFORE completion and is used for
+            // tripartition extraction (Phase 4) and weight calculation (Phase 6).
+            // X (ClusterTable) and DP transitions are built from the completed trees
+            // so that all bipartitions span the full taxon set — exactly what ASTRAL-MP
+            // does.  Weight calculation must use the ORIGINAL gene trees (as ASTRAL-MP
+            // does via inference.trees = originalInompleteGeneTrees) so the QI scores
+            // reflect actual gene-tree signal, not the artificially inserted taxa.
+            List<Tree> originalTrees = trees; // always points to pre-completion trees
             if (cfg.isAutoCompleteIncompleteTrees() || cfg.isVerifyDistanceMatrix()) {
                 boolean gpuDist = (cfg.getComputeMode() == Config.ComputeMode.GPU)
                                   && GPUDistanceMatrix.tryLoad();
@@ -68,18 +77,29 @@ public class Main {
                     DistanceMatrix dm = gpuDist
                         ? DistanceMatrixBuilder.buildGPU(trees, registry.size())
                         : DistanceMatrixBuilder.buildCPU(trees, registry.size());
+                    // originalTrees already saved above; trees is reassigned to completed list
                     trees = TreeCompleter.completeAll(trees, dm, registry.size());
+                    Logging.info("Phase 1b: using original incomplete trees for weight scoring, completed trees for X");
                     PhaseLogger.end("Phase 1b Auto-complete gene trees", t1b, gpuDist);
                 } else {
                     Logging.info("Phase 1b: all gene trees already complete, skipping");
                 }
             }
+            // After Phase 1b:
+            //   trees         = completed gene trees (or original if no autocomplete / no incomplete)
+            //   originalTrees = original gene trees (same reference as trees when no autocomplete)
 
             // ── Phase 2: Taxon hashing + prefix arrays ────────────────────────
+            // pref     — built from completed trees; used for ClusterTable and DPTable
+            // prefParts — built from original trees; used for PartitionTable (tripartition scoring)
+            // When no autocomplete (originalTrees == trees), prefParts == pref (same object).
             long t2 = PhaseLogger.begin("Phase 2  Taxon hashing", false);
             TaxonHasher hasher = new TaxonHasher(
                 registry.size(), cfg.getNumHashSeeds(), cfg.getBaseSeed());
             PrefixHashArrays pref = new PrefixHashArrays(trees, hasher);
+            PrefixHashArrays prefParts = (originalTrees == trees)
+                ? pref
+                : new PrefixHashArrays(originalTrees, hasher);
             PhaseLogger.end("Phase 2  Taxon hashing", t2, false);
 
             if (cfg.isVerifyHash()) {
@@ -88,7 +108,7 @@ public class Main {
             }
             hasher = null; // no longer needed after prefix arrays are built
 
-            // ── Phase 3: Cluster extraction -> X ─────────────────────────────
+            // ── Phase 3: Cluster extraction -> X (from COMPLETED trees) ──────
             long t3 = PhaseLogger.begin("Phase 3  Cluster extraction", false);
             ClusterTable clusterTable = new ClusterTable(trees, pref, registry.size());
             PhaseLogger.end("Phase 3  Cluster extraction", t3, false);
@@ -98,17 +118,18 @@ public class Main {
                 return;
             }
 
-            // ── Phase 4: Gene-tree tripartition extraction ────────────────────
+            // ── Phase 4: Gene-tree tripartition extraction (from ORIGINAL trees) ──
+            // Uses originalTrees so tripartitions reflect actual gene-tree signal.
             long t4 = PhaseLogger.begin("Phase 4  Tripartition extraction", false);
-            PartitionTable partTable = new PartitionTable(trees, pref);
+            PartitionTable partTable = new PartitionTable(originalTrees, prefParts);
             PhaseLogger.end("Phase 4  Tripartition extraction", t4, false);
 
             if (cfg.isVerifyPartitions()) {
-                Phase4Verifier.dump(trees, registry, pref, partTable, cfg.getOutputFile());
+                Phase4Verifier.dump(originalTrees, registry, prefParts, partTable, cfg.getOutputFile());
                 return;
             }
 
-            // ── Phase 5: DP search space (tree-local transitions) ─────────────
+            // ── Phase 5: DP search space (from COMPLETED trees) ───────────────
             long t5 = PhaseLogger.begin("Phase 5  DP local transitions", false);
             DPTable dpTable = new DPTable(trees, pref, clusterTable);
             PhaseLogger.end("Phase 5  DP local transitions", t5, false);
@@ -126,7 +147,8 @@ public class Main {
                 Phase5Verifier.dump(trees, registry, pref, clusterTable, dpTable, cfg.getOutputFile());
                 return;
             }
-            pref = null; // no longer needed after Phase 5; free ~3 GB before Phase 6
+            pref = null;     // no longer needed after Phase 5; free before Phase 6
+            prefParts = null; // likewise (may be same object as pref — both nulled safely)
 
             // Hint JVM to collect Phase 3-5 intermediates before Phase 6 allocates its working set.
             // System.gc() is a hint — JVM may ignore it if -XX:+DisableExplicitGC is set.
@@ -141,7 +163,9 @@ public class Main {
             boolean gpuWeight = (cfg.getComputeMode() == Config.ComputeMode.GPU)
                                 && GPUWeightCalculator.isLoaded();
             long t6 = PhaseLogger.begin("Phase 6  Weight calculation", gpuWeight);
-            WeightTable weightTable = new WeightTable(dpTable, partTable, clusterTable, trees);
+            // trees        = completed trees (for cluster exemplar position lookups)
+            // originalTrees = original trees (for gene-tree quartet scoring)
+            WeightTable weightTable = new WeightTable(dpTable, partTable, clusterTable, trees, originalTrees);
             PhaseLogger.end("Phase 6  Weight calculation", t6, gpuWeight);
 
             if (cfg.isVerifyWeights()) {
