@@ -168,6 +168,94 @@ Option B is preferable because `orderings` and `invIndex` (the large `T×n` arra
 
 ---
 
+---
+
+## 6. Similarity Matrix
+
+**What**: Build the `SimilarityMatrix` (quartet co-occurrence score) in addition to / instead of the current `DistanceMatrix`. This is ASTRAL-MP's **default** matrix type.
+
+**Why**: `SimilarityMatrix[i][j]` = average quartet co-occurrence score between taxon i and j, which is directly aligned with what ASTRAL's quartet objective maximizes. The current `DistanceMatrix` (branch-count distance) is ASTRAL-MP's non-default `--ustar-dist` mode. For accuracy, the similarity matrix is the correct signal to use.
+
+**Algorithm** (`SimilarityMatrix.populateByQuartetDistance` in ASTRAL-MP):
+
+For each gene tree, at each internal node v with children C₁, C₂, ... and "other" subtree:
+```
+for each pair of groups (i, j):
+    sim = totalPairs - lcp_i - rcp_j      // fully resolved quartet count
+    for a in group_i, b in group_j:
+        matrix[a][b] += sim
+        denom[a][b]  += (n_tree - 2) * (n_tree - 3) / 2
+After all trees: matrix[i][j] /= (denom[i][j] / 2)
+```
+
+**Note on GPU difficulty**: DistanceMatrix maps cleanly to a per-pair LCA formula (easy GPU). SimilarityMatrix requires a per-node scatter over all child-pair combinations (harder GPU — non-trivial reformulation needed). A CPU implementation is straightforward first.
+
+**Files**: new `src/astralx/completion/SimilarityMatrix.java`, `src/astralx/completion/SimilarityMatrixBuilder.java`
+
+---
+
+## 7. UPGMA Guide Tree → X Enrichment
+
+**What**: After building the (Similarity or Distance) matrix, run UPGMA on it to produce one species-tree estimate, then inject all its n−2 bipartitions into `ClusterTable` (X). This is ASTRAL-MP's "Track A" and runs unconditionally — even for complete gene trees.
+
+**Why**: The UPGMA tree is a globally-informed consensus signal. For large n with high ILS, many true bipartitions exist only in the UPGMA tree and not in any individual gene tree. Without this, the DP can never find them. This is the single largest accuracy gap for complete-tree inputs at large n.
+
+**Algorithm**:
+1. Build n×n SimilarityMatrix (or DistanceMatrix as fallback).
+2. Run UPGMA: at each step merge the pair with highest average similarity; record the bipartition at each merge.
+3. Produce a list of n−2 bipartitions (BitSet form).
+4. For each bipartition, hash it and insert into `ClusterTable` if not already present.
+5. For each new cluster added to `ClusterTable`, also add its super-complement `S \ cluster` (to keep X closed under complement).
+6. Rebuild size-bins in `ClusterTable` to include the new entries before DPTable is built.
+
+**UPGMA time**: O(n² log n) using a sorted structure; memory reuses the already-built n×n matrix.
+
+**Files**: new `src/astralx/completion/UPGMATreeBuilder.java`; integrate in `src/astralx/Main.java` between Phase 1b and Phase 3.
+
+---
+
+## 8. Greedy Consensus Trees → X Enrichment
+
+**What**: Build 7 greedy consensus trees at frequency thresholds `{0, 1/100, 1/50, 1/20, 1/10, 1/5, 1/3}` and inject their bipartitions (plus polytomy resolutions) into X. This is ASTRAL-MP's `addExtraBipartitionByHeuristics` and is the **largest contributor** to X enrichment.
+
+**Why**: No single gene tree contains every true bipartition under high ILS. A bipartition supported by 15% of gene trees is real signal but may not survive in any individual tree. The 7-threshold approach systematically covers bipartitions at every support level — from strong majority (T1 ≥33%) down to any-tree support (T7 ≥0%). This is what drives ASTRAL-MP's accuracy advantage at large n.
+
+**Algorithm** (4 phases):
+
+**Phase 1** — Count bipartition frequencies across all k gene trees:
+```
+for each gene tree:
+    post-traverse; at each internal node, compute cluster (BitSet of subtree taxa)
+    increment count[cluster] in a HashMap (deduplicate A and S\A as same bipartition)
+```
+Time: O(k × n²/64) using BitSet ops.
+
+**Phase 2** — Sort clusters by frequency descending.
+
+**Phase 3** — Build 7 greedy consensus trees, one per threshold, in parallel:
+```
+Walk sorted clusters from most to least frequent.
+At each threshold crossing, take a snapshot and call buildTreeFromClusters(snapshot):
+  start with star tree (all n taxa under one root)
+  for each cluster in snapshot (most frequent first):
+    find LCA of cluster's leaves in current tree
+    check if cluster's leaves are exactly a subset of LCA's children's subtrees
+    if compatible: create new internal node, adopt the matching children
+```
+
+**Phase 4** — For each of 7 trees, for each polytomy node:
+- **Step A**: Run UPGMA on the d×d sub-matrix of the polytomy's d groups → bipartitions → X
+- **Step B**: 10–100 adaptive rounds of `sampleAndResolve`: pick one random representative from each group, find gene-tree bipartitions consistent with that sample, map back to full taxon set → X
+
+**Constants** (matching ASTRAL-MP):
+- 7 thresholds: `{0, 1/100, 1/50, 1/20, 1/10, 1/5, 1/3}`
+- Base rounds per polytomy: 10; max: 100; improvement reward: +2 rounds when ≥5 new clusters found
+- Polytomy size limit: `50 + n×25` (sum-of-squares budget to skip massive polytomies)
+
+**Files**: new `src/astralx/consensus/GreedyConsensusBuilder.java`; requires SimilarityMatrix (task 6) for polytomy UPGMA sub-matrix resolution; integrate in `src/astralx/Main.java` after Phase 1b.
+
+---
+
 ## Priority Order
 
 | # | Task | Type | Effort |
@@ -177,3 +265,6 @@ Option B is preferable because `orderings` and `invIndex` (the large `T×n` arra
 | 3 | Cross-tree transitions (Mode 2) | Accuracy | Medium |
 | 4 | Wavelet matrix intersections | Performance | High |
 | 5 | GPU memory batching | Scalability | Low |
+| 6 | Similarity Matrix | Accuracy | Medium |
+| 7 | UPGMA guide tree → X enrichment | Accuracy | Medium |
+| 8 | Greedy consensus trees → X enrichment | Accuracy | High |
