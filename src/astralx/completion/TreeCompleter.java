@@ -74,12 +74,32 @@ public class TreeCompleter {
             if (tree.positionMap[x] == -1) missing.add(x);
         }
 
-        TreeNode root = tree.root;
+        // Deep-copy tree nodes before any mutation so the original Tree's nodes
+        // remain unmodified.  This preserves originalTrees' rangeStart/rangeEnd
+        // values, which PrefixHashArrays (prefParts) and PartitionTable rely on.
+        TreeNode root = deepCopyNodes(tree.root, null);
         for (int x : missing) {
             root = insertTaxon(root, x, dm.dist, n);
         }
 
         return rebuildTree(tree.treeIndex, root, n);
+    }
+
+    /**
+     * Recursively deep-copy a TreeNode subtree.
+     * The copies are fresh objects with the same taxonId/rangeStart/rangeEnd
+     * but independent parent/left/right pointers.
+     */
+    private static TreeNode deepCopyNodes(TreeNode src, TreeNode parent) {
+        if (src == null) return null;
+        TreeNode copy = new TreeNode();
+        copy.taxonId    = src.taxonId;
+        copy.rangeStart = src.rangeStart;
+        copy.rangeEnd   = src.rangeEnd;
+        copy.parent     = parent;
+        copy.left  = deepCopyNodes(src.left,  copy);
+        copy.right = deepCopyNodes(src.right, copy);
+        return copy;
     }
 
     // ── Insertion ────────────────────────────────────────────────────────────
