@@ -12,6 +12,7 @@
 #     --opts "--search-mode full"   -> search-mode_full
 
 
+
 ./run-astralx-with-monitor.sh -i data/1kp-og-rhodophyta.tre -o data/out-1kp-og-rhodophyta.tre --opts "--search-mode local -vv" --reference-species-tree data/1kp-st-5-astral.tre
 
 
