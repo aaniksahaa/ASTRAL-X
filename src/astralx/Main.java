@@ -18,6 +18,13 @@ import astralx.tree.Tree;
 import astralx.tree.TreeParser;
 import astralx.util.Threading;
 
+import astralx.cluster.Cluster;
+
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.PrintStream;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 
 public class Main {
@@ -116,6 +123,10 @@ public class Main {
             if (cfg.isVerifyClusters()) {
                 Phase3Verifier.dump(trees, registry, pref, clusterTable, cfg.getOutputFile());
                 return;
+            }
+
+            if (cfg.getDumpClustersFile() != null) {
+                dumpClusters(clusterTable, trees, registry, cfg.getDumpClustersFile());
             }
 
             // ── Phase 4: Gene-tree tripartition extraction (from ORIGINAL trees) ──
@@ -233,6 +244,7 @@ public class Main {
                 case "--verify-weights"    -> cfg.setVerifyWeights(true);
                 case "--verify-distance-matrix" -> cfg.setVerifyDistanceMatrix(true);
                 case "--autocomplete-incomplete-gene-trees" -> cfg.setAutoCompleteIncompleteTrees(true);
+                case "--dump-clusters" -> { if (++i>=args.length) return false; cfg.setDumpClustersFile(args[i]); }
                 case "--gpu-dist-tile-size" -> { if (++i>=args.length) return false; cfg.setGpuDistTileSizeB(Integer.parseInt(args[i])); }
                 case "-h","--help"     -> { printUsage(); System.exit(0); }
                 default -> { System.err.println("Unknown arg: " + args[i]); return false; }
@@ -271,6 +283,38 @@ public class Main {
             }
             System.out.println(row);
         }
+    }
+
+    /**
+     * Dump all clusters in ClusterTable to a file in canonical sorted format.
+     * Each line: {A,B,C} with taxon names sorted alphabetically, lines sorted lexicographically.
+     * This format matches the ASTRAL-MP --dump-clusters output for head-to-head comparison.
+     */
+    static void dumpClusters(ClusterTable clusterTable, List<Tree> trees,
+                              TaxonRegistry registry, String outFile) throws IOException {
+        List<String> lines = new ArrayList<>(clusterTable.size());
+        for (ClusterTable.Entry e : clusterTable.entries()) {
+            Cluster ex = e.exemplar;
+            Tree tree = trees.get(ex.treeIndex);
+            int[] arr = tree.postorderArray;
+            List<String> taxa = new ArrayList<>(e.hash.size);
+            if (!ex.complement) {
+                for (int i = ex.left; i < ex.right; i++)
+                    taxa.add(registry.getName(arr[i]));
+            } else {
+                for (int i = 0; i < tree.leafCount; i++) {
+                    if (i >= ex.left && i < ex.right) continue;
+                    taxa.add(registry.getName(arr[i]));
+                }
+            }
+            Collections.sort(taxa);
+            lines.add("{" + String.join(",", taxa) + "}");
+        }
+        Collections.sort(lines);
+        try (PrintStream out = new PrintStream(new FileOutputStream(outFile))) {
+            for (String line : lines) out.println(line);
+        }
+        Logging.info("Cluster dump written to %s (%d entries)", outFile, lines.size());
     }
 
     private static void printUsage() {

@@ -227,4 +227,9 @@ public class Config {
     private boolean verifyDistanceMatrix = false;
     public boolean isVerifyDistanceMatrix()          { return verifyDistanceMatrix; }
     public void setVerifyDistanceMatrix(boolean v)   { this.verifyDistanceMatrix = v; }
+
+    // ── Comparison / debug dump flags ─────────────────────────────────────────
+    private String dumpClustersFile = null;
+    public String getDumpClustersFile()       { return dumpClustersFile; }
+    public void setDumpClustersFile(String f) { this.dumpClustersFile = f; }
 }
