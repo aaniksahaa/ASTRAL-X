@@ -6,6 +6,7 @@ import astralx.completion.DistanceMatrixBuilder;
 import astralx.completion.SimilarityMatrix;
 import astralx.completion.SimilarityMatrixBuilder;
 import astralx.completion.TreeCompleter;
+import astralx.completion.UPGMAClusterer;
 import astralx.gpu.GPUDistanceMatrix;
 import astralx.gpu.GPUSimilarityMatrix;
 import astralx.dp.DPTable;
@@ -70,7 +71,7 @@ public class Main {
             // reflect actual gene-tree signal, not the artificially inserted taxa.
             List<Tree> originalTrees = trees; // always points to pre-completion trees
             if (cfg.isAutoCompleteIncompleteTrees() || cfg.isVerifyDistanceMatrix()
-                    || cfg.isVerifySimilarityMatrix()) {
+                    || cfg.isVerifySimilarityMatrix() || cfg.isVerifyUpgma()) {
                 boolean gpuDist = (cfg.getComputeMode() == Config.ComputeMode.GPU)
                                   && GPUDistanceMatrix.tryLoad();
                 boolean gpuSim  = (cfg.getComputeMode() == Config.ComputeMode.GPU)
@@ -89,6 +90,16 @@ public class Main {
                         ? SimilarityMatrixBuilder.buildGPU(trees, registry.size())
                         : SimilarityMatrixBuilder.buildCPU(trees, registry.size());
                     dumpSimilarityMatrix(sm, registry);
+                    return;
+                }
+
+                if (cfg.isVerifyUpgma()) {
+                    SimilarityMatrix sm = gpuSim
+                        ? SimilarityMatrixBuilder.buildGPU(trees, registry.size())
+                        : SimilarityMatrixBuilder.buildCPU(trees, registry.size());
+                    int n = registry.size();
+                    Tree upgmaTree = UPGMAClusterer.build(sm.sim, n, trees.size());
+                    dumpUpgmaBipartitions(upgmaTree, registry);
                     return;
                 }
 
@@ -270,6 +281,7 @@ public class Main {
                 case "--verify-weights"    -> cfg.setVerifyWeights(true);
                 case "--verify-distance-matrix"    -> cfg.setVerifyDistanceMatrix(true);
                 case "--verify-similarity-matrix"  -> cfg.setVerifySimilarityMatrix(true);
+                case "--verify-upgma"              -> cfg.setVerifyUpgma(true);
                 case "--autocomplete-incomplete-gene-trees" -> cfg.setAutoCompleteIncompleteTrees(true);
                 case "--completion-method" -> {
                     if (++i >= args.length) return false;
@@ -340,6 +352,49 @@ public class Main {
             }
             System.out.println(row);
         }
+    }
+
+    /**
+     * Dump UPGMA bipartitions to stdout.
+     *
+     * Format:
+     *   UPGMA_BIPARTITIONS
+     *   n=<count>
+     *   taxa=name0,name1,...
+     *   bipartition=nameA,nameB,...   (one line per internal non-root node, names sorted)
+     *
+     * Each bipartition is the sorted set of taxon names in that subtree.
+     * Root (all-taxa) is skipped automatically (rangeSize == n).
+     */
+    private static void dumpUpgmaBipartitions(Tree upgmaTree, TaxonRegistry registry) {
+        int n = registry.size();
+        StringBuilder taxaLine = new StringBuilder("taxa=");
+        for (int i = 0; i < n; i++) {
+            if (i > 0) taxaLine.append(',');
+            taxaLine.append(registry.getName(i));
+        }
+        System.out.println("UPGMA_BIPARTITIONS");
+        System.out.println("n=" + n);
+        System.out.println(taxaLine);
+
+        // Post-order walk; print subtree leaf set for every internal non-root node
+        dumpUpgmaNode(upgmaTree.root, upgmaTree, registry, n);
+    }
+
+    private static void dumpUpgmaNode(astralx.tree.TreeNode node, Tree tree,
+                                       TaxonRegistry registry, int n) {
+        if (node.isLeaf()) return;
+        dumpUpgmaNode(node.left,  tree, registry, n);
+        dumpUpgmaNode(node.right, tree, registry, n);
+        if (node.isRoot()) return;  // skip all-taxa bipartition
+
+        // Collect and sort taxon names in [rangeStart, rangeEnd)
+        java.util.List<String> names = new java.util.ArrayList<>(node.rangeSize());
+        for (int pos = node.rangeStart; pos < node.rangeEnd; pos++) {
+            names.add(registry.getName(tree.postorderArray[pos]));
+        }
+        java.util.Collections.sort(names);
+        System.out.println("bipartition=" + String.join(",", names));
     }
 
     /**

@@ -244,6 +244,10 @@ public class Config {
     public boolean isVerifySimilarityMatrix()        { return verifySimilarityMatrix; }
     public void setVerifySimilarityMatrix(boolean v) { this.verifySimilarityMatrix = v; }
 
+    private boolean verifyUpgma = false;
+    public boolean isVerifyUpgma()          { return verifyUpgma; }
+    public void setVerifyUpgma(boolean v)   { this.verifyUpgma = v; }
+
     // ── Comparison / debug dump flags ─────────────────────────────────────────
     private String dumpClustersFile = null;
     public String getDumpClustersFile()       { return dumpClustersFile; }

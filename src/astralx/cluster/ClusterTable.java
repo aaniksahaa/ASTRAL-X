@@ -174,6 +174,15 @@ public class ClusterTable {
     /** All sizes present in X. */
     public Set<Integer> sizes() { return sizeBins.keySet(); }
 
+    /**
+     * Add all bipartitions from one additional tree (e.g. the UPGMA guide tree)
+     * into the cluster table.  The root's bipartition (all-taxa cluster) is
+     * automatically skipped, exactly as in the constructor's per-tree walk.
+     */
+    public void addTree(Tree tree, PrefixHashArrays pref, int numTaxa) {
+        extractFromTree(tree, pref, numTaxa);
+    }
+
     // -------------------------------------------------------------------------
 
     private void logSizeSummary() {

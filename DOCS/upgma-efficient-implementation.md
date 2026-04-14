@@ -427,3 +427,211 @@ The efficient implementation replaces TreeSets with two flat primitive arrays,
 handles cache invalidation with a simple case analysis (proven correct above),
 and achieves a 21× memory reduction and a log n factor time improvement —
 simultaneously, with no tradeoff.
+
+
+---
+
+## 8. Python Brute-Force Reference and Testing
+
+A plain O(n³) Python implementation provides a correctness oracle for the Java
+code.  For n ≤ 50 (the typical taxon count for automated testing), O(n³) takes
+well under a second.
+
+### 8.1 Python algorithm
+
+```python
+def upgma_bipartitions(sim, n):
+    d       = {(i,j): sim[i][j] for i in range(n) for j in range(i+1,n)}
+    clusters = [frozenset([i]) for i in range(n)]
+    weights  = [1] * n
+    active   = list(range(n))
+    bips     = set()
+
+    for _ in range(n - 1):
+        # O(n²) find-best
+        best_s, I, J = -inf, -1, -1
+        for ii in range(len(active)):
+            for jj in range(ii+1, len(active)):
+                i, j = active[ii], active[jj]
+                key  = (min(i,j), max(i,j))
+                if d[key] > best_s:
+                    best_s, I, J = d[key], i, j
+
+        wI, wJ = weights[I], weights[J]
+        merged = clusters[I] | clusters[J]
+        if len(merged) < n:          # skip all-taxa cluster
+            bips.add(merged)
+
+        # O(n) weighted-average update
+        for k in active:
+            if k in (I, J): continue
+            ki = (min(k,I), max(k,I));  kj = (min(k,J), max(k,J))
+            d[ki] = (d[ki]*wI + d[kj]*wJ) / (wI + wJ)
+
+        clusters[I] = merged;  weights[I] = wI + wJ
+        active.remove(J)
+
+    return bips   # set of frozensets of taxon indices
+```
+
+### 8.2 Test script
+
+`test/test_upgma.py` runs end-to-end comparison for 20+ random seeds:
+
+1. Generate n (5..30) taxa and k (8..20) random gene trees (some incomplete).
+2. Compute similarity matrix in Python (same brute-force as
+   `test_similarity_matrix.py`).
+3. Run Python UPGMA → set of frozensets.
+4. Run `java astralx.Main -i <trees> --verify-upgma -C` → parse
+   `bipartition=...` lines → set of frozensets.
+5. Assert the two sets are identical.
+
+Run: `python3 test/test_upgma.py [-n NUM] [-v]`
+
+Ties in similarity are vanishingly rare for floating-point inputs generated
+from random trees (probability zero for continuous distributions), so
+tie-breaking order does not affect correctness of the comparison.
+
+
+---
+
+## 9. Tree-Pointer Construction (No BitSets)
+
+Rather than maintaining `BitSet[] clusters` to represent which taxa belong to
+each active cluster, the implementation builds the UPGMA tree directly using
+`TreeNode` pointer objects — the same type used throughout ASTRAL-X.
+
+### 9.1 Design
+
+```
+TreeNode[] clusterRoot   // clusterRoot[i] = current subtree root for cluster i
+```
+
+At initialisation, each `clusterRoot[i]` is a leaf node with `taxonId = i`.
+
+At merge(I, J):
+```java
+TreeNode newNode = new TreeNode();
+newNode.left          = clusterRoot[I];
+newNode.right         = clusterRoot[J];
+clusterRoot[I].parent = newNode;
+clusterRoot[J].parent = newNode;
+clusterRoot[I]        = newNode;
+```
+
+After n−1 merges, `clusterRoot[I]` is the root of the full dendrogram.
+
+### 9.2 Postorder walk → Tree object
+
+A single DFS assigns `rangeStart`, `rangeEnd`, and fills `postorderArray`:
+
+```java
+void assignRanges(TreeNode node, int[] postArr, int[] cursor) {
+    if (node.isLeaf()) {
+        node.rangeStart = cursor[0];
+        postArr[cursor[0]++] = node.taxonId;
+        node.rangeEnd = cursor[0];
+    } else {
+        node.rangeStart = cursor[0];
+        assignRanges(node.left,  postArr, cursor);
+        assignRanges(node.right, postArr, cursor);
+        node.rangeEnd = cursor[0];
+    }
+}
+```
+
+The result is wrapped in a `Tree(treeIndex, root, postArr, posMap, n, n)` —
+exactly the same object type returned by `TreeParser`.
+
+### 9.3 Bipartition extraction
+
+`ClusterTable.addTree(upgmaTree, pref, n)` calls the existing `extractFromTree`
+walk that already handles subtree ranges + super-complements, deduplication, and
+all-taxa skipping.  Zero new code is needed for the bipartition extraction step;
+the UPGMA tree is simply one more source tree.
+
+### 9.4 Why not BitSets?
+
+BitSets require O(n/64) per merge step for the `or` operation (merging two
+cluster bitmasks) and O(n²/64) per output step (iterating bits to emit taxon
+sets). The pointer tree uses O(1) per merge and O(n) total for the postorder
+walk — strictly better, and consistent with the rest of ASTRAL-X's design.
+
+
+---
+
+## 10. Parallelization
+
+The outer merge sequence is inherently serial (each merge changes state for the
+next), but three inner operations per iteration can be parallelized.
+
+### 10.1 Parallel find-best (Step 1)
+
+`bestSim[]` is only 200 KB for n = 25,000 (double[]) — fits in L2 cache.
+T threads each scan a disjoint chunk of `activeArr[0..activeCount-1]`, keep
+a thread-local (bestI, bestSim), then one serial reduce over T winners.
+
+```
+parallel_for t in 0..T-1:
+    scan activeArr[lo_t..hi_t), track local (I_t, S_t)
+reduce: I = argmax S_t over t
+```
+
+### 10.2 Parallel row update (Step 3)
+
+For each active k ≠ I, computing `newIK = (oldIK*wI + oldJK*wJ)/(wI+wJ)` is
+independent across k.  T threads partition the active list; each thread owns
+disjoint k values:
+
+- Writes to `mat[idx(I,k)]` for different k go to disjoint memory addresses.
+- Writes to `bestSim[k]` and `bestJ[k]` are per-k, disjoint across threads.
+- Reads of `mat[idx(J,k)]` are read-only (J is deactivated before this phase).
+
+No synchronization is needed except for the `ConcurrentLinkedQueue` used to
+collect stale-row indices.
+
+### 10.3 Parallel stale-row recompute (Step 4)
+
+Rows that need a full recompute (`bestJ[k]` invalidated) are collected in a
+`ConcurrentLinkedQueue<Integer>` during the parallel update.  A second
+`processRangeParallel` dispatches `recomputeBest(k)` for each stale k.
+Different stale rows are independent; no synchronization needed.
+
+### 10.4 Serial row-I recompute (Step 5)
+
+Row I's entire set of similarities changed; it always requires a full recompute.
+This is done serially after all parallel phases complete.
+
+### 10.5 Active-list maintenance: swap-and-shrink
+
+A naïve `buildActiveList()` scan of all n entries every iteration costs O(n²)
+total just for bookkeeping.  The swap-and-shrink trick reduces removal to O(1):
+
+```
+posInActive[j]            = position of cluster j in activeArr
+removeActive(j):
+    pos       = posInActive[j]
+    last      = activeArr[activeCount - 1]
+    activeArr[pos]    = last
+    posInActive[last] = pos
+    activeCount--
+```
+
+All parallel phases iterate `activeArr[0..activeCount-1]` directly — no stale
+entries, no wasted scans.
+
+### 10.6 Expected speedup
+
+| Phase | Serial cost | With T threads |
+|---|---|---|
+| Find-best | O(n) per iter | O(n/T) per iter |
+| Row update | O(n) per iter | O(n/T) per iter |
+| Stale recompute | O(R_iter × n) | O(R_iter × n / T) |
+| Row-I recompute | O(n) per iter | O(n) (serial) |
+
+The serial row-I recompute limits speedup via Amdahl's law: for T = 16 threads
+and typical R_iter ≈ 1, the parallel fraction is roughly (n + R_iter × n) /
+(2n + R_iter × n) ≈ 2/3 per iteration, capping theoretical speedup at ~3×.
+In practice: find-best and row-update together dominate the iteration cost,
+and the parallel fraction is higher, giving a more useful speedup especially
+for large n.
