@@ -47,6 +47,13 @@ echo "  Building    : $SRC_DM  ->  $OUT_DM"
 nvcc "${NVCC_FLAGS[@]}" -o "$OUT_DM" "$SRC_DM"
 echo "  OK"
 
+# ── Similarity matrix kernel ──────────────────────────────────────────────────
+SRC_SIM="$ROOT/src/native/astralx_similarity.cu"
+OUT_SIM="$ROOT/native/libastralx_sim.so"
+echo "  Building    : $SRC_SIM  ->  $OUT_SIM"
+nvcc "${NVCC_FLAGS[@]}" -o "$OUT_SIM" "$SRC_SIM"
+echo "  OK"
+
 echo "=== Native build complete ==="
 echo "Run with:"
 echo "  java -Djava.library.path=native -cp build astralx.Main -i <input.tre> --gpu --search-mode full -vv"

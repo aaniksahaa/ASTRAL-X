@@ -1,8 +1,15 @@
 package astralx;
 
 public class Config {
-    public enum ComputeMode { CPU, GPU }
-    public enum SearchMode  { LOCAL, FULL }
+    public enum ComputeMode      { CPU, GPU }
+    public enum SearchMode       { LOCAL, FULL }
+    /**
+     * Which matrix is used to guide taxon insertion when auto-completing
+     * incomplete gene trees (Phase 1b).
+     *   SIMILARITY — quartet-based similarity matrix (default, matches ASTRAL-MP)
+     *   DISTANCE   — topological distance matrix (legacy behaviour)
+     */
+    public enum CompletionMethod { SIMILARITY, DISTANCE }
 
     private static Config instance;
 
@@ -188,6 +195,11 @@ public class Config {
     private boolean autoCompleteIncompleteTrees = false;
     public boolean isAutoCompleteIncompleteTrees()          { return autoCompleteIncompleteTrees; }
     public void setAutoCompleteIncompleteTrees(boolean v)   { this.autoCompleteIncompleteTrees = v; }
+
+    /** Which matrix guides taxon insertion in tree completion. Default: SIMILARITY. */
+    private CompletionMethod completionMethod = CompletionMethod.SIMILARITY;
+    public CompletionMethod getCompletionMethod()             { return completionMethod; }
+    public void setCompletionMethod(CompletionMethod m)       { this.completionMethod = m; }
 
     /**
      * Tile side-length B for the GPU distance-matrix kernel.

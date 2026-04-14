@@ -39,7 +39,7 @@ public class TreeCompleter {
      * @param n      total taxon count
      * @return new list where every tree is complete; already-complete trees pass through
      */
-    public static List<Tree> completeAll(List<Tree> trees, DistanceMatrix dm, int n) {
+    public static List<Tree> completeAll(List<Tree> trees, double[] dist, int n) {
         List<Integer> incomplete = new ArrayList<>();
         for (int i = 0; i < trees.size(); i++) {
             if (!trees.get(i).isComplete) incomplete.add(i);
@@ -57,7 +57,7 @@ public class TreeCompleter {
 
         // Each tree's completion is fully independent → safe to parallelise
         Threading.processParallel(incomplete, idx -> {
-            result[idx] = completeTree(trees.get(idx), dm, n);
+            result[idx] = completeTree(trees.get(idx), dist, n);
             bar.update(cnt.incrementAndGet());
         });
         bar.done();
@@ -68,7 +68,7 @@ public class TreeCompleter {
     // ── Per-tree completion ───────────────────────────────────────────────────
 
     /** Insert every taxon missing from this tree and return a rebuilt Tree. */
-    private static Tree completeTree(Tree tree, DistanceMatrix dm, int n) {
+    private static Tree completeTree(Tree tree, double[] dist, int n) {
         List<Integer> missing = new ArrayList<>();
         for (int x = 0; x < n; x++) {
             if (tree.positionMap[x] == -1) missing.add(x);
@@ -79,7 +79,7 @@ public class TreeCompleter {
         // values, which PrefixHashArrays (prefParts) and PartitionTable rely on.
         TreeNode root = deepCopyNodes(tree.root, null);
         for (int x : missing) {
-            root = insertTaxon(root, x, dm.dist, n);
+            root = insertTaxon(root, x, dist, n);
         }
 
         return rebuildTree(tree.treeIndex, root, n);

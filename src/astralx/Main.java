@@ -3,8 +3,11 @@ package astralx;
 import astralx.cluster.ClusterTable;
 import astralx.completion.DistanceMatrix;
 import astralx.completion.DistanceMatrixBuilder;
+import astralx.completion.SimilarityMatrix;
+import astralx.completion.SimilarityMatrixBuilder;
 import astralx.completion.TreeCompleter;
 import astralx.gpu.GPUDistanceMatrix;
+import astralx.gpu.GPUSimilarityMatrix;
 import astralx.dp.DPTable;
 import astralx.dp.Inference;
 import astralx.gpu.GPUDPBuilder;
@@ -69,6 +72,8 @@ public class Main {
             if (cfg.isAutoCompleteIncompleteTrees() || cfg.isVerifyDistanceMatrix()) {
                 boolean gpuDist = (cfg.getComputeMode() == Config.ComputeMode.GPU)
                                   && GPUDistanceMatrix.tryLoad();
+                boolean gpuSim  = (cfg.getComputeMode() == Config.ComputeMode.GPU)
+                                  && GPUSimilarityMatrix.tryLoad();
 
                 if (cfg.isVerifyDistanceMatrix()) {
                     DistanceMatrix dm = gpuDist
@@ -80,14 +85,26 @@ public class Main {
 
                 long incompleteCount = trees.stream().filter(t -> !t.isComplete).count();
                 if (incompleteCount > 0) {
-                    long t1b = PhaseLogger.begin("Phase 1b Auto-complete gene trees", gpuDist);
-                    DistanceMatrix dm = gpuDist
-                        ? DistanceMatrixBuilder.buildGPU(trees, registry.size())
-                        : DistanceMatrixBuilder.buildCPU(trees, registry.size());
+                    boolean useSim = cfg.getCompletionMethod() == Config.CompletionMethod.SIMILARITY;
+                    boolean gpuActive = useSim ? gpuSim : gpuDist;
+                    long t1b = PhaseLogger.begin("Phase 1b Auto-complete gene trees ("
+                        + (useSim ? "similarity" : "distance") + ")", gpuActive);
+                    double[] completionDist;
+                    if (useSim) {
+                        SimilarityMatrix sm = gpuSim
+                            ? SimilarityMatrixBuilder.buildGPU(trees, registry.size())
+                            : SimilarityMatrixBuilder.buildCPU(trees, registry.size());
+                        completionDist = sm.dist;
+                    } else {
+                        DistanceMatrix dm = gpuDist
+                            ? DistanceMatrixBuilder.buildGPU(trees, registry.size())
+                            : DistanceMatrixBuilder.buildCPU(trees, registry.size());
+                        completionDist = dm.dist;
+                    }
                     // originalTrees already saved above; trees is reassigned to completed list
-                    trees = TreeCompleter.completeAll(trees, dm, registry.size());
+                    trees = TreeCompleter.completeAll(trees, completionDist, registry.size());
                     Logging.info("Phase 1b: using original incomplete trees for weight scoring, completed trees for X");
-                    PhaseLogger.end("Phase 1b Auto-complete gene trees", t1b, gpuDist);
+                    PhaseLogger.end("Phase 1b Auto-complete gene trees", t1b, gpuActive);
                 } else {
                     Logging.info("Phase 1b: all gene trees already complete, skipping");
                 }
@@ -244,6 +261,11 @@ public class Main {
                 case "--verify-weights"    -> cfg.setVerifyWeights(true);
                 case "--verify-distance-matrix" -> cfg.setVerifyDistanceMatrix(true);
                 case "--autocomplete-incomplete-gene-trees" -> cfg.setAutoCompleteIncompleteTrees(true);
+                case "--completion-method" -> {
+                    if (++i >= args.length) return false;
+                    cfg.setCompletionMethod(args[i].equalsIgnoreCase("distance")
+                        ? Config.CompletionMethod.DISTANCE : Config.CompletionMethod.SIMILARITY);
+                }
                 case "--dump-clusters" -> { if (++i>=args.length) return false; cfg.setDumpClustersFile(args[i]); }
                 case "--gpu-dist-tile-size" -> { if (++i>=args.length) return false; cfg.setGpuDistTileSizeB(Integer.parseInt(args[i])); }
                 case "-h","--help"     -> { printUsage(); System.exit(0); }
