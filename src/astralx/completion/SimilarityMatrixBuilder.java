@@ -15,22 +15,31 @@ import java.util.concurrent.atomic.AtomicInteger;
 /**
  * Builds the quartet-based taxon similarity matrix from gene trees.
  *
- * CPU path (buildCPU):
- *   For each gene tree T (leaf count k_t ≥ 4), for each internal node u:
- *     subLC_u  = u.rangeEnd − u.rangeStart
- *     subLC_ca = left-child subLeafCount
- *     subLC_cb = right-child subLeafCount
- *     S_u      = C2(k_t − subLC_u) + C2(subLC_ca) + C2(subLC_cb)
- *     num      = S_u − C2(subLC_ca) − C2(subLC_cb)  =  C2(k_t − subLC_u)
- *     den      = C2(k_t − 2)
- *     Accumulate (num, den) for every pair (a ∈ left-sub, b ∈ right-sub).
- *   O(k × n²) time, O(n²) space.
+ * For each pair (a, b) the similarity is:
+ *   sim(a,b) = sum_T num_T(a,b) / sum_T den_T(a,b)
  *
- * GPU path (buildGPU):
- *   1. Build FullTourData per tree in parallel.
+ * where the sum is over all trees T that contain both a and b with kt ≥ 4,
+ * and:
+ *   num_T(a,b) = C2(kt − sub[LCA_T(a,b)])
+ *   den_T(a,b) = C2(kt − 2)
+ *
+ * Pairs with num_T = 0 contribute nothing to either numerator or denominator.
+ *
+ * ── CPU path (buildCPU) ──────────────────────────────────────────────────────
+ * Scatter: for each internal node u, assign num = C2(kt − sub[u]) to all
+ * (left-subtree leaf × right-subtree leaf) pairs whose LCA IS u.
+ * O(k·n²) time, O(n²) space.
+ *
+ * ── GPU path (buildGPU) ──────────────────────────────────────────────────────
+ * Uses Euler tour + O(1) sparse-table RMQ:
+ *   sub_lca = sparseSubLC at the leftmost-min-depth position in
+ *             [min(firstOcc[a], firstOcc[b]),  max(firstOcc[a], firstOcc[b])]
+ *   num_T(a,b) = C2(kt − sub_lca)
+ *
+ * Architecture:
+ *   1. Build FullTourData per tree in parallel (eulerSubLC + sparseSubLC).
  *   2. Flatten into contiguous arrays padded to E_max.
- *   3. Call native CUDA kernel (same Δ-tree × B×B tile architecture as dist).
- *      GPU VRAM = O(B² + Δ·n·log n).
+ *   3. Call native CUDA kernel (Δ-tree × B×B tile).
  *   4. Normalize.
  */
 public class SimilarityMatrixBuilder {
@@ -58,7 +67,7 @@ public class SimilarityMatrixBuilder {
 
         // ── Step 1: Build per-tree full tour data in parallel ─────────────────
         EulerTourBuilder.FullTourData[] tours = new EulerTourBuilder.FullTourData[k];
-        ProgressBar eulerBar  = new ProgressBar("FullTour + RMQ build", k);
+        ProgressBar eulerBar   = new ProgressBar("FullTour + RMQ build", k);
         AtomicInteger eulerDone = new AtomicInteger(0);
 
         Threading.processRangeParallel(k, i -> {
@@ -78,53 +87,43 @@ public class SimilarityMatrixBuilder {
         final int E_max   = ePadded;
         final int LOG_max = logMaxRaw;
 
-        Logging.info("  E_max=%d  LOG=%d  euler %.1f MB  sparseMin %.1f MB  total-sim %.1f MB",
-            E_max, LOG_max,
-            (double)k * E_max * 2 / 1e6,
-            (double)k * LOG_max * E_max * 2 / 1e6,
-            (double)k * (E_max * (2+2+2+4) + (long)LOG_max * E_max * (2+2+2+4)) / 1e6);
+        // Memory estimate (in MB)
+        double euler_mb  = (double)k * E_max * 4 / 1e6;           // depths(2) + subLC(2)
+        double sparse_mb = (double)k * LOG_max * E_max * 4 / 1e6; // min(2) + subLC(2)
+        double leaf_mb   = (double)k * n * 4 / 1e6;               // firstOcc(4)
+        Logging.info("  E_max=%d  LOG=%d  euler %.1f MB  sparse %.1f MB  leaf %.1f MB",
+            E_max, LOG_max, euler_mb, sparse_mb, leaf_mb);
 
         // ── Step 3: Flatten into contiguous Java arrays ───────────────────────
-        // eulerDepths       [k × E_max]             short
-        // eulerPrevSubLC    [k × E_max]             short
-        // eulerNextSubLC    [k × E_max]             short
-        // eulerS            [k × E_max]             int
-        // sparseMin         [k × LOG_max × E_max]   short
-        // sparseSubLCLeft   [k × LOG_max × E_max]   short
-        // sparseSubLCRight  [k × LOG_max × E_max]   short
-        // sparseSLeft       [k × LOG_max × E_max]   int
-        // firstOcc          [k × n]                 int
-        // leafDepth         [k × n]                 short   (-1 if absent)
-        // eulerLen          [k]                     int
-        // leafCount         [k]                     int
+        // eulerDepths  [k × E_max]           short   depth at each tour position
+        // eulerSubLC   [k × E_max]           short   sub[v] at each tour position
+        // sparseMin    [k × LOG_max × E_max] short   min-depth sparse table
+        // sparseSubLC  [k × LOG_max × E_max] short   left-biased sub[LCA] payload
+        // firstOcc     [k × n]               int     first tour pos of each leaf (-1 absent)
+        // eulerLen     [k]                   int
+        // leafCount    [k]                   int
 
         long edSize = (long)k * E_max;
         long spSize = (long)k * LOG_max * E_max;
         long ldSize = (long)k * n;
 
-        short[] eulerDepths      = new short[(int)edSize];
-        short[] eulerPrevSubLC   = new short[(int)edSize];
-        short[] eulerNextSubLC   = new short[(int)edSize];
-        int[]   eulerS           = new int  [(int)edSize];
-        short[] sparseMin        = new short[(int)spSize];
-        short[] sparseSubLCLeft  = new short[(int)spSize];
-        short[] sparseSubLCRight = new short[(int)spSize];
-        int[]   sparseSLeft      = new int  [(int)spSize];
-        int[]   firstOcc         = new int  [(int)ldSize];
-        short[] leafDepth        = new short[(int)ldSize];
-        int[]   eulerLen         = new int  [k];
-        int[]   leafCount        = new int  [k];
+        short[] eulerDepths = new short[(int)edSize];
+        short[] eulerSubLC  = new short[(int)edSize];
+        short[] sparseMin   = new short[(int)spSize];
+        short[] sparseSubLC = new short[(int)spSize];
+        int[]   firstOcc    = new int  [(int)ldSize];
+        int[]   eulerLen    = new int  [k];
+        int[]   leafCount   = new int  [k];
 
-        Arrays.fill(leafDepth, (short)-1);
-        Arrays.fill(firstOcc,  -1);
+        Arrays.fill(firstOcc, -1);
 
-        ProgressBar flatBar  = new ProgressBar("Flattening similarity tour data", k);
+        ProgressBar flatBar    = new ProgressBar("Flattening similarity tour data", k);
         AtomicInteger flatDone = new AtomicInteger(0);
 
         Threading.processRangeParallel(k, i -> {
             EulerTourBuilder.FullTourData td = tours[i];
-            int len = td.tourLen;
-            int treeN = td.firstOcc.length;  // = n
+            int len   = td.tourLen;
+            int treeN = td.firstOcc.length;   // = n
 
             long edOff = (long)i * E_max;
             long spOff = (long)i * LOG_max * E_max;
@@ -132,31 +131,24 @@ public class SimilarityMatrixBuilder {
 
             // Euler arrays
             for (int p = 0; p < len; p++) {
-                eulerDepths   [(int)(edOff + p)] = td.depths        [p];
-                eulerPrevSubLC[(int)(edOff + p)] = td.prevChildSubLC[p];
-                eulerNextSubLC[(int)(edOff + p)] = td.nextChildSubLC[p];
-                eulerS        [(int)(edOff + p)] = td.eulerS        [p];
+                eulerDepths[(int)(edOff + p)] = td.depths[p];
+                eulerSubLC [(int)(edOff + p)] = td.eulerSubLC[p];
             }
 
             // Sparse tables
             for (int lvl = 0; lvl < td.log; lvl++) {
                 int rowLen = Math.max(0, len - (1 << lvl) + 1);
-                long dst = spOff + (long)lvl * E_max;
+                long dst   = spOff + (long)lvl * E_max;
                 for (int p = 0; p < rowLen; p++) {
-                    sparseMin       [(int)(dst + p)] = td.sparseMin       [lvl][p];
-                    sparseSubLCLeft [(int)(dst + p)] = td.sparseSubLCLeft [lvl][p];
-                    sparseSubLCRight[(int)(dst + p)] = td.sparseSubLCRight[lvl][p];
-                    sparseSLeft     [(int)(dst + p)] = td.sparseSLeft     [lvl][p];
+                    sparseMin  [(int)(dst + p)] = td.sparseMin  [lvl][p];
+                    sparseSubLC[(int)(dst + p)] = td.sparseSubLC[lvl][p];
                 }
             }
 
-            // Leaf maps
+            // Leaf first-occurrence map
             for (int a = 0; a < treeN; a++) {
                 int fo = td.firstOcc[a];
-                if (fo >= 0) {
-                    firstOcc [(int)(ldOff + a)] = fo;
-                    leafDepth[(int)(ldOff + a)] = td.depths[fo];
-                }
+                if (fo >= 0) firstOcc[(int)(ldOff + a)] = fo;
             }
 
             eulerLen [i] = len;
@@ -167,15 +159,15 @@ public class SimilarityMatrixBuilder {
 
         // ── Step 4: Call GPU kernel ───────────────────────────────────────────
         Config cfg = Config.getInstance();
-        int    tileSizeB         = cfg.getGpuDistTileSizeB();
-        double progressInterval  = cfg.getGpuDpProgressInterval();
-        int    progressMaxSteps  = cfg.getGpuDpProgressMaxSteps();
+        int    tileSizeB        = cfg.getGpuDistTileSizeB();
+        double progressInterval = cfg.getGpuDpProgressInterval();
+        int    progressMaxSteps = cfg.getGpuDpProgressMaxSteps();
 
         SimilarityMatrix sm = new SimilarityMatrix(n);
         GPUSimilarityMatrix.computeSimilarityGPU(
-            eulerDepths, eulerPrevSubLC, eulerNextSubLC, eulerS,
-            sparseMin, sparseSubLCLeft, sparseSubLCRight, sparseSLeft,
-            firstOcc, leafDepth, eulerLen, leafCount,
+            eulerDepths, eulerSubLC,
+            sparseMin, sparseSubLC,
+            firstOcc, eulerLen, leafCount,
             k, n, E_max, LOG_max,
             tileSizeB, progressInterval, progressMaxSteps,
             sm.numSum, sm.denSum
@@ -187,9 +179,13 @@ public class SimilarityMatrixBuilder {
 
     // ── CPU accumulation (per-tree) ───────────────────────────────────────────
 
+    /**
+     * Scatter C2(out[u]) = C2(kt − sub[u]) to every (left-leaf × right-leaf) pair.
+     * For those pairs, u is the LCA, so num = C2(kt − sub[LCA]).
+     */
     private static void accumulateCPU(Tree tree, SimilarityMatrix sm) {
         int kt = tree.leafCount;
-        if (kt < 4) return;   // C2(kt-2) = 0 for kt ≤ 3, no contribution
+        if (kt < 4) return;   // C2(kt-2) = 0 for kt ≤ 3
         long den = EulerTourBuilder.c2(kt - 2);
         accumulateNodeCPU(tree.root, tree, kt, den, sm);
     }
@@ -200,13 +196,13 @@ public class SimilarityMatrixBuilder {
         accumulateNodeCPU(node.left,  tree, kt, den, sm);
         accumulateNodeCPU(node.right, tree, kt, den, sm);
 
-        int subLC_u  = node.rangeEnd        - node.rangeStart;
-        long num = EulerTourBuilder.c2(kt - subLC_u);   // simplified binary formula
+        int subU  = node.rangeEnd   - node.rangeStart;
+        long num  = EulerTourBuilder.c2(kt - subU);   // C2(out[u]) = C2(kt − sub[u])
         if (num == 0) return;
 
-        int n    = sm.n;
-        int loL  = node.left.rangeStart,  hiL = node.left.rangeEnd;
-        int loR  = node.right.rangeStart, hiR = node.right.rangeEnd;
+        int n   = sm.n;
+        int loL = node.left.rangeStart,  hiL = node.left.rangeEnd;
+        int loR = node.right.rangeStart, hiR = node.right.rangeEnd;
 
         for (int pi = loL; pi < hiL; pi++) {
             int ta = tree.postorderArray[pi];
