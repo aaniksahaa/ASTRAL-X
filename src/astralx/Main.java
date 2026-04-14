@@ -104,17 +104,21 @@ public class Main {
                 }
 
                 long incompleteCount = trees.stream().filter(t -> !t.isComplete).count();
+                boolean useSim = cfg.getCompletionMethod() == Config.CompletionMethod.SIMILARITY;
+                boolean gpuActive = useSim ? gpuSim : gpuDist;
+                long t1b = PhaseLogger.begin("Phase 1b Auto-complete gene trees ("
+                    + (useSim ? "similarity" : "distance") + ") + UPGMA guide", gpuActive);
+
+                // Always build the similarity matrix: needed for UPGMA guide tree regardless of
+                // completion method or whether any trees are actually incomplete.
+                SimilarityMatrix smForUpgma = gpuSim
+                    ? SimilarityMatrixBuilder.buildGPU(trees, registry.size())
+                    : SimilarityMatrixBuilder.buildCPU(trees, registry.size());
+
                 if (incompleteCount > 0) {
-                    boolean useSim = cfg.getCompletionMethod() == Config.CompletionMethod.SIMILARITY;
-                    boolean gpuActive = useSim ? gpuSim : gpuDist;
-                    long t1b = PhaseLogger.begin("Phase 1b Auto-complete gene trees ("
-                        + (useSim ? "similarity" : "distance") + ")", gpuActive);
                     double[] completionDist;
                     if (useSim) {
-                        SimilarityMatrix sm = gpuSim
-                            ? SimilarityMatrixBuilder.buildGPU(trees, registry.size())
-                            : SimilarityMatrixBuilder.buildCPU(trees, registry.size());
-                        completionDist = sm.dist;
+                        completionDist = smForUpgma.dist;   // reuse already-built matrix
                     } else {
                         DistanceMatrix dm = gpuDist
                             ? DistanceMatrixBuilder.buildGPU(trees, registry.size())
@@ -124,10 +128,21 @@ public class Main {
                     // originalTrees already saved above; trees is reassigned to completed list
                     trees = TreeCompleter.completeAll(trees, completionDist, registry.size());
                     Logging.info("Phase 1b: using original incomplete trees for weight scoring, completed trees for X");
-                    PhaseLogger.end("Phase 1b Auto-complete gene trees", t1b, gpuActive);
                 } else {
-                    Logging.info("Phase 1b: all gene trees already complete, skipping");
+                    Logging.info("Phase 1b: all gene trees already complete");
                 }
+
+                // Build UPGMA guide tree from similarity matrix and append to the completed
+                // trees list so Phase 2/3 include its bipartitions in the cluster set X.
+                // It is NOT added to originalTrees, so tripartition scoring (Phase 4/6)
+                // is unaffected.
+                int nTaxa = registry.size();
+                Tree upgmaGuideTree = UPGMAClusterer.build(smForUpgma.sim, nTaxa, trees.size());
+                trees = new ArrayList<>(trees);
+                trees.add(upgmaGuideTree);
+                Logging.info("Phase 1b: UPGMA guide tree (%d taxa) added to cluster search space", nTaxa);
+
+                PhaseLogger.end("Phase 1b Auto-complete gene trees", t1b, gpuActive);
             }
             // After Phase 1b:
             //   trees         = completed gene trees (or original if no autocomplete / no incomplete)
