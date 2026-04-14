@@ -1,5 +1,8 @@
 package phylonet.coalescent;
 
+import java.io.FileWriter;
+import java.io.IOException;
+import java.io.PrintWriter;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.TreeSet;
@@ -229,14 +232,30 @@ public class SimilarityMatrix extends AbstractMatrix implements Matrix {
 				matrix[j][i] = matrix[i][j];
 			}
 		}
-		/*Logging.log();
-		for (int i = 0; i < n; i++) {
-			for (int j = 0; j < n; j++) {
-				System.err.print(String.format("%.5f",matrix[i][j]));
-				System.err.print(",");
+		// Dump to file when -Dastralmp.sim.dump=<path> is set
+		String dumpPath = System.getProperty("astralmp.sim.dump");
+		if (dumpPath != null) {
+			try (PrintWriter pw = new PrintWriter(new FileWriter(dumpPath))) {
+				pw.println("SIMILARITY_MATRIX");
+				pw.println("n=" + n);
+				StringBuilder taxa = new StringBuilder("taxa=");
+				for (int i = 0; i < n; i++) {
+					if (i > 0) taxa.append(',');
+					taxa.append(GlobalMaps.taxonIdentifier.getTaxonName(i));
+				}
+				pw.println(taxa);
+				for (int i = 0; i < n; i++) {
+					StringBuilder row = new StringBuilder("sim_row").append(i).append('=');
+					for (int j = 0; j < n; j++) {
+						if (j > 0) row.append(',');
+						row.append(String.format("%.8f", matrix[i][j]));
+					}
+					pw.println(row);
+				}
+			} catch (IOException e) {
+				System.err.println("[ASTRAL-MP] WARNING: could not write sim dump: " + e.getMessage());
 			}
-			Logging.log();
-		}*/
+		}
 	}
 	
 

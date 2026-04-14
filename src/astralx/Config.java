@@ -240,6 +240,10 @@ public class Config {
     public boolean isVerifyDistanceMatrix()          { return verifyDistanceMatrix; }
     public void setVerifyDistanceMatrix(boolean v)   { this.verifyDistanceMatrix = v; }
 
+    private boolean verifySimilarityMatrix = false;
+    public boolean isVerifySimilarityMatrix()        { return verifySimilarityMatrix; }
+    public void setVerifySimilarityMatrix(boolean v) { this.verifySimilarityMatrix = v; }
+
     // ── Comparison / debug dump flags ─────────────────────────────────────────
     private String dumpClustersFile = null;
     public String getDumpClustersFile()       { return dumpClustersFile; }

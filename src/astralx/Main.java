@@ -69,7 +69,8 @@ public class Main {
             // does via inference.trees = originalInompleteGeneTrees) so the QI scores
             // reflect actual gene-tree signal, not the artificially inserted taxa.
             List<Tree> originalTrees = trees; // always points to pre-completion trees
-            if (cfg.isAutoCompleteIncompleteTrees() || cfg.isVerifyDistanceMatrix()) {
+            if (cfg.isAutoCompleteIncompleteTrees() || cfg.isVerifyDistanceMatrix()
+                    || cfg.isVerifySimilarityMatrix()) {
                 boolean gpuDist = (cfg.getComputeMode() == Config.ComputeMode.GPU)
                                   && GPUDistanceMatrix.tryLoad();
                 boolean gpuSim  = (cfg.getComputeMode() == Config.ComputeMode.GPU)
@@ -80,6 +81,14 @@ public class Main {
                         ? DistanceMatrixBuilder.buildGPU(trees, registry.size())
                         : DistanceMatrixBuilder.buildCPU(trees, registry.size());
                     dumpDistanceMatrix(dm, registry);
+                    return;
+                }
+
+                if (cfg.isVerifySimilarityMatrix()) {
+                    SimilarityMatrix sm = gpuSim
+                        ? SimilarityMatrixBuilder.buildGPU(trees, registry.size())
+                        : SimilarityMatrixBuilder.buildCPU(trees, registry.size());
+                    dumpSimilarityMatrix(sm, registry);
                     return;
                 }
 
@@ -259,7 +268,8 @@ public class Main {
                 case "--verify-partitions" -> cfg.setVerifyPartitions(true);
                 case "--verify-dp"         -> cfg.setVerifyDPSpace(true);
                 case "--verify-weights"    -> cfg.setVerifyWeights(true);
-                case "--verify-distance-matrix" -> cfg.setVerifyDistanceMatrix(true);
+                case "--verify-distance-matrix"    -> cfg.setVerifyDistanceMatrix(true);
+                case "--verify-similarity-matrix"  -> cfg.setVerifySimilarityMatrix(true);
                 case "--autocomplete-incomplete-gene-trees" -> cfg.setAutoCompleteIncompleteTrees(true);
                 case "--completion-method" -> {
                     if (++i >= args.length) return false;
@@ -302,6 +312,31 @@ public class Main {
                 double d = dm.dist[i * n + j];
                 if (d == Double.MAX_VALUE) row.append("inf");
                 else row.append(String.format("%.6f", d));
+            }
+            System.out.println(row);
+        }
+    }
+
+    /**
+     * Print similarity matrix to stdout in the same machine-parseable format as
+     * dumpDistanceMatrix — just with SIMILARITY_MATRIX header and sim_rowN keys.
+     */
+    private static void dumpSimilarityMatrix(astralx.completion.SimilarityMatrix sm,
+                                              TaxonRegistry registry) {
+        int n = sm.n;
+        StringBuilder taxa = new StringBuilder("taxa=");
+        for (int i = 0; i < n; i++) {
+            if (i > 0) taxa.append(',');
+            taxa.append(registry.getName(i));
+        }
+        System.out.println("SIMILARITY_MATRIX");
+        System.out.println("n=" + n);
+        System.out.println(taxa);
+        for (int i = 0; i < n; i++) {
+            StringBuilder row = new StringBuilder("sim_row").append(i).append('=');
+            for (int j = 0; j < n; j++) {
+                if (j > 0) row.append(',');
+                row.append(String.format("%.8f", sm.getSim(i, j)));
             }
             System.out.println(row);
         }

@@ -1,11 +1,9 @@
 {A,B,C,D}
 {A,B,C,E}
-{A,B,C}
 {A,B,D,E}
 {A,B,E}
 {A,B}
 {A,C,D,E}
-{A,C,D}
 {A,C,E}
 {A,C}
 {A,E}
@@ -14,11 +12,9 @@
 {B,C,D}
 {B,D,E}
 {B,D}
-{B,E}
 {B}
 {C,D,E}
 {C,D}
 {C}
-{D,E}
 {D}
 {E}

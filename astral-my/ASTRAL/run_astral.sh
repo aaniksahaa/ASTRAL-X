@@ -38,6 +38,8 @@ CLASSPATH=".:${MAIN_JAR}:${COLT_JAR}:${JSAP_JAR}:${JOCL_JAR}"
 XMS="${ASTRAL_XMS:-4g}"
 XMX="${ASTRAL_XMX:-128g}"
 JAVA_MEM_OVERRIDE=""
+# Extra JVM options (e.g. -Dastralmp.sim.dump=/tmp/sim.txt)
+ASTRAL_JVM_OPTS="${ASTRAL_JVM_OPTS:-}"
 
 # ── Validate environment ────────────────────────────────────────────────────────
 if [[ ! -f "${MAIN_DIR}/phylonet/coalescent/CommandLine.class" ]]; then
@@ -132,7 +134,7 @@ echo "Args:      ${ASTRAL_ARGS[*]}"
 echo "---"
 
 cd "${MAIN_DIR}"
-exec java ${JAVA_MEM_OPTS} \
+exec java ${JAVA_MEM_OPTS} ${ASTRAL_JVM_OPTS} \
     -classpath "${CLASSPATH}" \
     phylonet.coalescent.CommandLine \
     "${ASTRAL_ARGS[@]}"
