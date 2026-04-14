@@ -1,6 +1,8 @@
 package phylonet.coalescent;
 
+import java.io.FileWriter;
 import java.io.IOException;
+import java.io.PrintWriter;
 import java.io.StringReader;
 import java.io.StringWriter;
 import java.util.ArrayList;
@@ -325,6 +327,33 @@ public class DistanceMatrix extends AbstractMatrix implements Matrix {
 		}
 
 		DistanceMatrix ret = new DistanceMatrix(speciesSimilarityMatrix);
+
+		// Dump gene-level matrix when -Dastralmp.dist.dump=<path> is set
+		String dumpPath = System.getProperty("astralmp.dist.dump");
+		if (dumpPath != null) {
+			try (PrintWriter pw = new PrintWriter(new FileWriter(dumpPath))) {
+				pw.println("DISTANCE_MATRIX");
+				pw.println("n=" + n);
+				StringBuilder taxa = new StringBuilder("taxa=");
+				for (int i = 0; i < n; i++) {
+					if (i > 0) taxa.append(',');
+					taxa.append(GlobalMaps.taxonIdentifier.getTaxonName(i));
+				}
+				pw.println(taxa);
+				for (int i = 0; i < n; i++) {
+					StringBuilder row = new StringBuilder("row").append(i).append('=');
+					for (int j = 0; j < n; j++) {
+						if (j > 0) row.append(',');
+						float v = this.matrix[i][j];
+						if (v == -99) row.append("inf");
+						else row.append(String.format("%.6f", v));
+					}
+					pw.println(row);
+				}
+			} catch (IOException e) {
+				System.err.println("[ASTRAL-MP] WARNING: could not write dist dump: " + e.getMessage());
+			}
+		}
 
 		return ret;
 	}
