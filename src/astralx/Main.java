@@ -11,6 +11,8 @@ import astralx.gpu.GPUDistanceMatrix;
 import astralx.gpu.GPUSimilarityMatrix;
 import astralx.dp.DPTable;
 import astralx.dp.Inference;
+import astralx.greedy.GreedyConsensus;
+import astralx.greedy.GreedyConsensusVerifier;
 import astralx.gpu.GPUDPBuilder;
 import astralx.gpu.GPUWeightCalculator;
 import astralx.partition.PartitionTable;
@@ -191,6 +193,33 @@ public class Main {
                 dumpClusters(clusterTable, trees, registry, cfg.getDumpClustersFile());
             }
 
+            // ── Phase 3.5: Greedy consensus + polytomy resolution (Part I in place) ──
+            // Use ONLY the gene trees (no UPGMA guide tree) so the bipartition
+            // frequencies match ASTRAL-MP's `addExtraBipartitionByHeuristics`
+            // (which runs greedy consensus over the gene trees alone).
+            //
+            // `originalTrees.size()` is the gene-tree count regardless of
+            // completion mode:
+            //   - autocomplete OFF:  trees == originalTrees (no UPGMA appended)
+            //   - autocomplete ON :  trees = completed gene trees + UPGMA
+            //                        originalTrees still references the
+            //                        pre-completion / pre-UPGMA list size.
+            List<Tree> geneTreesForGreedy = trees.subList(0, originalTrees.size());
+
+            if (cfg.isVerifyGreedyConsensus()) {
+                GreedyConsensusVerifier.dump(geneTreesForGreedy, registry, clusterTable,
+                                             pref, cfg.getOutputFile());
+                return;
+            }
+            long t35 = PhaseLogger.begin("Phase 3.5 Greedy consensus build", false);
+            GreedyConsensus.Result gcResult =
+                GreedyConsensus.build(clusterTable, geneTreesForGreedy, pref, registry.size());
+            PhaseLogger.end("Phase 3.5 Greedy consensus build", t35, false);
+            // gcResult.snapshots are consumed by Part II (polytomy resolution → X)
+            // — wiring to that phase will land in a follow-up commit.
+            @SuppressWarnings("unused")
+            var _gcUnused = gcResult;
+
             // ── Phase 4: Gene-tree tripartition extraction (from ORIGINAL trees) ──
             // Uses originalTrees so tripartitions reflect actual gene-tree signal.
             long t4 = PhaseLogger.begin("Phase 4  Tripartition extraction", false);
@@ -307,6 +336,7 @@ public class Main {
                 case "--verify-distance-matrix"    -> cfg.setVerifyDistanceMatrix(true);
                 case "--verify-similarity-matrix"  -> cfg.setVerifySimilarityMatrix(true);
                 case "--verify-upgma"              -> cfg.setVerifyUpgma(true);
+                case "--verify-greedy-consensus"   -> cfg.setVerifyGreedyConsensus(true);
                 case "--autocomplete-incomplete-gene-trees" -> cfg.setAutoCompleteIncompleteTrees(true);
                 case "--completion-method" -> {
                     if (++i >= args.length) return false;

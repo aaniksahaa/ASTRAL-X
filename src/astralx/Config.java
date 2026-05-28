@@ -248,6 +248,10 @@ public class Config {
     public boolean isVerifyUpgma()          { return verifyUpgma; }
     public void setVerifyUpgma(boolean v)   { this.verifyUpgma = v; }
 
+    private boolean verifyGreedyConsensus = false;
+    public boolean isVerifyGreedyConsensus()        { return verifyGreedyConsensus; }
+    public void setVerifyGreedyConsensus(boolean v) { this.verifyGreedyConsensus = v; }
+
     // ── Comparison / debug dump flags ─────────────────────────────────────────
     private String dumpClustersFile = null;
     public String getDumpClustersFile()       { return dumpClustersFile; }

@@ -1112,6 +1112,22 @@ implements Cloneable {
 
 		Logging.log("took "+ ((System.currentTimeMillis()-t)/1000+" seconds"));
 
+		// === ASTRAL-X head-to-head dump: write each greedy consensus tree as
+		//     a single-line sentinel-prefixed Newick for diff against the
+		//     ASTRAL-X --verify-greedy-consensus output.  Order is ascending
+		//     threshold (allGreedies[0] = 0, allGreedies[6] = 1/3) — the same
+		//     ordering used by ASTRAL-X's T[0..6] snapshots.
+		{
+			int gi__ = 0;
+			for (Tree cons__ : allGreedies) {
+				double th__ = this.GREEDY_ADDITION_THRESHOLDS[gi__];
+				Logging.log("[GREEDY_DUMP_T" + gi__
+						+ "_threshold_" + String.format("%.4f", th__)
+						+ "] " + cons__.toNewick() + ";");
+				gi__++;
+			}
+		}
+
 		ArrayList<Integer> deg = new ArrayList<Integer>();
 		for (Tree cons : allGreedies) {
 			for (TNode greedyNode : cons.postTraverse()) {
