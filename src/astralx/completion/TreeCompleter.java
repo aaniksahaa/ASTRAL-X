@@ -99,6 +99,15 @@ public class TreeCompleter {
             if (tree.positionMap[i] != -1) inTree[i] = true;
         }
 
+        // --- Preprocessing reroot (mirrors WQDataCollection.reroot()) ---
+        // ASTRAL-MP rereroots each gene tree at the most balanced internal node
+        // (leaf count closest to leafCount/2) before the insertion loop begins,
+        // and also moves direct leaf-children to the right slot so that
+        // leftmostTaxon() always descends into an internal child first.
+        // Both effects are deterministic and must be replicated to get identical
+        // completed trees.
+        root = preprocessReroot(root, tree.leafCount);
+
         // --- Insert each missing taxon in ascending ID order ---
         // (mirrors WQDataCollection loop: nextClearBit ascending)
         for (int x = 0; x < n; x++) {
@@ -282,40 +291,45 @@ public class TreeCompleter {
         }
 
         // General case: path length >= 3 (anchor, p1, ..., pk=oldRoot).
-        // Step 2: reverse edges for nodes p1 .. pk-1 (indices 1 .. k-1).
+        //
+        // Step 2: reverse edges for nodes p1 .. pk-1 (indices 1 .. k-1) using
+        // ASTRAL-MP's "remove + adopt to end" semantics:
+        //   removeChild(childOnPath) then adoptChild(parentOnPath).
+        // In LinkedList terms: the old parent ends up at the END of the
+        // children list. For our binary representation that means:
+        //   node.left  = otherChild  (the child not on the path)
+        //   node.right = parentOnPath (former parent, now appended)
+        // This is critical for replicating ASTRAL-MP because getLeftmostLeaf()
+        // returns the post-order-first leaf, which depends on .left first.
         for (int i = 1; i <= k - 1; i++) {
             TreeNode node         = path.get(i);
             TreeNode childOnPath  = path.get(i - 1);   // toward anchor (keep as child)
             TreeNode parentOnPath = path.get(i + 1);   // old parent (becomes new child)
 
-            // Replace the child slot pointing toward anchor with the old parent.
-            // HINT for n-ary: replace matching entry in node.children list.
-            if (node.left == childOnPath) {
-                node.left = parentOnPath;
-            } else {
-                node.right = parentOnPath;
-            }
+            TreeNode otherChild = (node.left == childOnPath) ? node.right : node.left;
+
+            node.left  = otherChild;
+            node.right = parentOnPath;
 
             // Fix parent pointers.
-            node.parent        = (i == 1) ? newRoot : path.get(i - 1);
+            node.parent         = (i == 1) ? newRoot : path.get(i - 1);
             parentOnPath.parent = node;
+            // otherChild.parent is already `node`.
         }
 
-        // Step 3: collapse old root pk.
-        // pk had two children: path[k-1] (now pk's parent after step 2) and remainingChild.
-        // Splice pk out: make remainingChild a direct child of path[k-1].
+        // Step 3: collapse old root pk using the same "remove + adopt to end"
+        // semantics. After step 2:
+        //   pathKm1.left  = (something not pk)
+        //   pathKm1.right = pk
+        // We want to remove pk from pathKm1 and adopt pk's remaining child at
+        // the end. For binary: pathKm1.left stays, pathKm1.right = remainingChild.
         TreeNode pk             = path.get(k);   // old root
         TreeNode pathKm1        = path.get(k - 1);
-        // HINT for n-ary: scan pk.children for the entry that is NOT path[k-1].
         TreeNode remainingChild = (pk.left == pathKm1) ? pk.right : pk.left;
 
-        // Replace pk in pathKm1's children with remainingChild.
-        // HINT for n-ary: replace matching entry in pathKm1.children list.
-        if (pathKm1.left == pk) {
-            pathKm1.left = remainingChild;
-        } else {
-            pathKm1.right = remainingChild;
-        }
+        // pathKm1's children after step 2 are [otherChild, pk]; replace pk → remainingChild.
+        // Since pk is in the .right slot (per step 2), we set .right = remainingChild.
+        pathKm1.right = remainingChild;
         remainingChild.parent = pathKm1;
         // pk is now unreachable and will be garbage-collected.
 
@@ -354,6 +368,17 @@ public class TreeCompleter {
 
         if (start.isLeaf()) {
             // Case 1: stopped at a leaf — graft as sibling.
+            // Mirrors ASTRAL-MP's:
+            //   newnode = start.getParent().createChild(name);   // append at end
+            //   newinternalnode = start.getParent().createChild();  // append at end
+            //   newinternalnode.adoptChild(start);   // moves start out of P.children
+            //   newinternalnode.adoptChild(newnode); // moves newnode out of P.children
+            // Net effect on P.children: start (wherever it was) and newnode are
+            // removed, newinternalnode is the only addition at end of list.
+            // For our binary representation that means:
+            //   P.left  = otherChild (the child that wasn't start)
+            //   P.right = newInternal
+            // — regardless of which slot start was in.
             TreeNode newInternal = new TreeNode();
             TreeNode p           = start.parent;
 
@@ -366,8 +391,15 @@ public class TreeCompleter {
             // p should never be null here: after rerooting the tree has at least
             // anchor on one side and start on the other, so start is never the root.
             if (p != null) {
-                if (p.left == start) p.left  = newInternal;
-                else                 p.right = newInternal;
+                if (p.left == start) {
+                    // start was at .left → move otherChild (p.right) to .left,
+                    // place newInternal at .right (end of list).
+                    p.left  = p.right;
+                    p.right = newInternal;
+                } else {
+                    // start was at .right → otherChild already at .left, just replace start.
+                    p.right = newInternal;
+                }
             }
         } else {
             // Case 2: stopped at an internal node — push children down.
@@ -386,6 +418,114 @@ public class TreeCompleter {
         }
 
         return newLeaf;
+    }
+
+    // ── Preprocessing reroot ─────────────────────────────────────────────────
+
+    /**
+     * Replicate ASTRAL-MP's WQDataCollection.reroot() preprocessing:
+     *
+     *   1. Find the internal node whose subtree leaf count is closest to
+     *      leafCount/2  (the most balanced split).
+     *      Mirrors: Math.abs(n - node.getLeafCount()) < dist  with
+     *               n = leafCount/2  and the exact signed-dist update so that
+     *               tie-breaking matches ASTRAL-MP's post-traversal order.
+     *
+     *   2. Move every direct leaf-child to the RIGHT slot (= end of list in
+     *      ASTRAL-MP's n-ary tree).  Effect: leftmostTaxon() always descends
+     *      into an internal child first, matching getLeftmostLeaf() in ASTRAL-MP
+     *      after the leaf-to-end reordering.
+     *
+     *   3. Reroot at the balanced node's edge (if it is not already the root),
+     *      using the same path-reversal as rerootAtLeafEdge() — which works for
+     *      any node, leaf or internal.
+     *
+     * Called once per tree before the insertion loop.
+     * O(n) time, O(depth) stack space for the recursive leaf-move pass.
+     *
+     * HINT for n-ary: step 2 should move ALL leaf children to the tail of
+     * node.children rather than just swapping left/right.
+     */
+    private static TreeNode preprocessReroot(TreeNode root, int leafCount) {
+        // Step 1: find the most balanced internal node in POST-ORDER.
+        // Mirror ASTRAL-MP reroot() exactly:
+        //   n    = leafCount / 2
+        //   dist = n  (initial, positive)
+        //   update only when Math.abs(n - sub) < dist (strict)
+        //   dist = n - sub  (signed! — once a node with sub > n is found dist
+        //                    goes negative and no further updates happen)
+        // The signed update means: the algorithm picks the LAST post-order node
+        // that strictly improves |n - sub|, and stops as soon as sub > n is
+        // accepted (dist negative ⟹ no |...| can be < negative).
+        int half    = leafCount / 2;
+        int[] dist  = { half };            // mutable: mirrors ASTRAL-MP's dist variable
+        TreeNode[] bestNode = { null };    // mirrors newroot (null = use existing root)
+
+        // Post-order DFS (left, right, node) — mirrors tr.postTraverse()
+        findBalancedNodePostOrder(root, half, dist, bestNode);
+
+        // Step 2: move direct leaf-children to the right slot at every internal node.
+        // Applied to the ORIGINAL tree (before rerooting), same order as ASTRAL-MP:
+        // reroot() collects leaf children and moves them to end in the same traversal
+        // that finds the balanced node, then reroots last.
+        moveLeafChildToRight(root);
+
+        // Step 3: reroot at best node's edge (if not already the root).
+        if (bestNode[0] != null && bestNode[0] != root) {
+            root = rerootAtLeafEdge(bestNode[0], root);
+            // After: root.left = bestNode, root.right = reversed-path rest-of-tree.
+        }
+
+        return root;
+    }
+
+    /**
+     * Post-order DFS to find the most balanced internal node, mirroring
+     * ASTRAL-MP's postTraverse() loop in reroot().
+     * Updates dist[0] and bestNode[0] in-place.
+     */
+    private static void findBalancedNodePostOrder(TreeNode node, int half,
+                                                   int[] dist, TreeNode[] best) {
+        if (node.isLeaf()) return;
+        findBalancedNodePostOrder(node.left,  half, dist, best);
+        findBalancedNodePostOrder(node.right, half, dist, best);
+        // Process this node (post-order = after children)
+        int sub = node.rangeEnd - node.rangeStart;
+        if (Math.abs(half - sub) < dist[0]) {
+            best[0]  = node;
+            dist[0]  = half - sub;   // signed — mirrors ASTRAL-MP: dist = n - node.getLeafCount()
+        }
+    }
+
+    /**
+     * Post-order DFS: for each internal node, if left is a leaf and right is
+     * not, swap them so the internal child is always on the left.
+     *
+     * Mirrors ASTRAL-MP's removeChild + createChild(leaf) loop in reroot(),
+     * which places every leaf child at the END (= right) of the children list.
+     *
+     * HINT for n-ary: collect all leaf children, remove and re-append them.
+     */
+    private static void moveLeafChildToRight(TreeNode node) {
+        if (node == null || node.isLeaf()) return;
+        moveLeafChildToRight(node.left);
+        moveLeafChildToRight(node.right);
+        // ASTRAL-MP's reroot() iterates each internal node's children, finds the
+        // FIRST leaf child, breaks, and later moves that leaf to the END of the
+        // children list (via removeChild + createChild). For our binary tree:
+        //   [leaf, leaf]    → [right, left_copy]   (left was first leaf found)
+        //   [leaf, internal] → [internal, leaf_copy]
+        //   [internal, leaf] → unchanged (leaf already last)
+        //   [internal, internal] → unchanged
+        // The single rule that reproduces all four cases is:
+        //   if the LEFT child is a leaf, swap left and right.
+        if (node.left.isLeaf()) {
+            TreeNode tmp  = node.left;
+            node.left     = node.right;
+            node.right    = tmp;
+            // parents already point to `node` — no reparent needed since both
+            // children were already direct children of `node`.
+        }
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────

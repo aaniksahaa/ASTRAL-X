@@ -42,8 +42,13 @@ public class SortedRowsBuilder {
             for (int j = 0; j < n; j++) indices[j] = j;
 
             final int base = x * n;
-            // Sort ascending by distance from x.
-            Arrays.sort(indices, (a, b) -> Double.compare(dist[base + a], dist[base + b]));
+            // Sort ascending by distance (= descending similarity).
+            // Tie-break: descending taxon ID, matching ASTRAL-MP's AbstractMatrix.sortColumn
+            // which does: comp==0 ? -o1.compareTo(o2) : comp  (higher ID wins on tie).
+            Arrays.sort(indices, (a, b) -> {
+                int c = Double.compare(dist[base + a], dist[base + b]);
+                return c != 0 ? c : Integer.compare(b, a);  // descending ID on tie
+            });
 
             // Write into flat output array.
             for (int rank = 0; rank < n; rank++) {
