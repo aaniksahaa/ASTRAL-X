@@ -40,10 +40,18 @@ run_one() {
     fi
 }
 
-# Simulated incomplete datasets
+# Simulated incomplete datasets — skip very large ones (t>=1000) that OOM ASTRAL-MP locally
 SIMPHY_DATA="$ROOT/simphy/data"
 for d in "$SIMPHY_DATA"/*_incomplete; do
     [[ -d "$d" ]] || continue
+    # Extract t= value from directory name and skip if >= 1000
+    taxa=$(basename "$d" | grep -oP '(?<=t_)\d+' | head -1)
+    if [[ -n "$taxa" && "$taxa" -ge 1000 ]]; then
+        echo "--- $(basename $d) --- SKIP (t=$taxa >= 1000, would OOM ASTRAL-MP locally)"
+        echo ""
+        SKIP=$((SKIP+1))
+        continue
+    fi
     for rep in "$d"/R*/; do
         gt="$rep/all_gt.tre"
         [[ -f "$gt" ]] || continue

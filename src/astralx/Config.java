@@ -252,4 +252,8 @@ public class Config {
     private String dumpClustersFile = null;
     public String getDumpClustersFile()       { return dumpClustersFile; }
     public void setDumpClustersFile(String f) { this.dumpClustersFile = f; }
+
+    private String dumpCompletedTreesFile = null;
+    public String getDumpCompletedTreesFile()       { return dumpCompletedTreesFile; }
+    public void setDumpCompletedTreesFile(String f) { this.dumpCompletedTreesFile = f; }
 }

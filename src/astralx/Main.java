@@ -134,6 +134,10 @@ public class Main {
                     // originalTrees already saved above; trees is reassigned to completed list
                     trees = TreeCompleter.completeAll(trees, completionSim, completionDist, registry.size());
                     Logging.info("Phase 1b: using original incomplete trees for weight scoring, completed trees for X");
+
+                    if (cfg.getDumpCompletedTreesFile() != null) {
+                        dumpCompletedTrees(trees, registry, cfg.getDumpCompletedTreesFile());
+                    }
                 } else {
                     Logging.info("Phase 1b: all gene trees already complete");
                 }
@@ -309,7 +313,8 @@ public class Main {
                     cfg.setCompletionMethod(args[i].equalsIgnoreCase("distance")
                         ? Config.CompletionMethod.DISTANCE : Config.CompletionMethod.SIMILARITY);
                 }
-                case "--dump-clusters" -> { if (++i>=args.length) return false; cfg.setDumpClustersFile(args[i]); }
+                case "--dump-clusters"         -> { if (++i>=args.length) return false; cfg.setDumpClustersFile(args[i]); }
+                case "--dump-completed-gene-trees" -> { if (++i>=args.length) return false; cfg.setDumpCompletedTreesFile(args[i]); }
                 case "--gpu-dist-tile-size" -> { if (++i>=args.length) return false; cfg.setGpuDistTileSizeB(Integer.parseInt(args[i])); }
                 case "-h","--help"     -> { printUsage(); System.exit(0); }
                 default -> { System.err.println("Unknown arg: " + args[i]); return false; }
@@ -416,6 +421,20 @@ public class Main {
         }
         java.util.Collections.sort(names);
         System.out.println("bipartition=" + String.join(",", names));
+    }
+
+    /**
+     * Dump completed gene trees to a file, one Newick per line.
+     * Ordering matches the original input gene tree order.
+     */
+    static void dumpCompletedTrees(List<Tree> trees, TaxonRegistry registry,
+                                    String outFile) throws IOException {
+        try (PrintStream out = new PrintStream(new FileOutputStream(outFile))) {
+            for (Tree t : trees) {
+                out.println(t.toNewick(registry));
+            }
+        }
+        Logging.info("Completed gene trees written to %s (%d trees)", outFile, trees.size());
     }
 
     /**

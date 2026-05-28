@@ -2,12 +2,13 @@
 # run_simmat_tests.sh — Run similarity matrix comparison tests (ASTRAL-X vs ASTRAL-MP)
 #
 # Usage:
-#   bash run_simmat_tests.sh [--tol TOL] [--verbose] [--no-gen]
+#   bash run_simmat_tests.sh [--tol TOL] [--verbose] [--no-gen] [--mode cpu|gpu]
 #
 # Options:
 #   --tol TOL      Float tolerance (default: 1e-5)
 #   --verbose      Pass --verbose to compare_simmat.py
 #   --no-gen       Skip input generation (assume inputs already exist)
+#   --mode MODE    ASTRAL-X compute mode: cpu or gpu (default: cpu)
 
 set -euo pipefail
 
@@ -17,12 +18,14 @@ INPUT_DIR="${SCRIPT_DIR}/input"
 TOL="1e-5"
 VERBOSE=""
 NO_GEN=false
+MODE="cpu"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --tol)     TOL="$2"; shift 2 ;;
         --verbose) VERBOSE="--verbose"; shift ;;
         --no-gen)  NO_GEN=true; shift ;;
+        --mode)    MODE="$2"; shift 2 ;;
         *) echo "Unknown option: $1"; exit 1 ;;
     esac
 done
@@ -41,7 +44,7 @@ fi
 
 # ── Step 2: Run comparisons ───────────────────────────────────────────────────
 echo "=== Similarity Matrix Comparison Tests ==="
-echo "Tolerance: ${TOL}"
+echo "Tolerance: ${TOL}  Mode: ${MODE}"
 echo ""
 
 PASS=0
@@ -62,7 +65,7 @@ for tc_file in "${INPUT_DIR}"/tc_sm*.tre; do
     fi
 
     set +e
-    python3 "${SCRIPT_DIR}/compare_simmat.py" "$tc_file" --tol "$TOL" $VERBOSE
+    python3 "${SCRIPT_DIR}/compare_simmat.py" "$tc_file" --tol "$TOL" --mode "$MODE" $VERBOSE
     exit_code=$?
     set -e
 
