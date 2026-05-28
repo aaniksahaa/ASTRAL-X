@@ -93,6 +93,19 @@ python3 test/simmat_comparison/compare_completed_trees.py \
 
 
 
+echo "=== Completed tree comparison on smaller t=100 datasets ==="
+for d in simphy/data/t_100_g_100_sb_0.000001_spmin_500000_spmax_1500000_incomplete/R1 \
+         simphy/data/t_100_g_100_sb_0.000001_spmin_500000_spmax_1500000_incomplete/R5 \
+         simphy/data/t_100_g_100_sb_0.000001_spmin_500000_spmax_1500000_incomplete/R10; do
+    F="$d/all_gt.tre"
+    if [[ -f "$F" ]]; then
+        echo "--- $(basename $d) ---"
+        python3 test/simmat_comparison/compare_completed_trees.py "$F" 2>&1 | tail -5
+        echo ""
+    fi
+done
+
+
 
 
 

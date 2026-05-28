@@ -34,8 +34,17 @@ ASTRALMP_DEV = os.path.join(ASTRALMP_DIR, "dev.sh")
 # ── Newick utilities ──────────────────────────────────────────────────────────
 
 def strip_annotations(newick):
-    """Remove ASTRAL-MP {label} cluster annotations from Newick."""
-    return re.sub(r'\{[^}]*\}', '', newick)
+    """
+    Remove ASTRAL-MP's inline annotations from a Newick string.
+    Two passes:
+      1. Remove `{...}` cluster annotations.
+      2. Remove `:<anything>` after node names — this covers both branch lengths
+         (`:0.51`) and bare colons left behind by step 1 (`:`).
+    The result is plain Newick with just node names and structure.
+    """
+    s = re.sub(r'\{[^}]*\}', '', newick)
+    s = re.sub(r':[^,()\s;]*', '', s)
+    return s
 
 
 def parse_newick_bipartitions(newick_str):
