@@ -116,6 +116,12 @@ public class Main {
                     : SimilarityMatrixBuilder.buildCPU(trees, registry.size());
 
                 if (incompleteCount > 0) {
+                    // The four-point algorithm always needs the similarity matrix for the
+                    // scoring formula (sim[x][a] + sim[b][c] - ...).  smForUpgma.sim is
+                    // already available regardless of completionMethod.
+                    // dist is used only to build sortedRows (nearest-neighbour order);
+                    // for SIMILARITY mode we reuse smForUpgma.dist (= 1 - sim).
+                    double[] completionSim  = smForUpgma.sim;
                     double[] completionDist;
                     if (useSim) {
                         completionDist = smForUpgma.dist;   // reuse already-built matrix
@@ -126,7 +132,7 @@ public class Main {
                         completionDist = dm.dist;
                     }
                     // originalTrees already saved above; trees is reassigned to completed list
-                    trees = TreeCompleter.completeAll(trees, completionDist, registry.size());
+                    trees = TreeCompleter.completeAll(trees, completionSim, completionDist, registry.size());
                     Logging.info("Phase 1b: using original incomplete trees for weight scoring, completed trees for X");
                 } else {
                     Logging.info("Phase 1b: all gene trees already complete");
