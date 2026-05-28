@@ -3,6 +3,7 @@ package astralx.greedy;
 import astralx.Logging;
 import astralx.cluster.ClusterTable;
 import astralx.hash.PrefixHashArrays;
+import astralx.hash.TaxonHasher;
 import astralx.tree.Tree;
 
 import java.util.List;
@@ -56,10 +57,14 @@ public final class GreedyConsensus {
      *                      taxa-enumeration step (since exemplar Cluster
      *                      objects index into this list via {@link Tree#treeIndex}).
      * @param pref          prefix hash arrays covering {@code geneTrees}
+     * @param hasher        per-taxon hashes — must be the same instance used to
+     *                      build {@code pref}, so the consensus-tree prefix
+     *                      arrays produce signatures comparable across sources
      * @param numTaxa       n
      */
     public static Result build(ClusterTable clusterTable, List<Tree> geneTrees,
-                                PrefixHashArrays pref, int numTaxa) {
+                                PrefixHashArrays pref, TaxonHasher hasher,
+                                int numTaxa) {
         long t0 = System.nanoTime();
         int k = geneTrees.size();
         if (k <= 0) {
@@ -87,7 +92,7 @@ public final class GreedyConsensus {
 
             // Snapshot all thresholds we are about to drop below.
             while (ti >= 0 && currentThreshold > ratio) {
-                snapshots[ti] = ConsensusTree.snapshot(forest);
+                snapshots[ti] = ConsensusTree.snapshot(forest, hasher);
                 ti--;
                 if (ti < 0) break;
                 currentThreshold = THRESHOLDS[ti];
@@ -106,7 +111,7 @@ public final class GreedyConsensus {
 
         // Drain remaining lower thresholds — all clusters consumed by now.
         while (ti >= 0) {
-            snapshots[ti] = ConsensusTree.snapshot(forest);
+            snapshots[ti] = ConsensusTree.snapshot(forest, hasher);
             ti--;
         }
 

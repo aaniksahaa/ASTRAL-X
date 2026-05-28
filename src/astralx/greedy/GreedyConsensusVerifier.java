@@ -1,13 +1,16 @@
 package astralx.greedy;
 
 import astralx.cluster.ClusterTable;
+import astralx.completion.SimilarityMatrix;
 import astralx.hash.PrefixHashArrays;
+import astralx.hash.TaxonHasher;
 import astralx.taxon.TaxonRegistry;
 import astralx.tree.Tree;
 
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.PrintStream;
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -31,9 +34,13 @@ public final class GreedyConsensusVerifier {
      * @param geneTrees     gene trees only (no UPGMA), per the ASTRAL-MP-faithful
      *                      counting path.  Used for both bipartition counting
      *                      and exemplar taxa enumeration.
+     * @param hasher        per-taxon hashes; same instance used to build pref.
+     * @param sim           species similarity matrix (Phase 1b output); pass
+     *                      null when --autocomplete is off — Step A is skipped.
      */
     public static void dump(List<Tree> geneTrees, TaxonRegistry registry,
                             ClusterTable clusterTable, PrefixHashArrays pref,
+                            TaxonHasher hasher, SimilarityMatrix sim,
                             String outFile) throws IOException {
         PrintStream out = (outFile != null)
             ? new PrintStream(new FileOutputStream(outFile)) : System.out;
@@ -66,7 +73,7 @@ public final class GreedyConsensusVerifier {
         for (Bipartition b : bps) {
             double ratio = (double) b.frequency / (double) k;
             while (ti >= 0 && threshold > ratio) {
-                fastSnaps[ti]   = ConsensusTree.snapshot(forest);
+                fastSnaps[ti]   = ConsensusTree.snapshot(forest, hasher);
                 oracleSnaps[ti] = oracle.canonicalLeafSets();
                 String fastSets = fastSnaps[ti].canonicalLeafSets();
                 if (!fastSets.equals(oracleSnaps[ti])) {
@@ -93,7 +100,7 @@ public final class GreedyConsensusVerifier {
 
         // Drain remaining lower thresholds
         while (ti >= 0) {
-            fastSnaps[ti]   = ConsensusTree.snapshot(forest);
+            fastSnaps[ti]   = ConsensusTree.snapshot(forest, hasher);
             oracleSnaps[ti] = oracle.canonicalLeafSets();
             String fastSets = fastSnaps[ti].canonicalLeafSets();
             if (!fastSets.equals(oracleSnaps[ti])) {
@@ -112,6 +119,127 @@ public final class GreedyConsensusVerifier {
             out.printf("T[%d] threshold=%.4f  internal=%d  polytomies=%d%n",
                 i, GreedyConsensus.THRESHOLDS[i],
                 s.numInternalNodes(), s.numPolytomies());
+        }
+
+        // ── §13.5 Cross-source signature parity check ──
+        // For each non-root internal node of the densest snapshot T[0], compute
+        // (a) the prefix-scan signature  σ_prefix = (sigma1, sigma2)
+        // (b) the direct-sum signature   σ_direct = sum/xor hasher.get(s, t)
+        //                                            over taxa in the range
+        // (c) lookup in ClusterTable        the same bipartition should be in X
+        //                                    because the consensus tree was
+        //                                    refined from gene-tree bipartitions
+        // All three must agree.
+        int parityChecked = 0, parityPrefixFails = 0, parityCtFails = 0;
+        ConsensusTree dense = fastSnaps[0];
+        int seedCount = hasher.numSeeds();
+        final int[] ck = {parityChecked}, pf = {parityPrefixFails}, cf = {parityCtFails};
+        dense.forEachInternalNode(node -> {
+            if (node == dense.root()) return;       // skip virtual root
+            int lo = node.rangeLo(), hi = node.rangeHi();
+            int sz = hi - lo;
+            if (sz < 2 || sz >= n) return;          // trivial
+            ck[0]++;
+
+            long[] rawSums = new long[seedCount];
+            long[] rawXors = new long[seedCount];
+
+            for (int s = 0; s < seedCount; s++) {
+                long sigPref1 = dense.sigma1(s, lo, hi);
+                long sigPref2 = dense.sigma2(s, lo, hi);
+                long sigDir1 = 0L, sigDir2 = 0L;
+                for (int p = lo; p < hi; p++) {
+                    long h = hasher.get(s, dense.aCons()[p]);
+                    sigDir1 += h;
+                    sigDir2 ^= h;
+                }
+                if (sigPref1 != sigDir1 || sigPref2 != sigDir2) {
+                    pf[0]++;
+                    if (pf[0] <= 3) {
+                        out.printf("FAIL prefix-scan parity  node lo=%d hi=%d seed=%d  "
+                                   + "prefix=(%x,%x)  direct=(%x,%x)%n",
+                                   lo, hi, s, sigPref1, sigPref2, sigDir1, sigDir2);
+                    }
+                }
+                rawSums[s] = sigPref1;
+                rawXors[s] = sigPref2;
+            }
+
+            astralx.cluster.ClusterHash ch =
+                new astralx.cluster.ClusterHash(rawSums, rawXors, sz, seedCount);
+            if (!clusterTable.contains(ch)) {
+                cf[0]++;
+                if (cf[0] <= 3) {
+                    out.printf("FAIL cross-source: consensus bipartition not in X  "
+                               + "lo=%d hi=%d size=%d  (one side)%n", lo, hi, sz);
+                }
+            }
+        });
+        out.printf("%nCross-source signature parity (T[0] non-root internals): "
+                   + "checked=%d  prefix-scan-fails=%d  X-lookup-fails=%d%n",
+                   ck[0], pf[0], cf[0]);
+
+        // ── §8.2 Polytomy pool + size limit ──
+        PolytomyPool pool = PolytomyPool.build(fastSnaps, n, /*explicitLimit=*/0);
+        out.printf("%n--- Polytomy pool (§8.2) ---%n");
+        out.printf("Budget N = %d + n*%d = %d%n",
+            PolytomyPool.BUDGET_MIN, PolytomyPool.BUDGET_MULT, pool.budgetN);
+        out.printf("Total polytomies across all 7 snapshots:  %d%n", pool.numTotal);
+        out.printf("Size limit (max accepted degree):         %d%n", pool.sizeLimit);
+        out.printf("Sum of squares accumulated:               %d%n", pool.sumSquaresAccumulated);
+        out.printf("Accepted polytomies (degree ≤ limit):     %d%n", pool.numAccepted);
+        out.printf("Skipped  polytomies (degree > limit):     %d%n", pool.numSkipped);
+        if (pool.numTotal > 0) {
+            out.printf("Degree histogram (degree: count):%n");
+            for (int d = 3; d < pool.degreeHistogram.length; d++) {
+                if (pool.degreeHistogram[d] > 0) {
+                    out.printf("  d=%d: %d%n", d, pool.degreeHistogram[d]);
+                }
+            }
+        }
+
+        // ── §8.3 Step A: per-polytomy UPGMA on group similarity matrix ──
+        out.printf("%n--- Polytomy resolution: Step A (UPGMA on group sim) ---%n");
+        if (sim == null) {
+            out.println("SKIPPED — SimilarityMatrix not available "
+                + "(--autocomplete-incomplete-gene-trees was off).");
+        } else {
+            EmissionBuffer buffer = new EmissionBuffer();
+            int totalNewSignatures = 0;
+            for (PolytomyTask task : pool.tasks) {
+                totalNewSignatures += PolytomyResolver.stepA(task, sim, buffer, n);
+            }
+            out.printf("Polytomies processed:  %d%n", pool.tasks.size());
+            out.printf("New signatures added:  %d%n", totalNewSignatures);
+            out.printf("Buffer size (deduped): %d%n", buffer.size());
+
+            // How many of these are already in the gene-tree X?
+            int alreadyInX = 0;
+            for (EmittedBipartition b : buffer.all()) {
+                if (clusterTable.contains(b.signature)) alreadyInX++;
+            }
+            out.printf("Already in ClusterTable: %d  /  net-new: %d%n",
+                alreadyInX, buffer.size() - alreadyInX);
+
+            // Dump the emitted taxa sets (canonical sorted) so they can be
+            // diffed against an ASTRAL-MP dump.
+            out.printf("%n--- Emitted bipartitions (canonical taxa sets) ---%n");
+            List<String> lines = new ArrayList<>(buffer.size());
+            for (EmittedBipartition b : buffer.all()) {
+                StringBuilder sb = new StringBuilder("[STEPA] ti=");
+                sb.append(b.thresholdIndex).append("  size=").append(b.size).append("  {");
+                java.util.TreeSet<String> taxa = new java.util.TreeSet<>();
+                int[] arr = b.canonicalSide.tree.aCons();
+                for (int r = 0; r < b.canonicalSide.numRanges(); r++) {
+                    for (int p = b.canonicalSide.los[r]; p < b.canonicalSide.his[r]; p++) {
+                        taxa.add(registry.getName(arr[p]));
+                    }
+                }
+                sb.append(String.join(",", taxa)).append('}');
+                lines.add(sb.toString());
+            }
+            java.util.Collections.sort(lines);
+            for (String l : lines) out.println(l);
         }
 
         out.printf("%n--- Newick (for ASTRAL-MP head-to-head) ---%n");

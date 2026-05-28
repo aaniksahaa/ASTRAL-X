@@ -72,6 +72,7 @@ public class Main {
             // does via inference.trees = originalInompleteGeneTrees) so the QI scores
             // reflect actual gene-tree signal, not the artificially inserted taxa.
             List<Tree> originalTrees = trees; // always points to pre-completion trees
+            SimilarityMatrix similarityMatrix = null; // visible to Phase 3.5 (Step A)
             if (cfg.isAutoCompleteIncompleteTrees() || cfg.isVerifyDistanceMatrix()
                     || cfg.isVerifySimilarityMatrix() || cfg.isVerifyUpgma()) {
                 boolean gpuDist = (cfg.getComputeMode() == Config.ComputeMode.GPU)
@@ -116,6 +117,7 @@ public class Main {
                 SimilarityMatrix smForUpgma = gpuSim
                     ? SimilarityMatrixBuilder.buildGPU(trees, registry.size())
                     : SimilarityMatrixBuilder.buildCPU(trees, registry.size());
+                similarityMatrix = smForUpgma; // retained for Phase 3.5 (greedy consensus Step A)
 
                 if (incompleteCount > 0) {
                     // The four-point algorithm always needs the similarity matrix for the
@@ -177,7 +179,10 @@ public class Main {
                 Phase2Verifier.dump(trees, registry, hasher, pref, cfg.getOutputFile());
                 return;
             }
-            hasher = null; // no longer needed after prefix arrays are built
+            // hasher is retained — Phase 3.5 (greedy consensus) needs per-taxon
+            // hashes to build consensus-tree prefix arrays whose signatures
+            // match those derived from the gene-tree prefix arrays (cross-source
+            // signature parity, design §7.2 / verification §13.5).
 
             // ── Phase 3: Cluster extraction -> X (from COMPLETED trees) ──────
             long t3 = PhaseLogger.begin("Phase 3  Cluster extraction", false);
@@ -208,12 +213,12 @@ public class Main {
 
             if (cfg.isVerifyGreedyConsensus()) {
                 GreedyConsensusVerifier.dump(geneTreesForGreedy, registry, clusterTable,
-                                             pref, cfg.getOutputFile());
+                                             pref, hasher, similarityMatrix, cfg.getOutputFile());
                 return;
             }
             long t35 = PhaseLogger.begin("Phase 3.5 Greedy consensus build", false);
             GreedyConsensus.Result gcResult =
-                GreedyConsensus.build(clusterTable, geneTreesForGreedy, pref, registry.size());
+                GreedyConsensus.build(clusterTable, geneTreesForGreedy, pref, hasher, registry.size());
             PhaseLogger.end("Phase 3.5 Greedy consensus build", t35, false);
             // gcResult.snapshots are consumed by Part II (polytomy resolution → X)
             // — wiring to that phase will land in a follow-up commit.

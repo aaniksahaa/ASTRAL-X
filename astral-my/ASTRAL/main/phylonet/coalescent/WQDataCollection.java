@@ -1275,9 +1275,22 @@ implements Cloneable {
 
 			// First resolve the polytomy using distances.
 
-			WQDataCollection.this.addSubSampledBitSetToX(
-					WQDataCollection.this.speciesMatrix.resolvePolytomy(
-							Arrays.asList(childbs), true), tid);
+			// === ASTRAL-X head-to-head dump: collect Step A emissions into a List
+			//     so we can log each BitSet's taxon set before they go into X. ===
+			java.util.List<BitSet> __stepA = new java.util.ArrayList<BitSet>();
+			for (BitSet __bs : WQDataCollection.this.speciesMatrix.resolvePolytomy(
+					Arrays.asList(childbs), true)) {
+				__stepA.add(__bs);
+			}
+			for (BitSet __bs : __stepA) {
+				java.util.TreeSet<String> __names = new java.util.TreeSet<String>();
+				for (int __j = __bs.nextSetBit(0); __j >= 0; __j = __bs.nextSetBit(__j+1)) {
+					__names.add(tid.getTaxonName(__j));
+				}
+				Logging.log("[STEPA_EMIT] ti=" + th + " size=" + __bs.cardinality()
+						+ " {" + String.join(",", __names) + "}");
+			}
+			WQDataCollection.this.addSubSampledBitSetToX(__stepA, tid);
 
 			// Resolve by subsampling the greedy.
 			// Don't get confused. We are not subsampling species
