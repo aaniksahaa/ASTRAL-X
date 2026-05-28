@@ -736,6 +736,13 @@ implements Cloneable {
         //        Logging.log();
         //        java.lang.System.exit(0);
 
+        // [COMPARISON] Dump UPGMA guide tree Newick to stderr if requested
+        if (System.getProperty("dumpUpgmaTree") != null) {
+            System.err.println("ASTRALMP_UPGMA_BEGIN");
+            System.err.println(ST.toNewick());
+            System.err.println("ASTRALMP_UPGMA_END");
+        }
+
 
 		///		Tree allGenesGreedy = Utils.greedyConsensus(greedyCandidates, false,
 		//				GlobalMaps.taxonNameMap.getSpeciesIdMapper()
