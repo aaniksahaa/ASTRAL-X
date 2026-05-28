@@ -15,32 +15,37 @@ import java.util.concurrent.atomic.AtomicInteger;
 /**
  * Builds the quartet-based taxon similarity matrix from gene trees.
  *
- * For each pair (a, b) the similarity is:
- *   sim(a,b) = sum_T num_T(a,b) / sum_T den_T(a,b)
- *
- * where the sum is over all trees T that contain both a and b with kt ≥ 4,
- * and:
- *   num_T(a,b) = C2(kt − sub[LCA_T(a,b)])
- *   den_T(a,b) = C2(kt − 2)
- *
- * Pairs with num_T = 0 contribute nothing to either numerator or denominator.
+ * Reproduces ASTRAL-MP's SimilarityMatrix.populateByQuartetDistance exactly:
+ * for each tree T with kt leaves, and for each pair (a, b) both present in T,
+ *   num_T(a, b) = same_side_T(a, b)
+ *              = number of quartets {a, b, x, y} resolved by T where a and b
+ *                fall on the same side of the bipartition
+ *   den_T(a, b) = C2(kt − 2)
+ * The final similarity is sim(a,b) = Σ num_T / Σ den_T.
  *
  * ── CPU path (buildCPU) ──────────────────────────────────────────────────────
- * Scatter: for each internal node u, assign num = C2(kt − sub[u]) to all
- * (left-subtree leaf × right-subtree leaf) pairs whose LCA IS u.
- * O(k·n²) time, O(n²) space.
+ * Per-tree scatter, identical to ASTRAL-MP:
+ *   For every internal node u, form three "components":
+ *     left  = leaves of left  child of u
+ *     right = leaves of right child of u
+ *     others = leaves in T but not in subtree(u)
+ *   totalPairs = C2(|left|) + C2(|right|) + C2(|others|)
+ *   For each component-pair (X, Y), the per-(l ∈ X, r ∈ Y) scatter is
+ *     sim = totalPairs − C2(|X|) − C2(|Y|)
+ *
+ * This sums contributions across every internal node on the unrooted path
+ * between a and b — exactly the same-side quartet count. The earlier
+ * implementation only scattered at the LCA, dropping the (path × others)
+ * contributions; that was the source of the systematic mismatch.
  *
  * ── GPU path (buildGPU) ──────────────────────────────────────────────────────
- * Uses Euler tour + O(1) sparse-table RMQ:
- *   sub_lca = sparseSubLC at the leftmost-min-depth position in
- *             [min(firstOcc[a], firstOcc[b]),  max(firstOcc[a], firstOcc[b])]
- *   num_T(a,b) = C2(kt − sub_lca)
- *
- * Architecture:
- *   1. Build FullTourData per tree in parallel (eulerSubLC + sparseSubLC).
- *   2. Flatten into contiguous arrays padded to E_max.
- *   3. Call native CUDA kernel (Δ-tree × B×B tile).
- *   4. Normalize.
+ * Uses the validated bridge identity
+ *   same_side_T(a, b)  =  C2(kt − 2)  −  QD_gt(a, b)
+ * with an O(1) closed form for QD_gt via Euler tour + sparse-table RMQ
+ * carrying (s, F) child-of-LCA payloads. See
+ *   DOCS/similarity-matrix-design.md
+ * for the derivation. For now the GPU path still uses the legacy LCA-only
+ * formula; this file's CPU path is the byte-for-byte-correct reference.
  */
 public class SimilarityMatrixBuilder {
 
@@ -49,7 +54,7 @@ public class SimilarityMatrixBuilder {
     public static SimilarityMatrix buildCPU(List<Tree> trees, int n) {
         SimilarityMatrix sm = new SimilarityMatrix(n);
 
-        ProgressBar bar  = new ProgressBar("Building similarity matrix (CPU)", trees.size());
+        ProgressBar bar = new ProgressBar("Building similarity matrix (CPU)", trees.size());
         int done = 0;
         for (Tree tree : trees) {
             accumulateCPU(tree, sm);
@@ -67,7 +72,7 @@ public class SimilarityMatrixBuilder {
 
         // ── Step 1: Build per-tree full tour data in parallel ─────────────────
         EulerTourBuilder.FullTourData[] tours = new EulerTourBuilder.FullTourData[k];
-        ProgressBar eulerBar   = new ProgressBar("FullTour + RMQ build", k);
+        ProgressBar eulerBar    = new ProgressBar("FullTour + RMQ build", k);
         AtomicInteger eulerDone = new AtomicInteger(0);
 
         Threading.processRangeParallel(k, i -> {
@@ -87,33 +92,39 @@ public class SimilarityMatrixBuilder {
         final int E_max   = ePadded;
         final int LOG_max = logMaxRaw;
 
-        // Memory estimate (in MB)
-        double euler_mb  = (double)k * E_max * 4 / 1e6;           // depths(2) + subLC(2)
-        double sparse_mb = (double)k * LOG_max * E_max * 4 / 1e6; // min(2) + subLC(2)
-        double leaf_mb   = (double)k * n * 4 / 1e6;               // firstOcc(4)
+        // Per-position arrays:
+        //   eulerDepths (short, 2B), eulerLeftChildS/RightChildS (short, 2B each),
+        //   eulerF, eulerLeftChildF, eulerRightChildF (double, 8B each)
+        // → 2 + 2 + 2 + 8 + 8 + 8 = 30 bytes/pos
+        double euler_mb  = (double)k * E_max * 30 / 1e6;
+        // Sparse tables: sparseMin (2B), sparseLeftChildS/RightChildS (2B each),
+        // sparseLeftChildF/RightChildF (8B each) → 2 + 2 + 2 + 8 + 8 = 22 bytes/cell
+        double sparse_mb = (double)k * LOG_max * E_max * 22 / 1e6;
+        double leaf_mb   = (double)k * n * 4 / 1e6;
         Logging.info("  E_max=%d  LOG=%d  euler %.1f MB  sparse %.1f MB  leaf %.1f MB",
             E_max, LOG_max, euler_mb, sparse_mb, leaf_mb);
 
         // ── Step 3: Flatten into contiguous Java arrays ───────────────────────
-        // eulerDepths  [k × E_max]           short   depth at each tour position
-        // eulerSubLC   [k × E_max]           short   sub[v] at each tour position
-        // sparseMin    [k × LOG_max × E_max] short   min-depth sparse table
-        // sparseSubLC  [k × LOG_max × E_max] short   left-biased sub[LCA] payload
-        // firstOcc     [k × n]               int     first tour pos of each leaf (-1 absent)
-        // eulerLen     [k]                   int
-        // leafCount    [k]                   int
-
         long edSize = (long)k * E_max;
         long spSize = (long)k * LOG_max * E_max;
         long ldSize = (long)k * n;
 
-        short[] eulerDepths = new short[(int)edSize];
-        short[] eulerSubLC  = new short[(int)edSize];
-        short[] sparseMin   = new short[(int)spSize];
-        short[] sparseSubLC = new short[(int)spSize];
-        int[]   firstOcc    = new int  [(int)ldSize];
-        int[]   eulerLen    = new int  [k];
-        int[]   leafCount   = new int  [k];
+        short[]  eulerDepths       = new short [(int)edSize];
+        double[] eulerF            = new double[(int)edSize];
+        short[]  eulerLeftChildS   = new short [(int)edSize];
+        double[] eulerLeftChildF   = new double[(int)edSize];
+        short[]  eulerRightChildS  = new short [(int)edSize];
+        double[] eulerRightChildF  = new double[(int)edSize];
+
+        short[]  sparseMin         = new short [(int)spSize];
+        short[]  sparseLeftChildS  = new short [(int)spSize];
+        double[] sparseLeftChildF  = new double[(int)spSize];
+        short[]  sparseRightChildS = new short [(int)spSize];
+        double[] sparseRightChildF = new double[(int)spSize];
+
+        int[]    firstOcc          = new int   [(int)ldSize];
+        int[]    eulerLen          = new int   [k];
+        int[]    leafCount         = new int   [k];
 
         Arrays.fill(firstOcc, -1);
 
@@ -123,29 +134,35 @@ public class SimilarityMatrixBuilder {
         Threading.processRangeParallel(k, i -> {
             EulerTourBuilder.FullTourData td = tours[i];
             int len   = td.tourLen;
-            int treeN = td.firstOcc.length;   // = n
+            int treeN = td.firstOcc.length;
 
             long edOff = (long)i * E_max;
             long spOff = (long)i * LOG_max * E_max;
             long ldOff = (long)i * n;
 
-            // Euler arrays
             for (int p = 0; p < len; p++) {
-                eulerDepths[(int)(edOff + p)] = td.depths[p];
-                eulerSubLC [(int)(edOff + p)] = td.eulerSubLC[p];
+                int dst = (int)(edOff + p);
+                eulerDepths      [dst] = td.depths[p];
+                eulerF           [dst] = td.eulerF[p];
+                eulerLeftChildS  [dst] = td.eulerLeftChildS[p];
+                eulerLeftChildF  [dst] = td.eulerLeftChildF[p];
+                eulerRightChildS [dst] = td.eulerRightChildS[p];
+                eulerRightChildF [dst] = td.eulerRightChildF[p];
             }
 
-            // Sparse tables
             for (int lvl = 0; lvl < td.log; lvl++) {
                 int rowLen = Math.max(0, len - (1 << lvl) + 1);
                 long dst   = spOff + (long)lvl * E_max;
                 for (int p = 0; p < rowLen; p++) {
-                    sparseMin  [(int)(dst + p)] = td.sparseMin  [lvl][p];
-                    sparseSubLC[(int)(dst + p)] = td.sparseSubLC[lvl][p];
+                    int idx = (int)(dst + p);
+                    sparseMin         [idx] = td.sparseMin        [lvl][p];
+                    sparseLeftChildS  [idx] = td.sparseLeftChildS [lvl][p];
+                    sparseLeftChildF  [idx] = td.sparseLeftChildF [lvl][p];
+                    sparseRightChildS [idx] = td.sparseRightChildS[lvl][p];
+                    sparseRightChildF [idx] = td.sparseRightChildF[lvl][p];
                 }
             }
 
-            // Leaf first-occurrence map
             for (int a = 0; a < treeN; a++) {
                 int fo = td.firstOcc[a];
                 if (fo >= 0) firstOcc[(int)(ldOff + a)] = fo;
@@ -165,8 +182,13 @@ public class SimilarityMatrixBuilder {
 
         SimilarityMatrix sm = new SimilarityMatrix(n);
         GPUSimilarityMatrix.computeSimilarityGPU(
-            eulerDepths, eulerSubLC,
-            sparseMin, sparseSubLC,
+            eulerDepths,
+            eulerF,
+            eulerLeftChildS,  eulerLeftChildF,
+            eulerRightChildS, eulerRightChildF,
+            sparseMin,
+            sparseLeftChildS,  sparseLeftChildF,
+            sparseRightChildS, sparseRightChildF,
             firstOcc, eulerLen, leafCount,
             k, n, E_max, LOG_max,
             tileSizeB, progressInterval, progressMaxSteps,
@@ -177,41 +199,142 @@ public class SimilarityMatrixBuilder {
         return sm;
     }
 
-    // ── CPU accumulation (per-tree) ───────────────────────────────────────────
+    // ── CPU accumulation (per-tree, scatter mirroring ASTRAL-MP) ─────────────
 
     /**
-     * Scatter C2(out[u]) = C2(kt − sub[u]) to every (left-leaf × right-leaf) pair.
-     * For those pairs, u is the LCA, so num = C2(kt − sub[LCA]).
+     * Scatter same-side quartet counts to all (l, r) pairs at every internal
+     * node, plus accumulate the per-pair denominator C2(kt − 2).
      */
     private static void accumulateCPU(Tree tree, SimilarityMatrix sm) {
         int kt = tree.leafCount;
-        if (kt < 4) return;   // C2(kt-2) = 0 for kt ≤ 3
-        long den = EulerTourBuilder.c2(kt - 2);
-        accumulateNodeCPU(tree.root, tree, kt, den, sm);
+        if (kt < 4) {
+            // C2(kt-2) = 0 → tree contributes nothing to numerator or denominator
+            // (matches ASTRAL-MP, which skips by virtue of sim and den both being 0).
+            return;
+        }
+
+        long denPerPair = EulerTourBuilder.c2(kt - 2);
+        int n = sm.n;
+        int[] postArr = tree.postorderArray;
+
+        // ── Numerator: scatter across all internal nodes ─────────────────────
+        scatterAtNode(tree.root, tree, kt, sm);
+
+        // ── Denominator: every pair (a, b) co-occurring in T gets += C2(kt-2) ─
+        // ASTRAL-MP accumulates 2·C2(kt-2) in dn[l][r] (doubled by the
+        // mirror-write pattern), then normalizes by dn/2. Equivalent to a
+        // single sum here; the constant factor 2 cancels.
+        for (int i = 0; i < kt; i++) {
+            int a = postArr[i];
+            long rowOff = (long) a * n;
+            for (int j = 0; j < kt; j++) {
+                if (i == j) continue;
+                int b = postArr[j];
+                sm.denSum[(int)(rowOff + b)] += denPerPair;
+            }
+        }
     }
 
-    private static void accumulateNodeCPU(TreeNode node, Tree tree, int kt,
-                                           long den, SimilarityMatrix sm) {
+    /**
+     * Post-order scatter at one internal node.
+     *
+     * Components at u:
+     *   left   = subtree of u.left   (rangeStart_L .. rangeEnd_L)
+     *   right  = subtree of u.right  (rangeStart_R .. rangeEnd_R)
+     *   others = leaves of T outside subtree(u)
+     *            (i.e. positions [0, u.rangeStart) ∪ [u.rangeEnd, kt) in postArr)
+     *
+     * For each ordered component-pair, scatter
+     *   sim = totalPairs − C2(|X|) − C2(|Y|)
+     * to every (l ∈ X, r ∈ Y) leaf pair, symmetrically.
+     */
+    private static void scatterAtNode(TreeNode node, Tree tree, int kt, SimilarityMatrix sm) {
         if (node.isLeaf()) return;
-        accumulateNodeCPU(node.left,  tree, kt, den, sm);
-        accumulateNodeCPU(node.right, tree, kt, den, sm);
+        scatterAtNode(node.left,  tree, kt, sm);
+        scatterAtNode(node.right, tree, kt, sm);
 
-        int subU  = node.rangeEnd   - node.rangeStart;
-        long num  = EulerTourBuilder.c2(kt - subU);   // C2(out[u]) = C2(kt − sub[u])
-        if (num == 0) return;
+        int subL = node.left.rangeEnd  - node.left.rangeStart;
+        int subR = node.right.rangeEnd - node.right.rangeStart;
+        int subU = node.rangeEnd       - node.rangeStart;
+        int subO = kt - subU;                                 // "others" size
 
-        int n   = sm.n;
-        int loL = node.left.rangeStart,  hiL = node.left.rangeEnd;
-        int loR = node.right.rangeStart, hiR = node.right.rangeEnd;
+        long cL = EulerTourBuilder.c2(subL);
+        long cR = EulerTourBuilder.c2(subR);
+        long cO = EulerTourBuilder.c2(subO);
+        long totalPairs = cL + cR + cO;                       // only positive comps survive
 
-        for (int pi = loL; pi < hiL; pi++) {
-            int ta = tree.postorderArray[pi];
-            for (int pj = loR; pj < hiR; pj++) {
-                int tb = tree.postorderArray[pj];
-                sm.numSum[ta * n + tb] += num;
-                sm.numSum[tb * n + ta] += num;
-                sm.denSum[ta * n + tb] += den;
-                sm.denSum[tb * n + ta] += den;
+        int n = sm.n;
+        int[] postArr = tree.postorderArray;
+
+        // ── (left × right): always present ───────────────────────────────────
+        long simLR = totalPairs - cL - cR;
+        if (simLR != 0) {
+            scatterRangeRange(
+                postArr,
+                node.left.rangeStart,  node.left.rangeEnd,
+                node.right.rangeStart, node.right.rangeEnd,
+                simLR, sm.numSum, n);
+        }
+
+        // ── (left × others) and (right × others): only when u is non-root ────
+        if (subO > 0) {
+            long simLO = totalPairs - cL - cO;
+            if (simLO != 0) {
+                scatterRangeOthers(
+                    postArr, kt,
+                    node.left.rangeStart, node.left.rangeEnd,
+                    node.rangeStart,      node.rangeEnd,
+                    simLO, sm.numSum, n);
+            }
+            long simRO = totalPairs - cR - cO;
+            if (simRO != 0) {
+                scatterRangeOthers(
+                    postArr, kt,
+                    node.right.rangeStart, node.right.rangeEnd,
+                    node.rangeStart,       node.rangeEnd,
+                    simRO, sm.numSum, n);
+            }
+        }
+    }
+
+    /** Scatter `sim` to every (a ∈ [aLo,aHi)) × (b ∈ [bLo,bHi)) leaf-pair, both directions. */
+    private static void scatterRangeRange(int[] postArr,
+                                           int aLo, int aHi,
+                                           int bLo, int bHi,
+                                           long sim, double[] numSum, int n) {
+        double sd = (double) sim;
+        for (int pi = aLo; pi < aHi; pi++) {
+            int a = postArr[pi];
+            long rowA = (long) a * n;
+            for (int pj = bLo; pj < bHi; pj++) {
+                int b = postArr[pj];
+                numSum[(int)(rowA + b)] += sd;
+                numSum[b * n + a]       += sd;
+            }
+        }
+    }
+
+    /**
+     * Scatter `sim` to every (a ∈ [aLo,aHi)) × (b ∈ others) leaf-pair, where
+     * others = leaves in T outside [subLo, subHi).
+     */
+    private static void scatterRangeOthers(int[] postArr, int kt,
+                                            int aLo, int aHi,
+                                            int subLo, int subHi,
+                                            long sim, double[] numSum, int n) {
+        double sd = (double) sim;
+        for (int pi = aLo; pi < aHi; pi++) {
+            int a = postArr[pi];
+            long rowA = (long) a * n;
+            for (int pj = 0; pj < subLo; pj++) {
+                int b = postArr[pj];
+                numSum[(int)(rowA + b)] += sd;
+                numSum[b * n + a]       += sd;
+            }
+            for (int pj = subHi; pj < kt; pj++) {
+                int b = postArr[pj];
+                numSum[(int)(rowA + b)] += sd;
+                numSum[b * n + a]       += sd;
             }
         }
     }

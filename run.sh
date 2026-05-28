@@ -105,7 +105,7 @@ while [[ $# -gt 0 ]]; do
       PROGRAM_ARGS+=("$1" "$2")
       shift 2
       ;;
-    --rooted|--unrooted|--no-gpu-batch|--verify-parse|--verify-hash|--verify-clusters|--verify-partitions|--verify-dp|--verify-weights|--verify-distance-matrix|--autocomplete-incomplete-gene-trees|-v|-vv|-vvv|-q|--quiet)
+    --rooted|--unrooted|--no-gpu-batch|--verify-parse|--verify-hash|--verify-clusters|--verify-partitions|--verify-dp|--verify-weights|--verify-distance-matrix|--verify-similarity-matrix|--verify-upgma|--autocomplete-incomplete-gene-trees|-v|-vv|-vvv|-q|--quiet)
       PROGRAM_ARGS+=("$1")
       shift
       ;;

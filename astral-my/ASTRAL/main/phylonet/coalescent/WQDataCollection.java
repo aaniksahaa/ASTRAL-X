@@ -851,11 +851,33 @@ implements Cloneable {
 
 		System.err
 		.print("Calculating distance matrix (for completion of X) ....");
-        this.speciesMatrix = this.geneMatrix.populate( treeAllClusters, 
+        this.speciesMatrix = this.geneMatrix.populate( treeAllClusters,
                 this.originalInompleteGeneTrees,
-                GlobalMaps.taxonNameMap.getSpeciesIdMapper());	
+                GlobalMaps.taxonNameMap.getSpeciesIdMapper());
         Logging.log("");
-        
+
+        // [COMPARISON] Dump similarity matrix to stderr if requested
+        if (System.getProperty("dumpSimMatrix") != null && !this.geneMatrix.isDistance()) {
+            int taxCount = GlobalMaps.taxonIdentifier.taxonCount();
+            System.err.println("ASTRALMP_SIMMAT_BEGIN");
+            System.err.println("n=" + taxCount);
+            StringBuilder taxaLine = new StringBuilder("taxa=");
+            for (int t = 0; t < taxCount; t++) {
+                if (t > 0) taxaLine.append(',');
+                taxaLine.append(GlobalMaps.taxonIdentifier.getTaxonName(t));
+            }
+            System.err.println(taxaLine);
+            for (int r = 0; r < taxCount; r++) {
+                StringBuilder rowLine = new StringBuilder("sim_row" + r + "=");
+                for (int c = 0; c < taxCount; c++) {
+                    if (c > 0) rowLine.append(',');
+                    rowLine.append(String.format("%.8f", this.geneMatrix.get(r, c)));
+                }
+                System.err.println(rowLine);
+            }
+            System.err.println("ASTRALMP_SIMMAT_END");
+        }
+
     }
 
 	/**

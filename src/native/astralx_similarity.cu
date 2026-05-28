@@ -1,30 +1,29 @@
 /**
  * astralx_similarity.cu
  * =====================
- * GPU similarity-matrix computation via Euler tour + sparse-table RMQ.
+ * GPU similarity-matrix computation reproducing ASTRAL-MP's
+ * SimilarityMatrix.populateByQuartetDistance byte-for-byte.
  *
- * FORMULA
- * ───────
- * For gene tree T (kt leaves) and pair (a,b) both present in T:
+ * FORMULA (bridge identity, validated 1141/1141 pairs):
+ *   same_side_T(a, b)  =  C2(kt − 2)  −  QD_T(a, b)
  *
- *   num_T(a,b) = C2(kt − sub[LCA_T(a,b)])
- *   den_T(a,b) = C2(kt − 2)
+ * O(1) closed form for QD via Euler tour + RMQ:
+ *   QD_T(x, y) = ½ · [ (F(x) − F(cx)) + (F(y) − F(cy))
+ *                     + (cxS − 1)·Z + (cyS − 1)·Z ]
+ * where w = LCA(x, y), cx = child of w on x-side, cy = child of w on y-side,
+ *   cxS = s(cx),  cyS = s(cy),   Z = kt − cxS − cyS,
+ *   F(v) the root→v path prefix described in EulerTourBuilder.
  *
- * where sub[v] = number of leaves in subtree(v), and C2(x) = x*(x-1)/2.
- * Pairs with num_T = 0 (i.e., LCA spans ≥ kt−1 leaves) contribute nothing.
+ * O(1) LCA + child-payload query via Euler tour RMQ:
+ *   fa = firstOcc[a],  fb = firstOcc[b];   l = min(fa,fb), r = max(...)
+ *   k_lvl = floor(log2(r − l + 1));  l2 = r − 2^k_lvl + 1
+ *   dL = sparseMin[k_lvl][l];  dR = sparseMin[k_lvl][l2]
+ *   leftWins = (dL <= dR)   (left-biased argmin, matches sparseMin build)
+ *   The selected position is the INTERMEDIATE visit of LCA(x,y), where the
+ *   payload sparse tables hold s(LCA.left), F(LCA.left), s(LCA.right),
+ *   F(LCA.right). The leaf with the smaller firstOcc is in LCA.left.
  *
- * O(1) LCA QUERY via Euler tour RMQ
- * ───────────────────────────────────
- * Given first occurrences fa = firstOcc[a], fb = firstOcc[b]:
- *   l = min(fa, fb),  r = max(fa, fb)
- *   k_lvl = floor(log2(r − l + 1)),  l2 = r − 2^k_lvl + 1
- *   dL = sparseMin[k_lvl][l],  dR = sparseMin[k_lvl][l2]
- *   Left-biased argmin (prefer left on tie):
- *     sub_lca = (dL <= dR) ? sparseSubLC[k_lvl][l] : sparseSubLC[k_lvl][l2]
- *   num = C2(kt - sub_lca)
- *
- * ARCHITECTURE (same as distance matrix)
- * ────────────────────────────────────────
+ * ARCHITECTURE:
  *   Δ-tree batching : tree data on GPU  O(Δ · n · log n)
  *   B×B pair tiling : output tile       O(B²) doubles
  *   No atomics: each thread owns a unique (a,b) cell.
@@ -118,12 +117,6 @@ static void sim_print_progress(int work_done, int total_work, double elapsed,
         } \
     } while(0)
 
-// ── C2 helper (device) ────────────────────────────────────────────────────────
-
-__device__ __forceinline__ long long c2_dev(int x) {
-    return (x < 2) ? 0LL : (long long)x * (x - 1) / 2;
-}
-
 // ── GPU Kernel ────────────────────────────────────────────────────────────────
 
 /**
@@ -133,29 +126,26 @@ __device__ __forceinline__ long long c2_dev(int x) {
  * Global taxa: a = a0+da, b = b0+db.
  *
  * For each tree t in the current batch:
- *   1. Presence check: firstOcc[a] >= 0 && firstOcc[b] >= 0
- *   2. Skip if C2(kt-2) = 0 (kt < 4)
- *   3. O(1) RMQ: find sub_lca via sparseMin/sparseSubLC
- *   4. num = C2(kt - sub_lca);  if num <= 0: skip
- *   5. Accumulate num and den = C2(kt-2)
- *
- * Flat array layout:
- *   sparseMin / sparseSubLC : [delta][LOG][E_max]
- *   eulerDepths / eulerSubLC: [delta][E_max]
- *   firstOcc                : [delta][n]   (-1 absent)
- *   leafCount               : [delta]
+ *   1. Presence check via firstOcc.
+ *   2. Skip if kt < 4 (C2(kt-2) = 0).
+ *   3. O(1) RMQ → LCA's intermediate-position child payloads.
+ *   4. Compute twoQD = 2·QD via the closed form.
+ *   5. ss = C2(kt-2) − twoQD/2;  numAcc += ss;  denAcc += C2(kt-2).
  */
 __global__ void sim_tile_kernel(
-    const short* __restrict__ euler_depths,   // [delta * E_max]
-    const short* __restrict__ euler_sublc,    // [delta * E_max]
-    const short* __restrict__ sparse_min,     // [delta * LOG * E_max]
-    const short* __restrict__ sparse_sublc,   // [delta * LOG * E_max]
-    const int*   __restrict__ first_occ,      // [delta * n]   (-1 absent)
-    const int*   __restrict__ leaf_count,     // [delta]        kt per tree
+    const short*  __restrict__ euler_depths,        // [delta * E_max]
+    const double* __restrict__ euler_F,             // [delta * E_max]
+    const short*  __restrict__ sparse_min,          // [delta * LOG * E_max]
+    const short*  __restrict__ sparse_left_child_s, // [delta * LOG * E_max]
+    const double* __restrict__ sparse_left_child_f, // [delta * LOG * E_max]
+    const short*  __restrict__ sparse_right_child_s,
+    const double* __restrict__ sparse_right_child_f,
+    const int*    __restrict__ first_occ,           // [delta * n]
+    const int*    __restrict__ leaf_count,          // [delta]
     int delta, int n, int E_max, int LOG,
     int a0, int b0, int bA, int bB,
-    double* __restrict__ tile_num,            // [bA * bB] — zeroed before kernel
-    double* __restrict__ tile_den             // [bA * bB] — zeroed before kernel
+    double* __restrict__ tile_num,
+    double* __restrict__ tile_den
 ) {
     int da = blockIdx.x * blockDim.x + threadIdx.x;
     int db = blockIdx.y * blockDim.y + threadIdx.y;
@@ -169,17 +159,16 @@ __global__ void sim_tile_kernel(
     double local_den = 0.0;
 
     for (int t = 0; t < delta; t++) {
-        // ── Presence check ───────────────────────────────────────────────────
         long focc_off = (long)t * n;
         int fa = first_occ[focc_off + a];
         int fb = first_occ[focc_off + b];
         if (fa < 0 || fb < 0) continue;
 
         int kt = leaf_count[t];
-        long long den_val = (long long)(kt - 2) * (kt - 3) / 2;   // C2(kt-2)
-        if (den_val <= 0) continue;
+        long long cc = (long long)(kt - 2) * (kt - 3) / 2;   // C2(kt-2)
+        if (cc <= 0) continue;
 
-        // ── O(1) RMQ: find sub[LCA(a,b)] ────────────────────────────────────
+        // ── O(1) RMQ: select left-biased argmin position ────────────────────
         int l   = (fa < fb) ? fa : fb;
         int r   = (fa < fb) ? fb : fa;
         int len = r - l + 1;
@@ -193,18 +182,41 @@ __global__ void sim_tile_kernel(
         short dL = sparse_min[ol];
         short dR = sparse_min[ol2];
 
-        // Left-biased argmin: prefer left half on tie
-        int sub_lca = (dL <= dR) ? (int)sparse_sublc[ol] : (int)sparse_sublc[ol2];
+        bool pickLeft = (dL <= dR);
+        long pickIdx  = pickLeft ? ol : ol2;
 
-        // ── Compute contribution ─────────────────────────────────────────────
-        long long num_val = c2_dev(kt - sub_lca);
-        if (num_val <= 0) continue;
+        int    leftS = (int)   sparse_left_child_s [pickIdx];
+        double leftF = (double)sparse_left_child_f [pickIdx];
+        int    rightS= (int)   sparse_right_child_s[pickIdx];
+        double rightF= (double)sparse_right_child_f[pickIdx];
 
-        local_num += (double)num_val;
-        local_den += (double)den_val;
+        // Map (leftLeaf, rightLeaf) by tour order back to (a, b).
+        // The leaf with the smaller firstOcc is in the LCA's LEFT child.
+        int    aS;   double aF;
+        int    bS;   double bF;
+        if (fa <= fb) {
+            aS = leftS;   aF = leftF;
+            bS = rightS;  bF = rightF;
+        } else {
+            aS = rightS;  aF = rightF;
+            bS = leftS;   bF = leftF;
+        }
+
+        long ed_off = (long)t * E_max;
+        double Fa = euler_F[ed_off + fa];
+        double Fb = euler_F[ed_off + fb];
+
+        long long Z = (long long)(kt - aS - bS);
+        // twoQD = (Fa - aF) + (Fb - bF) + (aS - 1)*Z + (bS - 1)*Z
+        double twoQD = (Fa - aF) + (Fb - bF)
+                     + (double)((long long)(aS - 1) * Z)
+                     + (double)((long long)(bS - 1) * Z);
+
+        double ss = (double)cc - twoQD * 0.5;     // same-side count
+        local_num += ss;
+        local_den += (double)cc;
     }
 
-    // Write to tile (unique cell per thread — no atomics)
     long tidx = (long)da * bB + db;
     tile_num[tidx] += local_num;
     tile_den[tidx] += local_den;
@@ -217,9 +229,16 @@ Java_astralx_gpu_GPUSimilarityMatrix_computeSimilarityGPU(
     JNIEnv*  env,
     jclass   cls,
     jshortArray  j_euler_depths,
-    jshortArray  j_euler_sublc,
+    jdoubleArray j_euler_F,
+    jshortArray  j_euler_left_child_s,
+    jdoubleArray j_euler_left_child_f,
+    jshortArray  j_euler_right_child_s,
+    jdoubleArray j_euler_right_child_f,
     jshortArray  j_sparse_min,
-    jshortArray  j_sparse_sublc,
+    jshortArray  j_sparse_left_child_s,
+    jdoubleArray j_sparse_left_child_f,
+    jshortArray  j_sparse_right_child_s,
+    jdoubleArray j_sparse_right_child_f,
     jintArray    j_first_occ,
     jintArray    j_euler_len,
     jintArray    j_leaf_count,
@@ -233,45 +252,47 @@ Java_astralx_gpu_GPUSimilarityMatrix_computeSimilarityGPU(
     jdoubleArray j_num_sum_out,
     jdoubleArray j_den_sum_out
 ) {
-    // ── Pin Java arrays ───────────────────────────────────────────────────────
     jboolean isCopy;
-    jshort*  h_euler  = env->GetShortArrayElements(j_euler_depths, &isCopy);
-    jshort*  h_sublc  = env->GetShortArrayElements(j_euler_sublc,  &isCopy);
-    jshort*  h_spmin  = env->GetShortArrayElements(j_sparse_min,   &isCopy);
-    jshort*  h_spsub  = env->GetShortArrayElements(j_sparse_sublc, &isCopy);
-    jint*    h_focc   = env->GetIntArrayElements  (j_first_occ,    &isCopy);
-    jint*    h_elen   = env->GetIntArrayElements  (j_euler_len,    &isCopy);
-    jint*    h_lcount = env->GetIntArrayElements  (j_leaf_count,   &isCopy);
-    jdouble* h_num    = env->GetDoubleArrayElements(j_num_sum_out, &isCopy);
-    jdouble* h_den    = env->GetDoubleArrayElements(j_den_sum_out, &isCopy);
+    jshort*  h_euler   = env->GetShortArrayElements (j_euler_depths,         &isCopy);
+    jdouble* h_eulerF  = env->GetDoubleArrayElements(j_euler_F,              &isCopy);
+    jshort*  h_eLcS    = env->GetShortArrayElements (j_euler_left_child_s,   &isCopy);
+    jdouble* h_eLcF    = env->GetDoubleArrayElements(j_euler_left_child_f,   &isCopy);
+    jshort*  h_eRcS    = env->GetShortArrayElements (j_euler_right_child_s,  &isCopy);
+    jdouble* h_eRcF    = env->GetDoubleArrayElements(j_euler_right_child_f,  &isCopy);
+    jshort*  h_spmin   = env->GetShortArrayElements (j_sparse_min,           &isCopy);
+    jshort*  h_sLcS    = env->GetShortArrayElements (j_sparse_left_child_s,  &isCopy);
+    jdouble* h_sLcF    = env->GetDoubleArrayElements(j_sparse_left_child_f,  &isCopy);
+    jshort*  h_sRcS    = env->GetShortArrayElements (j_sparse_right_child_s, &isCopy);
+    jdouble* h_sRcF    = env->GetDoubleArrayElements(j_sparse_right_child_f, &isCopy);
+    jint*    h_focc    = env->GetIntArrayElements   (j_first_occ,            &isCopy);
+    jint*    h_elen    = env->GetIntArrayElements   (j_euler_len,            &isCopy);
+    jint*    h_lcount  = env->GetIntArrayElements   (j_leaf_count,           &isCopy);
+    jdouble* h_num     = env->GetDoubleArrayElements(j_num_sum_out,          &isCopy);
+    jdouble* h_den     = env->GetDoubleArrayElements(j_den_sum_out,          &isCopy);
 
-    // ── Query free VRAM ───────────────────────────────────────────────────────
     size_t free_vram = 0, total_vram = 0;
     cudaMemGetInfo(&free_vram, &total_vram);
 
-    // ── Determine tile size B ─────────────────────────────────────────────────
     int B = tileSizeB;
     if (B <= 0) {
         B = (int)ceil(sqrt((double)n * numTrees));
         if (B > n) B = n;
     }
-    // Cap: 2·B²·8 ≤ 40% free VRAM
-    while (B > 1 && 2LL * B * B * sizeof(double) > (long long)(free_vram * 0.40)) B /= 2;
+    while (B > 1 && 2LL * B * B * (long long)sizeof(double) > (long long)(free_vram * 0.40)) B /= 2;
     if (B < 1) B = 1;
 
-    // ── Determine tree batch size Δ ───────────────────────────────────────────
     size_t tile_vram = 2ULL * B * B * sizeof(double);
     size_t remaining = (free_vram > tile_vram + 32*1024*1024ULL)
                      ? (size_t)((free_vram - tile_vram) * 0.50)
                      : 16*1024*1024ULL;
 
-    // Per-tree bytes:
-    //   euler:  E_max × (2+2) = E_max × 4
-    //   sparse: LOG × E_max × (2+2) = LOG × E_max × 4
-    //   leaf:   n × 4
-    //   misc:   sizeof(int)
-    size_t per_tree = (size_t)E_max * 4
-                    + (size_t)LOG * E_max * 4
+    // Per-tree bytes: see Java side comment in SimilarityMatrixBuilder.buildGPU.
+    //   euler arrays:  E_max × (2 + 2 + 2 + 8 + 8 + 8) = E_max × 30
+    //   sparse tables: LOG × E_max × (2 + 2 + 2 + 8 + 8) = LOG × E_max × 22
+    //   firstOcc:      n × 4
+    //   leafCount:     4
+    size_t per_tree = (size_t)E_max * 30
+                    + (size_t)LOG * E_max * 22
                     + (size_t)n * 4
                     + sizeof(int);
     int delta = (per_tree > 0) ? (int)(remaining / per_tree) : numTrees;
@@ -294,33 +315,49 @@ Java_astralx_gpu_GPUSimilarityMatrix_computeSimilarityGPU(
         free_vram / 1e6, total_vram / 1e6);
 
     // ── Allocate GPU tree-data buffers ────────────────────────────────────────
-    short* d_euler  = nullptr;
-    short* d_sublc  = nullptr;
-    short* d_spmin  = nullptr;
-    short* d_spsub  = nullptr;
-    int*   d_focc   = nullptr;
-    int*   d_lcount = nullptr;
+    short*  d_euler   = nullptr;
+    double* d_eulerF  = nullptr;
+    short*  d_eLcS    = nullptr;
+    double* d_eLcF    = nullptr;
+    short*  d_eRcS    = nullptr;
+    double* d_eRcF    = nullptr;
+    short*  d_spmin   = nullptr;
+    short*  d_sLcS    = nullptr;
+    double* d_sLcF    = nullptr;
+    short*  d_sRcS    = nullptr;
+    double* d_sRcF    = nullptr;
+    int*    d_focc    = nullptr;
+    int*    d_lcount  = nullptr;
 
-    SIM_CUDA_CHECK(cudaMalloc(&d_euler,  (long long)delta * E_max * sizeof(short)));
-    SIM_CUDA_CHECK(cudaMalloc(&d_sublc,  (long long)delta * E_max * sizeof(short)));
-    SIM_CUDA_CHECK(cudaMalloc(&d_spmin,  (long long)delta * LOG * E_max * sizeof(short)));
-    SIM_CUDA_CHECK(cudaMalloc(&d_spsub,  (long long)delta * LOG * E_max * sizeof(short)));
+    long long sz_short_e  = (long long)delta * E_max * sizeof(short);
+    long long sz_double_e = (long long)delta * E_max * sizeof(double);
+    long long sz_short_s  = (long long)delta * LOG * E_max * sizeof(short);
+    long long sz_double_s = (long long)delta * LOG * E_max * sizeof(double);
+
+    SIM_CUDA_CHECK(cudaMalloc(&d_euler,  sz_short_e));
+    SIM_CUDA_CHECK(cudaMalloc(&d_eulerF, sz_double_e));
+    SIM_CUDA_CHECK(cudaMalloc(&d_eLcS,   sz_short_e));
+    SIM_CUDA_CHECK(cudaMalloc(&d_eLcF,   sz_double_e));
+    SIM_CUDA_CHECK(cudaMalloc(&d_eRcS,   sz_short_e));
+    SIM_CUDA_CHECK(cudaMalloc(&d_eRcF,   sz_double_e));
+    SIM_CUDA_CHECK(cudaMalloc(&d_spmin,  sz_short_s));
+    SIM_CUDA_CHECK(cudaMalloc(&d_sLcS,   sz_short_s));
+    SIM_CUDA_CHECK(cudaMalloc(&d_sLcF,   sz_double_s));
+    SIM_CUDA_CHECK(cudaMalloc(&d_sRcS,   sz_short_s));
+    SIM_CUDA_CHECK(cudaMalloc(&d_sRcF,   sz_double_s));
     SIM_CUDA_CHECK(cudaMalloc(&d_focc,   (long long)delta * n * sizeof(int)));
     SIM_CUDA_CHECK(cudaMalloc(&d_lcount, delta * sizeof(int)));
 
-    // ── Allocate GPU tile buffers ─────────────────────────────────────────────
     double* d_tile_num = nullptr;
     double* d_tile_den = nullptr;
     SIM_CUDA_CHECK(cudaMalloc(&d_tile_num, (long long)B * B * sizeof(double)));
     SIM_CUDA_CHECK(cudaMalloc(&d_tile_den, (long long)B * B * sizeof(double)));
 
-    // Pinned host tile buffers for fast DMA download
     double* h_tile_num = nullptr;
     double* h_tile_den = nullptr;
     SIM_CUDA_CHECK(cudaMallocHost(&h_tile_num, (long long)B * B * sizeof(double)));
     SIM_CUDA_CHECK(cudaMallocHost(&h_tile_den, (long long)B * B * sizeof(double)));
 
-    // ── Progress tracking ─────────────────────────────────────────────────────
     int    total_work       = num_batches * num_tiles;
     int    work_done        = 0;
     double t_start          = sim_now_sec();
@@ -329,27 +366,29 @@ Java_astralx_gpu_GPUSimilarityMatrix_computeSimilarityGPU(
     const bool step_mode    = (progressMaxSteps > 0);
     int    use_color        = sim_use_color();
 
-    // ── Outer loop: tree batches ──────────────────────────────────────────────
     for (int t0 = 0; t0 < numTrees; t0 += delta) {
         int dt = (t0 + delta > numTrees) ? numTrees - t0 : delta;
 
-        // Upload euler arrays
-        SIM_CUDA_CHECK(cudaMemcpy(d_euler,
-            h_euler + (long long)t0 * E_max,
-            (long long)dt * E_max * sizeof(short), cudaMemcpyHostToDevice));
-        SIM_CUDA_CHECK(cudaMemcpy(d_sublc,
-            h_sublc + (long long)t0 * E_max,
-            (long long)dt * E_max * sizeof(short), cudaMemcpyHostToDevice));
+        long long off_e = (long long)t0 * E_max;
+        long long bytes_short_e  = (long long)dt * E_max * sizeof(short);
+        long long bytes_double_e = (long long)dt * E_max * sizeof(double);
+        long long off_s = (long long)t0 * LOG * E_max;
+        long long bytes_short_s  = (long long)dt * LOG * E_max * sizeof(short);
+        long long bytes_double_s = (long long)dt * LOG * E_max * sizeof(double);
 
-        // Upload sparse tables
-        SIM_CUDA_CHECK(cudaMemcpy(d_spmin,
-            h_spmin + (long long)t0 * LOG * E_max,
-            (long long)dt * LOG * E_max * sizeof(short), cudaMemcpyHostToDevice));
-        SIM_CUDA_CHECK(cudaMemcpy(d_spsub,
-            h_spsub + (long long)t0 * LOG * E_max,
-            (long long)dt * LOG * E_max * sizeof(short), cudaMemcpyHostToDevice));
+        SIM_CUDA_CHECK(cudaMemcpy(d_euler,  h_euler  + off_e, bytes_short_e,  cudaMemcpyHostToDevice));
+        SIM_CUDA_CHECK(cudaMemcpy(d_eulerF, h_eulerF + off_e, bytes_double_e, cudaMemcpyHostToDevice));
+        SIM_CUDA_CHECK(cudaMemcpy(d_eLcS,   h_eLcS   + off_e, bytes_short_e,  cudaMemcpyHostToDevice));
+        SIM_CUDA_CHECK(cudaMemcpy(d_eLcF,   h_eLcF   + off_e, bytes_double_e, cudaMemcpyHostToDevice));
+        SIM_CUDA_CHECK(cudaMemcpy(d_eRcS,   h_eRcS   + off_e, bytes_short_e,  cudaMemcpyHostToDevice));
+        SIM_CUDA_CHECK(cudaMemcpy(d_eRcF,   h_eRcF   + off_e, bytes_double_e, cudaMemcpyHostToDevice));
 
-        // Upload leaf maps
+        SIM_CUDA_CHECK(cudaMemcpy(d_spmin, h_spmin + off_s, bytes_short_s,  cudaMemcpyHostToDevice));
+        SIM_CUDA_CHECK(cudaMemcpy(d_sLcS,  h_sLcS  + off_s, bytes_short_s,  cudaMemcpyHostToDevice));
+        SIM_CUDA_CHECK(cudaMemcpy(d_sLcF,  h_sLcF  + off_s, bytes_double_s, cudaMemcpyHostToDevice));
+        SIM_CUDA_CHECK(cudaMemcpy(d_sRcS,  h_sRcS  + off_s, bytes_short_s,  cudaMemcpyHostToDevice));
+        SIM_CUDA_CHECK(cudaMemcpy(d_sRcF,  h_sRcF  + off_s, bytes_double_s, cudaMemcpyHostToDevice));
+
         SIM_CUDA_CHECK(cudaMemcpy(d_focc,
             h_focc + (long long)t0 * n,
             (long long)dt * n * sizeof(int), cudaMemcpyHostToDevice));
@@ -357,23 +396,21 @@ Java_astralx_gpu_GPUSimilarityMatrix_computeSimilarityGPU(
             h_lcount + t0,
             dt * sizeof(int), cudaMemcpyHostToDevice));
 
-        // ── Inner loop: B×B pair tiles (upper triangle) ───────────────────────
         for (int a0 = 0; a0 < n; a0 += B) {
             int bA = (a0 + B > n) ? n - a0 : B;
             for (int b0 = a0; b0 < n; b0 += B) {
                 int bB_tile = (b0 + B > n) ? n - b0 : B;
 
-                // Zero tile accumulators
                 SIM_CUDA_CHECK(cudaMemset(d_tile_num, 0,
                     (long long)bA * bB_tile * sizeof(double)));
                 SIM_CUDA_CHECK(cudaMemset(d_tile_den, 0,
                     (long long)bA * bB_tile * sizeof(double)));
 
-                // Launch kernel: 32×32 thread blocks
                 dim3 block(32, 32);
                 dim3 grid((bA + 31) / 32, (bB_tile + 31) / 32);
                 sim_tile_kernel<<<grid, block>>>(
-                    d_euler, d_sublc, d_spmin, d_spsub,
+                    d_euler, d_eulerF,
+                    d_spmin, d_sLcS, d_sLcF, d_sRcS, d_sRcF,
                     d_focc, d_lcount,
                     dt, n, E_max, LOG,
                     a0, b0, bA, bB_tile,
@@ -381,13 +418,11 @@ Java_astralx_gpu_GPUSimilarityMatrix_computeSimilarityGPU(
                 );
                 SIM_CUDA_CHECK(cudaDeviceSynchronize());
 
-                // Download tile
                 SIM_CUDA_CHECK(cudaMemcpy(h_tile_num, d_tile_num,
                     (long long)bA * bB_tile * sizeof(double), cudaMemcpyDeviceToHost));
                 SIM_CUDA_CHECK(cudaMemcpy(h_tile_den, d_tile_den,
                     (long long)bA * bB_tile * sizeof(double), cudaMemcpyDeviceToHost));
 
-                // CPU: merge tile into full n×n arrays (symmetric)
                 for (int da = 0; da < bA; da++) {
                     int a = a0 + da;
                     for (int db = 0; db < bB_tile; db++) {
@@ -402,7 +437,6 @@ Java_astralx_gpu_GPUSimilarityMatrix_computeSimilarityGPU(
                     }
                 }
 
-                // Progress
                 work_done++;
                 double now = sim_now_sec();
                 double pct = (total_work > 0) ? 100.0 * work_done / total_work : 100.0;
@@ -419,22 +453,30 @@ Java_astralx_gpu_GPUSimilarityMatrix_computeSimilarityGPU(
         }
     }
 
-    // ── Release GPU buffers ───────────────────────────────────────────────────
-    cudaFree(d_euler);  cudaFree(d_sublc);
-    cudaFree(d_spmin);  cudaFree(d_spsub);
+    cudaFree(d_euler);  cudaFree(d_eulerF);
+    cudaFree(d_eLcS);   cudaFree(d_eLcF);
+    cudaFree(d_eRcS);   cudaFree(d_eRcF);
+    cudaFree(d_spmin);
+    cudaFree(d_sLcS);   cudaFree(d_sLcF);
+    cudaFree(d_sRcS);   cudaFree(d_sRcF);
     cudaFree(d_focc);   cudaFree(d_lcount);
     cudaFree(d_tile_num); cudaFree(d_tile_den);
     cudaFreeHost(h_tile_num); cudaFreeHost(h_tile_den);
 
-    // ── Release Java array references ─────────────────────────────────────────
-    env->ReleaseShortArrayElements(j_euler_depths, h_euler,  JNI_ABORT);
-    env->ReleaseShortArrayElements(j_euler_sublc,  h_sublc,  JNI_ABORT);
-    env->ReleaseShortArrayElements(j_sparse_min,   h_spmin,  JNI_ABORT);
-    env->ReleaseShortArrayElements(j_sparse_sublc, h_spsub,  JNI_ABORT);
-    env->ReleaseIntArrayElements  (j_first_occ,    h_focc,   JNI_ABORT);
-    env->ReleaseIntArrayElements  (j_euler_len,    h_elen,   JNI_ABORT);
-    env->ReleaseIntArrayElements  (j_leaf_count,   h_lcount, JNI_ABORT);
-    // Commit output arrays back to Java
+    env->ReleaseShortArrayElements (j_euler_depths,        h_euler,  JNI_ABORT);
+    env->ReleaseDoubleArrayElements(j_euler_F,             h_eulerF, JNI_ABORT);
+    env->ReleaseShortArrayElements (j_euler_left_child_s,  h_eLcS,   JNI_ABORT);
+    env->ReleaseDoubleArrayElements(j_euler_left_child_f,  h_eLcF,   JNI_ABORT);
+    env->ReleaseShortArrayElements (j_euler_right_child_s, h_eRcS,   JNI_ABORT);
+    env->ReleaseDoubleArrayElements(j_euler_right_child_f, h_eRcF,   JNI_ABORT);
+    env->ReleaseShortArrayElements (j_sparse_min,          h_spmin,  JNI_ABORT);
+    env->ReleaseShortArrayElements (j_sparse_left_child_s, h_sLcS,   JNI_ABORT);
+    env->ReleaseDoubleArrayElements(j_sparse_left_child_f, h_sLcF,   JNI_ABORT);
+    env->ReleaseShortArrayElements (j_sparse_right_child_s,h_sRcS,   JNI_ABORT);
+    env->ReleaseDoubleArrayElements(j_sparse_right_child_f,h_sRcF,   JNI_ABORT);
+    env->ReleaseIntArrayElements   (j_first_occ,           h_focc,   JNI_ABORT);
+    env->ReleaseIntArrayElements   (j_euler_len,           h_elen,   JNI_ABORT);
+    env->ReleaseIntArrayElements   (j_leaf_count,          h_lcount, JNI_ABORT);
     env->ReleaseDoubleArrayElements(j_num_sum_out, h_num, 0);
     env->ReleaseDoubleArrayElements(j_den_sum_out, h_den, 0);
 }
