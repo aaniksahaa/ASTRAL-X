@@ -83,7 +83,7 @@ bash test/simmat_comparison/run_simmat_tests.sh --no-gen --mode gpu
 bash test/simmat_comparison/run_upgma_tests.sh
 
 
-
+ 
 
 python3 test/simmat_comparison/compare_completed_trees.py \
   simphy/data/t_200_g_100_sb_0.000001_spmin_100000_spmax_200000_incomplete/R1/all_gt.tre
