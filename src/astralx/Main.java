@@ -216,10 +216,11 @@ public class Main {
                                              pref, hasher, similarityMatrix, cfg.getOutputFile());
                 return;
             }
-            long t35 = PhaseLogger.begin("Phase 3.5 Greedy consensus build", false);
+            long t35 = PhaseLogger.begin("Phase 3.5 Greedy consensus build + polytomy resolution", false);
             GreedyConsensus.Result gcResult =
-                GreedyConsensus.build(clusterTable, geneTreesForGreedy, pref, hasher, registry.size());
-            PhaseLogger.end("Phase 3.5 Greedy consensus build", t35, false);
+                GreedyConsensus.build(clusterTable, geneTreesForGreedy, pref, hasher,
+                                       similarityMatrix, registry.size());
+            PhaseLogger.end("Phase 3.5 Greedy consensus build + polytomy resolution", t35, false);
             // gcResult.snapshots are consumed by Part II (polytomy resolution → X)
             // — wiring to that phase will land in a follow-up commit.
             @SuppressWarnings("unused")

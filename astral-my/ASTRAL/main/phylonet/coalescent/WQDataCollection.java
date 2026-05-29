@@ -1476,6 +1476,20 @@ implements Cloneable {
 					movedChildren.remove(0);
 				}
 
+				// === ASTRAL-X head-to-head dump: log the full-taxa side of this
+				//     Step B accepted bipartition before it goes into X. ===
+				{
+					BitSet __full = new BitSet(tid.taxonCount());
+					for (int __i = newbs.nextSetBit(0); __i >= 0; __i = newbs.nextSetBit(__i+1)) {
+						__full.or(polytomyBSList[__i]);
+					}
+					java.util.TreeSet<String> __names = new java.util.TreeSet<String>();
+					for (int __j = __full.nextSetBit(0); __j >= 0; __j = __full.nextSetBit(__j+1)) {
+						__names.add(tid.getTaxonName(__j));
+					}
+					Logging.log("[STEPB_EMIT] size=" + __full.cardinality()
+							+ " {" + String.join(",", __names) + "}");
+				}
 				if (addDoubleSubSampledBitSetToX(polytomyBSList, newbs, tid)) {
 					if (GREEDY_ADDITION_MIN_RATIO <= (entry.getValue() + 0.0)
 							/ inputTrees.size()

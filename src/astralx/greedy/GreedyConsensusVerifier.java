@@ -198,48 +198,53 @@ public final class GreedyConsensusVerifier {
             }
         }
 
-        // ── §8.3 Step A: per-polytomy UPGMA on group similarity matrix ──
-        out.printf("%n--- Polytomy resolution: Step A (UPGMA on group sim) ---%n");
+        // ── §8.3 + §8.4 + §10: per-polytomy Step A + Step B in parallel ──
+        out.printf("%n--- Polytomy resolution: Step A + Step B (parallel, LPT) ---%n");
         if (sim == null) {
             out.println("SKIPPED — SimilarityMatrix not available "
                 + "(--autocomplete-incomplete-gene-trees was off).");
         } else {
             EmissionBuffer buffer = new EmissionBuffer();
-            int totalNewSignatures = 0;
-            for (PolytomyTask task : pool.tasks) {
-                totalNewSignatures += PolytomyResolver.stepA(task, sim, buffer, n);
-            }
-            out.printf("Polytomies processed:  %d%n", pool.tasks.size());
-            out.printf("New signatures added:  %d%n", totalNewSignatures);
-            out.printf("Buffer size (deduped): %d%n", buffer.size());
+            long t0 = System.nanoTime();
+            int total = PolytomyResolver.runAllParallel(
+                pool.tasks, geneTrees, sim, buffer, n, /*baseSeed=*/692L);
+            long ms = (System.nanoTime() - t0) / 1_000_000;
 
-            // How many of these are already in the gene-tree X?
+            int countA = 0, countB = 0;
+            for (EmittedBipartition b : buffer.all()) {
+                if (b.source == 'A') countA++;
+                else if (b.source == 'B') countB++;
+            }
+            out.printf("Polytomies processed:                %d%n", pool.tasks.size());
+            out.printf("Total emissions (raw, sum A+B):      %d%n", total);
+            out.printf("Buffer Step A signatures (deduped):  %d%n", countA);
+            out.printf("Buffer Step B signatures (deduped):  %d%n", countB);
+            out.printf("Buffer A∪B (deduped):                %d%n", buffer.size());
+            out.printf("Parallel dispatch time:              %d ms%n", ms);
+
             int alreadyInX = 0;
             for (EmittedBipartition b : buffer.all()) {
                 if (clusterTable.contains(b.signature)) alreadyInX++;
             }
-            out.printf("Already in ClusterTable: %d  /  net-new: %d%n",
+            out.printf("Already in ClusterTable:             %d  /  net-new: %d%n",
                 alreadyInX, buffer.size() - alreadyInX);
 
-            // Dump the emitted taxa sets (canonical sorted) so they can be
-            // diffed against an ASTRAL-MP dump.
-            out.printf("%n--- Emitted bipartitions (canonical taxa sets) ---%n");
-            List<String> lines = new ArrayList<>(buffer.size());
+            // Dump A and B emissions separately so they can be diffed against ASTRAL-MP.
+            out.printf("%n--- Step A bipartitions (canonical taxa sets) ---%n");
+            List<String> linesA = new ArrayList<>();
             for (EmittedBipartition b : buffer.all()) {
-                StringBuilder sb = new StringBuilder("[STEPA] ti=");
-                sb.append(b.thresholdIndex).append("  size=").append(b.size).append("  {");
-                java.util.TreeSet<String> taxa = new java.util.TreeSet<>();
-                int[] arr = b.canonicalSide.tree.aCons();
-                for (int r = 0; r < b.canonicalSide.numRanges(); r++) {
-                    for (int p = b.canonicalSide.los[r]; p < b.canonicalSide.his[r]; p++) {
-                        taxa.add(registry.getName(arr[p]));
-                    }
-                }
-                sb.append(String.join(",", taxa)).append('}');
-                lines.add(sb.toString());
+                if (b.source == 'A') linesA.add(taxaSetLine("STEPA", b, registry));
             }
-            java.util.Collections.sort(lines);
-            for (String l : lines) out.println(l);
+            java.util.Collections.sort(linesA);
+            for (String l : linesA) out.println(l);
+
+            out.printf("%n--- Step B bipartitions (canonical taxa sets) ---%n");
+            List<String> linesB = new ArrayList<>();
+            for (EmittedBipartition b : buffer.all()) {
+                if (b.source == 'B') linesB.add(taxaSetLine("STEPB", b, registry));
+            }
+            java.util.Collections.sort(linesB);
+            for (String l : linesB) out.println(l);
         }
 
         out.printf("%n--- Newick (for ASTRAL-MP head-to-head) ---%n");
@@ -261,6 +266,21 @@ public final class GreedyConsensusVerifier {
         }
 
         if (outFile != null) out.close();
+    }
+
+    /** Build "[TAG] ti=... size=... {taxa}" line for one emission. */
+    private static String taxaSetLine(String tag, EmittedBipartition b, TaxonRegistry registry) {
+        StringBuilder sb = new StringBuilder("[").append(tag).append("] ti=");
+        sb.append(b.thresholdIndex).append("  size=").append(b.size).append("  {");
+        java.util.TreeSet<String> taxa = new java.util.TreeSet<>();
+        int[] arr = b.canonicalSide.tree.aCons();
+        for (int r = 0; r < b.canonicalSide.numRanges(); r++) {
+            for (int p = b.canonicalSide.los[r]; p < b.canonicalSide.his[r]; p++) {
+                taxa.add(registry.getName(arr[p]));
+            }
+        }
+        sb.append(String.join(",", taxa)).append('}');
+        return sb.toString();
     }
 
     /** Print up to a few diff lines so a mismatch isn't a wall of text. */

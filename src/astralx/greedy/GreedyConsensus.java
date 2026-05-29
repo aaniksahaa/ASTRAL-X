@@ -2,6 +2,7 @@ package astralx.greedy;
 
 import astralx.Logging;
 import astralx.cluster.ClusterTable;
+import astralx.completion.SimilarityMatrix;
 import astralx.hash.PrefixHashArrays;
 import astralx.hash.TaxonHasher;
 import astralx.tree.Tree;
@@ -32,17 +33,23 @@ public final class GreedyConsensus {
         public final int numSkippedTrivial;
         public final int numSkippedRedundant;
         public final int numRejectedCrossCut;
+        /** Part II emissions (Step A + Step B) — may be empty when {@code sim} is null. */
+        public final EmissionBuffer emissions;
+        public final PolytomyPool   pool;
 
         Result(ConsensusTree[] snapshots,
                int numBipartitions, int numAccepted,
                int numSkippedTrivial, int numSkippedRedundant,
-               int numRejectedCrossCut) {
+               int numRejectedCrossCut,
+               EmissionBuffer emissions, PolytomyPool pool) {
             this.snapshots           = snapshots;
             this.numBipartitions     = numBipartitions;
             this.numAccepted         = numAccepted;
             this.numSkippedTrivial   = numSkippedTrivial;
             this.numSkippedRedundant = numSkippedRedundant;
             this.numRejectedCrossCut = numRejectedCrossCut;
+            this.emissions           = emissions;
+            this.pool                = pool;
         }
     }
 
@@ -62,9 +69,16 @@ public final class GreedyConsensus {
      *                      arrays produce signatures comparable across sources
      * @param numTaxa       n
      */
+    /**
+     * @param sim  species similarity matrix (Phase 1b output); pass {@code null}
+     *             when {@code --autocomplete} is off — Step A and Step B's
+     *             resolveByDistance phase are then skipped, Step B's
+     *             resolveLinearly still runs.  Pass non-null and the polytomy
+     *             pool is resolved in parallel via {@link PolytomyResolver#runAllParallel}.
+     */
     public static Result build(ClusterTable clusterTable, List<Tree> geneTrees,
                                 PrefixHashArrays pref, TaxonHasher hasher,
-                                int numTaxa) {
+                                SimilarityMatrix sim, int numTaxa) {
         long t0 = System.nanoTime();
         int k = geneTrees.size();
         if (k <= 0) {
@@ -115,9 +129,9 @@ public final class GreedyConsensus {
             ti--;
         }
 
-        long ms = (System.nanoTime() - t0) / 1_000_000;
-        Logging.info("Greedy consensus: %d bps, INSERT: %d accept / %d redundant / %d cross-cut / %d trivial (%d ms)",
-            bps.size(), accepted, skippedRed, rejected, skippedTriv, ms);
+        long buildMs = (System.nanoTime() - t0) / 1_000_000;
+        Logging.info("Greedy consensus build: %d bps, INSERT: %d accept / %d redundant / %d cross-cut / %d trivial (%d ms)",
+            bps.size(), accepted, skippedRed, rejected, skippedTriv, buildMs);
         if (Logging.isDebug()) {
             for (int i = 0; i < snapshots.length; i++) {
                 ConsensusTree s = snapshots[i];
@@ -126,8 +140,30 @@ public final class GreedyConsensus {
             }
         }
 
+        // ── Part II: polytomy resolution (Step A + Step B) in parallel ────
+        long t2 = System.nanoTime();
+        PolytomyPool   pool      = PolytomyPool.build(snapshots, numTaxa, /*explicitLimit=*/0);
+        EmissionBuffer emissions = new EmissionBuffer();
+        PolytomyResolver.runAllParallel(
+            pool.tasks, geneTrees, sim, emissions, numTaxa, /*baseSeed=*/692L);
+        long resolveMs = (System.nanoTime() - t2) / 1_000_000;
+
+        int countA = 0, countB = 0;
+        for (EmittedBipartition b : emissions.all()) {
+            if (b.source == 'A') countA++;
+            else if (b.source == 'B') countB++;
+        }
+        Logging.info("Greedy consensus polytomy phase: %d tasks (%d skipped), "
+                + "size-limit=%d, emissions: %d A + %d B = %d unique (%d ms)",
+            pool.numAccepted, pool.numSkipped, pool.sizeLimit,
+            countA, countB, emissions.size(), resolveMs);
+        if (sim == null) {
+            Logging.info("  Step A (UPGMA on group sim) was SKIPPED — no SimilarityMatrix available");
+        }
+
         return new Result(snapshots, bps.size(),
-            accepted, skippedTriv, skippedRed, rejected);
+            accepted, skippedTriv, skippedRed, rejected,
+            emissions, pool);
     }
 
     private GreedyConsensus() {}
