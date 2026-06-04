@@ -95,12 +95,71 @@
   --opts "--search-mode local -vv" \
   --reference-species-tree data/avian-363/ref-paper-st-63K.tre
 
+
 # incomplete full
 ./run-astralx-with-monitor.sh \
   -i data/avian-363/63430.gene.trees \
   -o data/avian-363/out-astralx-avian-363-incomplete-full.tre \
   --opts "--search-mode full -vv" \
   --reference-species-tree data/avian-363/ref-paper-st-63K.tre
+
+
+
+############ 1kp
+
+# complete local
+./run-astralx-with-monitor.sh \
+  -i data/1kp/Best.33.FAA_cleaned-og-33.tre \
+  -o data/1kp/out-astralx-1kp-33-complete-local.tre \
+  --opts "--search-mode local -vv --autocomplete-incomplete-gene-trees" \
+  --reference-species-tree data/1kp/1kp-st-33-astral.tre
+
+# complete full
+./run-astralx-with-monitor.sh \
+  -i data/1kp/Best.33.FAA_cleaned-og-33.tre \
+  -o data/1kp/out-astralx-1kp-33-complete-full.tre \
+  --opts "--search-mode full -vv --autocomplete-incomplete-gene-trees" \
+  --reference-species-tree data/1kp/1kp-st-33-astral.tre
+
+# incomplete local
+./run-astralx-with-monitor.sh \
+  -i data/1kp/Best.33.FAA_cleaned-og-33.tre \
+  -o data/1kp/out-astralx-1kp-33-incomplete-local.tre \
+  --opts "--search-mode local -vv" \
+  --reference-species-tree data/1kp/1kp-st-33-astral.tre
+
+# incomplete full
+./run-astralx-with-monitor.sh \
+  -i data/1kp/Best.33.FAA_cleaned-og-33.tre \
+  -o data/1kp/out-astralx-1kp-33-incomplete-full.tre \
+  --opts "--search-mode full -vv" \
+  --reference-species-tree data/1kp/1kp-st-33-astral.tre
+
+
+###############################################################################
+# A10K runs
+###############################################################################
+
+# Estimated gene trees, both local and full search
+./run-a10k.sh --data-dir data/10k-astral-dataset --tree-type estimated --opts-list "--search-mode local;--search-mode full"
+
+
+# Estimated gene trees, one setting
+./run-a10k.sh --data-dir data/10k-astral-dataset --tree-type estimated --opts "--search-mode full"
+
+# Estimated gene trees, both local and full search
+./run-a10k.sh --data-dir data/10k-astral-dataset --tree-type estimated --opts-list "--search-mode local;--search-mode full"
+
+# Estimated gene trees, selected replicate range
+./run-a10k.sh --data-dir data/10k-astral-dataset --tree-type estimated --start-rep 1 --end-rep 5 --opts "--search-mode full"
+
+# True gene trees, selected replicate list
+./run-a10k.sh --data-dir data/10k-astral-dataset --tree-type true --replicates "R1,R3,R5" --opts "--search-mode local"
+
+# True gene trees, selected replicate list, both settings
+./run-a10k.sh --data-dir data/10k-astral-dataset --tree-type true --replicates "R1,R3,R5" --opts-list "--search-mode local;--search-mode full"
+
+
 
 
 
