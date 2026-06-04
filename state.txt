@@ -1,0 +1,8 @@
+so in this version, 
+n = 25K fails, since it exceeds shared memory where the per candidate prefix arrays are currently being stored.
+
+the fix is to also keep an alternate path where if exceeds, it will be kept in global memory instead. 
+
+we will move onto that... 
+
+
