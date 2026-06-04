@@ -130,40 +130,28 @@ __device__ void buildPrefix(
 }
 
 // ---------------------------------------------------------------------------
-// Main kernel: one block per split in the current batch.
+// Score one split.  pA/pB are the two prefix buffers (in shared memory for the
+// fast path, or in a per-block global slot for the large-L path); scan is the
+// WB_BLOCK-int scratch used by buildPrefix (always in shared memory).
+//
+// Called once per block (shared mode) or repeatedly via a grid-stride loop
+// (global mode).  Issues __syncthreads, so all threads must call it uniformly.
 // ---------------------------------------------------------------------------
-__global__ void computeWeightsKernel(
-    const int* __restrict__ splits,        // curBatch * 10
-    const int* __restrict__ nodeData,      // totalNodes * 3
-    const int* __restrict__ nodeOffset,    // numPartTrees + 1
-    const int* __restrict__ partLeafCount, // numPartTrees
-    const int* __restrict__ orderings,     // numGpuTrees * numTaxa
-    const int* __restrict__ invIndex,      // numGpuTrees * numTaxa
-    int curBatch,
-    int numPartTrees,
-    int partTreeOffset,
-    int maxLeafCount,
-    int numTaxa,
-    int totalN,
-    long long* __restrict__ twoScores      // output: curBatch entries
-)
+__device__ void scoreSplit(
+    int s,
+    const int* __restrict__ splits,
+    const int* __restrict__ nodeData,
+    const int* __restrict__ nodeOffset,
+    const int* __restrict__ partLeafCount,
+    const int* __restrict__ orderings,
+    const int* __restrict__ invIndex,
+    int numPartTrees, int partTreeOffset, int numTaxa, int totalN,
+    int* __restrict__ pA, int* __restrict__ pB, int* __restrict__ scan,
+    int tid, int nthreads,
+    long long* __restrict__ twoScores)
 {
-    int s = blockIdx.x;
-    if (s >= curBatch) return;
-
-    int tid      = threadIdx.x;
-    int nthreads = blockDim.x;
-
-    // Shared layout: pA[maxLeafCount+1], pB[maxLeafCount+1], scan[WB_BLOCK]
-    extern __shared__ int smem[];
-    int stride = maxLeafCount + 1;
-    int* pA   = smem;
-    int* pB   = smem + stride;
-    int* scan = smem + 2 * stride;
-
     __shared__ long long red[WB_BLOCK];
 
-    // Load split.
     const int* sp = splits + (size_t)s * 10;
     int aTree = sp[0], aLo = sp[1], aHi = sp[2], aComp = sp[3], aSize = sp[4];
     int bTree = sp[5], bLo = sp[6], bHi = sp[7], bComp = sp[8], bSize = sp[9];
@@ -171,7 +159,7 @@ __global__ void computeWeightsKernel(
     // Invalid / overlapping split → zero (defensive; real DP splits are disjoint).
     if (aSize + bSize > totalN) {
         if (tid == 0) twoScores[s] = 0LL;
-        return;
+        return;   // uniform across the block (same aSize/bSize for all threads)
     }
 
     size_t aBase = (size_t)aTree * numTaxa;
@@ -244,6 +232,62 @@ __global__ void computeWeightsKernel(
         __syncthreads();
     }
     if (tid == 0) twoScores[s] = red[0];
+    __syncthreads();   // red fully consumed before a global-mode reuse
+}
+
+// ---------------------------------------------------------------------------
+// Main kernel.
+//   GLOBAL=false : prefix buffers live in dynamic shared memory; one block per
+//                  split (grid = curBatch).  Fast path, capped at L that fits.
+//   GLOBAL=true  : prefix buffers live in a per-block slot of gPrefix (global
+//                  memory); grid is capped to the resident-block count and each
+//                  block grid-strides over splits.  Large-L path, bounded VRAM.
+//
+// Dynamic shared layout:
+//   GLOBAL=false : pA[stride], pB[stride], scan[WB_BLOCK]
+//   GLOBAL=true  : scan[WB_BLOCK]                       (pA/pB in gPrefix)
+// ---------------------------------------------------------------------------
+template<bool GLOBAL>
+__global__ void computeWeightsKernel(
+    const int* __restrict__ splits,
+    const int* __restrict__ nodeData,
+    const int* __restrict__ nodeOffset,
+    const int* __restrict__ partLeafCount,
+    const int* __restrict__ orderings,
+    const int* __restrict__ invIndex,
+    int curBatch,
+    int numPartTrees,
+    int partTreeOffset,
+    int prefixStride,                      // = maxLeafCount + 1
+    int numTaxa,
+    int totalN,
+    int* __restrict__ gPrefix,             // global prefix pool (GLOBAL only)
+    long long* __restrict__ twoScores)
+{
+    extern __shared__ int smem[];
+    int tid      = threadIdx.x;
+    int nthreads = blockDim.x;
+
+    if (GLOBAL) {
+        int* scan = smem;
+        int* pA   = gPrefix + (size_t)blockIdx.x * 2 * prefixStride;
+        int* pB   = pA + prefixStride;
+        for (int s = blockIdx.x; s < curBatch; s += gridDim.x) {
+            scoreSplit(s, splits, nodeData, nodeOffset, partLeafCount,
+                       orderings, invIndex, numPartTrees, partTreeOffset,
+                       numTaxa, totalN, pA, pB, scan, tid, nthreads, twoScores);
+        }
+    } else {
+        int* pA   = smem;
+        int* pB   = smem + prefixStride;
+        int* scan = smem + 2 * prefixStride;
+        int s = blockIdx.x;
+        if (s < curBatch) {
+            scoreSplit(s, splits, nodeData, nodeOffset, partLeafCount,
+                       orderings, invIndex, numPartTrees, partTreeOffset,
+                       numTaxa, totalN, pA, pB, scan, tid, nthreads, twoScores);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -333,31 +377,30 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsGPU(
     jsize nodeDataLen = env->GetArrayLength(jNodeData);   // = totalNodes * 3
 
     // -------------------------------------------------------------------------
-    // Shared-memory feasibility check (opt-in beyond 48 KB if the device allows)
+    // Adaptive mode selection: keep the fast shared-memory path whenever the two
+    // prefix arrays fit a block's shared memory; otherwise spill them to a
+    // bounded global-memory pool (large-L path).
     // -------------------------------------------------------------------------
-    size_t sharedBytes = ((size_t)2 * (maxLeafCount + 1) + WB_BLOCK) * sizeof(int);
-    {
-        int maxOptin = 0;
-        cudaDeviceGetAttribute(&maxOptin, cudaDevAttrMaxSharedMemoryPerBlockOptin, 0);
-        if ((int)sharedBytes > maxOptin) {
-            fprintf(stderr,
-                "[ASTRAL-X GPU] weight: required shared memory %.1f KB exceeds device "
-                "opt-in limit %.1f KB (maxLeafCount=%d) — falling back to CPU.\n",
-                sharedBytes / 1024.0, maxOptin / 1024.0, (int)maxLeafCount);
-            env->ReleaseIntArrayElements(jSplits,        hSplits,        JNI_ABORT);
-            env->ReleaseIntArrayElements(jNodeData,      hNodeData,      JNI_ABORT);
-            env->ReleaseIntArrayElements(jNodeOffset,    hNodeOffset,    JNI_ABORT);
-            env->ReleaseIntArrayElements(jPartLeafCount, hPartLeafCount, JNI_ABORT);
-            env->ReleaseIntArrayElements(jOrderings,     hOrderings,     JNI_ABORT);
-            env->ReleaseIntArrayElements(jInvIndex,      hInvIndex,      JNI_ABORT);
-            return NULL;   // Java falls back to the CPU path
-        }
-        // Opt in to larger dynamic shared memory if needed (default cap is 48 KB).
-        if (sharedBytes > 49152) {
-            cudaFuncSetAttribute(computeWeightsKernel,
-                                 cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                 (int)sharedBytes);
-        }
+    int    stride            = maxLeafCount + 1;
+    size_t sharedBytesShared = ((size_t)2 * stride + WB_BLOCK) * sizeof(int); // pA+pB+scan
+    size_t sharedBytesGlobal = (size_t)WB_BLOCK * sizeof(int);                // scan only
+    size_t redBytes          = (size_t)WB_BLOCK * sizeof(long long);          // static red[]
+
+    int maxOptin = 0;
+    cudaDeviceGetAttribute(&maxOptin, cudaDevAttrMaxSharedMemoryPerBlockOptin, 0);
+
+    // Shared path must fit both the dynamic (pA,pB,scan) and the static red[].
+    bool useShared = (sharedBytesShared + redBytes) <= (size_t)maxOptin;
+    // Debug override: force the large-L global path even when shared would fit,
+    // so the global path can be validated on small inputs.
+    if (getenv("ASTRALX_WEIGHT_FORCE_GLOBAL")) useShared = false;
+    size_t sharedBytes = useShared ? sharedBytesShared : sharedBytesGlobal;
+
+    if (useShared && sharedBytesShared > 49152) {
+        // Opt in to larger dynamic shared memory (default cap is 48 KB).
+        cudaFuncSetAttribute(computeWeightsKernel<false>,
+                             cudaFuncAttributeMaxDynamicSharedMemorySize,
+                             (int)sharedBytesShared);
     }
 
     // -------------------------------------------------------------------------
@@ -393,14 +436,59 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsGPU(
             "  invIndex    : %6.1f MB\n"
             "  nodeData    : %6.1f MB  (%d internal nodes × 3 ints)\n"
             "  nodeOffset  : %6.1f MB\n"
-            "  shared/block: %6.1f KB  (maxLeafCount=%d)\n"
+            "  prefix mode : %s  (maxLeafCount=%d, shared/block=%.1f KB)\n"
             "  ─────────────────────\n"
             "  static total : %6.1f MB   (VRAM free after: %.1f MB / %.1f MB)\n",
             orderingSz / 1e6, orderingSz / 1e6,
             nodeDataSz / 1e6, nodeDataLen / 3,
             nodeOffsetSz / 1e6,
-            sharedBytes / 1024.0, (int)maxLeafCount,
+            useShared ? "SHARED" : "GLOBAL (large-L)", (int)maxLeafCount,
+            sharedBytes / 1024.0,
             staticTotal / 1e6, freeAfterStatic / 1e6, totalVRAM / 1e6);
+        fflush(stderr);
+    }
+
+    // -------------------------------------------------------------------------
+    // Large-L path: allocate a bounded global prefix pool — one (2·stride) slot
+    // per *resident* block (NOT per split), so memory stays O(residentBlocks·L).
+    // Each resident block grid-strides over the splits, reusing its own slot.
+    // -------------------------------------------------------------------------
+    int*  dPrefix     = NULL;
+    int   maxResident = 0;
+    if (!useShared) {
+        int numSM = 0, blocksPerSM = 0;
+        cudaDeviceGetAttribute(&numSM, cudaDevAttrMultiProcessorCount, 0);
+        cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+            &blocksPerSM, computeWeightsKernel<true>, WB_BLOCK, sharedBytesGlobal);
+        if (blocksPerSM < 1) blocksPerSM = 1;
+        maxResident = numSM * blocksPerSM;
+        if (maxResident < 1)         maxResident = 1;
+        if (maxResident > numSplits) maxResident = numSplits;
+
+        size_t slotInts = (size_t)2 * stride;
+        while (maxResident > 0) {
+            size_t poolSz = (size_t)maxResident * slotInts * sizeof(int);
+            if (cudaMalloc(&dPrefix, poolSz) == cudaSuccess) break;
+            dPrefix = NULL;
+            maxResident /= 2;
+        }
+        if (dPrefix == NULL) {
+            fprintf(stderr, "[ASTRAL-X GPU] weight: FATAL — cannot allocate global prefix pool\n");
+            cudaFree(dNodeData); cudaFree(dNodeOffset); cudaFree(dPartLeafCount);
+            cudaFree(dOrderings); cudaFree(dInvIndex);
+            env->ReleaseIntArrayElements(jSplits,        hSplits,        JNI_ABORT);
+            env->ReleaseIntArrayElements(jNodeData,      hNodeData,      JNI_ABORT);
+            env->ReleaseIntArrayElements(jNodeOffset,    hNodeOffset,    JNI_ABORT);
+            env->ReleaseIntArrayElements(jPartLeafCount, hPartLeafCount, JNI_ABORT);
+            env->ReleaseIntArrayElements(jOrderings,     hOrderings,     JNI_ABORT);
+            env->ReleaseIntArrayElements(jInvIndex,      hInvIndex,      JNI_ABORT);
+            return NULL;   // truly infeasible → Java CPU fallback
+        }
+        fprintf(stderr,
+            "[ASTRAL-X GPU] weight: GLOBAL prefix path — shared needed %.1f KB > %.1f KB cap; "
+            "resident blocks=%d, global pool=%.1f MB\n",
+            sharedBytesShared / 1024.0, maxOptin / 1024.0, maxResident,
+            (double)maxResident * slotInts * sizeof(int) / 1e6);
         fflush(stderr);
     }
 
@@ -503,11 +591,21 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsGPU(
                    (size_t)curBatch * 10 * sizeof(int),
                    cudaMemcpyHostToDevice);
 
-        // One block per split; WB_BLOCK threads cooperate per split.
-        computeWeightsKernel<<<curBatch, WB_BLOCK, sharedBytes>>>(
-            dSplits, dNodeData, dNodeOffset, dPartLeafCount, dOrderings, dInvIndex,
-            curBatch, numPartTrees, partTreeOffset, maxLeafCount, numTaxa, numTaxa,
-            dTwoScores);
+        if (useShared) {
+            // Fast path: one block per split; prefix arrays in shared memory.
+            computeWeightsKernel<false><<<curBatch, WB_BLOCK, sharedBytes>>>(
+                dSplits, dNodeData, dNodeOffset, dPartLeafCount, dOrderings, dInvIndex,
+                curBatch, numPartTrees, partTreeOffset, stride, numTaxa, numTaxa,
+                NULL, dTwoScores);
+        } else {
+            // Large-L path: resident-capped grid grid-strides over splits;
+            // prefix arrays in the bounded global pool (slot = blockIdx.x).
+            int gridDim = (curBatch < maxResident) ? curBatch : maxResident;
+            computeWeightsKernel<true><<<gridDim, WB_BLOCK, sharedBytes>>>(
+                dSplits, dNodeData, dNodeOffset, dPartLeafCount, dOrderings, dInvIndex,
+                curBatch, numPartTrees, partTreeOffset, stride, numTaxa, numTaxa,
+                dPrefix, dTwoScores);
+        }
 
         cudaError_t err = cudaDeviceSynchronize();
         if (err != cudaSuccess) {
@@ -564,6 +662,7 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsGPU(
     cudaFree(dPartLeafCount);
     cudaFree(dOrderings);
     cudaFree(dInvIndex);
+    if (dPrefix) cudaFree(dPrefix);
 
     env->ReleaseIntArrayElements(jSplits,        hSplits,        JNI_ABORT);
     env->ReleaseIntArrayElements(jNodeData,      hNodeData,      JNI_ABORT);

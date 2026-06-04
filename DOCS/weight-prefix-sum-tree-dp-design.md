@@ -253,20 +253,29 @@ globally deduped) and carrying `(lo, mid, hi)` + the three sizes. It is still `O
 the **peak device footprint is unchanged at O(nk) static + O(batch) transient** — the clean
 property the user wanted to preserve is preserved.
 
-### 4.3 Handling very large `L` (when prefix won't fit in shared memory)
+### 4.3 Handling very large `L` (when prefix won't fit in shared memory) — IMPLEMENTED
 
-If `L` exceeds the shared-memory budget (very large `n`, e.g. `n > ~6000` with a 48 KB
-limit):
+If `L` exceeds the shared-memory budget (`2·(L+1)·4 B + red[]` over the device opt-in
+limit, ≈ `L ≳ 12.5k` at the 99 KB sm_86 cap), the kernel switches to a **global-memory
+prefix pool**:
 
-1. **Per-block global scratch.** Allocate `prefixA/prefixB` in global memory, sized
-   `(number of resident blocks) × 2L`, not `S × 2L`. Resident blocks ≪ S, so this stays
-   bounded (a few hundred MB), and the scan/queries still work. Slower than shared but
-   correct.
-2. **Tiled scan + additive wavefront fallback (§4.5).** Avoids storing the full prefix at
-   all, at the cost of a less random-access kernel.
+1. **Per-block global scratch (shipped).** `prefixA/prefixB` live in global memory sized
+   `(number of resident blocks) × 2(L+1)`, **not** `S × 2L`. The grid is capped to the
+   resident-block count (`numSM × cudaOccupancyMaxActiveBlocksPerMultiprocessor`), and each
+   block **grid-strides** over splits, reusing its own slot. Bounded VRAM: e.g. for
+   `n = 25000`, ~100 resident blocks → ≈ 20 MB pool. Correct, slower per-access than shared.
+2. *(Not needed in practice)* Tiled scan / additive wavefront (§4.5) would avoid storing
+   the full prefix entirely; unnecessary given option 1's small footprint.
 
-A runtime switch picks shared-mem mode when `L ≤ threshold`, else the global-scratch mode.
-Typical phylogenomic `n` (hundreds to low thousands) stays in the fast shared-mem path.
+**This is now implemented adaptively** in `astralx_weight.cu`: `scoreSplit()` is a shared
+device function; `computeWeightsKernel<false>` keeps prefixes in dynamic shared memory (one
+block per split), `computeWeightsKernel<true>` keeps them in the global pool (resident-capped
+grid-stride). The host picks the mode from the shared-memory feasibility check and only the
+prefix storage differs — the algorithm and results are identical. Verified: forcing the
+global path (`ASTRALX_WEIGHT_FORCE_GLOBAL=1`) yields byte-identical species trees and scores
+vs. the shared path and CPU on TC1–TC13 and the 200-tree/37-taxon dataset.
+Typical phylogenomic `n` (hundreds to low thousands) stays on the fast shared-mem path; the
+global path only engages for `n` in the tens of thousands.
 
 ### 4.4 Batching
 
