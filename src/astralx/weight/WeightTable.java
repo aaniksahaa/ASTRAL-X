@@ -11,6 +11,7 @@ import astralx.gpu.GPUWeightCalculator;
 import astralx.partition.Partition;
 import astralx.partition.PartitionTable;
 import astralx.tree.Tree;
+import astralx.tree.TreeNode;
 import astralx.util.ProgressBar;
 import astralx.util.Threading;
 
@@ -87,6 +88,11 @@ public class WeightTable {
                          && GPUWeightCalculator.tryLoad();
 
         if (useGPU) {
+            // Build per-tree internal-node CSR over the gene trees (partTrees).
+            // Each non-root internal node contributes one tripartition as a
+            // contiguous leaf interval (lo, mid, hi); no global dedup.
+            NodeCSR csr = buildNodeCSR(partTrees);
+
             // Resolve batchSizeHint
             //   Priority: no-batch  >  gpu-batches  >  gpu-batch-size
             //           > gpu-vram-control-factor (explicit)  >  auto (gpu-vram-occupancy-factor)
@@ -109,16 +115,18 @@ public class WeightTable {
             } else if (cfg.isGpuVramControlFactorSet()) {
                 // Manual resident-relative sizing:  mem(batch) = F × mem(resident)
                 double F           = cfg.getGpuVramControlFactor();
-                long   partsMem    = (long) partList.size()  *  9 * Integer.BYTES; // numParts × 36 B
-                long   orderingMem = (long) numGpuTrees * n  *  4 * Integer.BYTES; // orderings + invIndex
-                long   residentMem = partsMem + orderingMem;
+                long   nodeMem     = (long) csr.nodeData.length      * Integer.BYTES
+                                   + (long) csr.nodeOffset.length    * Integer.BYTES
+                                   + (long) csr.partLeafCount.length * Integer.BYTES;
+                long   orderingMem = (long) numGpuTrees * n  *  2 * Integer.BYTES; // orderings + invIndex
+                long   residentMem = nodeMem + orderingMem;
                 long   batchMem    = (long)(F * residentMem);
                 long   perSplit    = 10L * Integer.BYTES + Long.BYTES;              // 48 B/split
                 batchSizeHint      = (int) Math.max(1, Math.min(numSplits, batchMem / perSplit));
                 int numBatches     = (numSplits + batchSizeHint - 1) / batchSizeHint;
                 batchDesc = String.format(
-                    "vram-control-factor=%.3f  resident=%.1f MB (parts=%.1f orderings=%.1f)  batch=%.1f MB  → %d batches",
-                    F, residentMem / 1e6, partsMem / 1e6, orderingMem / 1e6, batchMem / 1e6, numBatches);
+                    "vram-control-factor=%.3f  resident=%.1f MB (nodeCSR=%.1f orderings=%.1f)  batch=%.1f MB  → %d batches",
+                    F, residentMem / 1e6, nodeMem / 1e6, orderingMem / 1e6, batchMem / 1e6, numBatches);
             } else {
                 // Default: auto — pass 0 to native; native queries free VRAM after static upload
                 // and computes batchSize = floor(freeVRAM * vramFraction / 48 B)
@@ -126,35 +134,22 @@ public class WeightTable {
                 batchDesc = String.format("auto (free-VRAM adaptive, occupancy=%.0f%%)",
                     cfg.getGpuVramFraction() * 100);
             }
-            Logging.info("Weight table: GPU path  splits=%d  partitions=%d  batching=%s",
-                numSplits, partList.size(), batchDesc);
-            computeScoresGPU(splitList, partList, clusterTable, clusterTrees, partTrees,
-                             numGpuTrees, scoreArray, batchSizeHint, cfg.getGpuVramFraction());
+            Logging.info("Weight table: GPU path  splits=%d  internalNodes=%d  trees=%d  maxLeaf=%d  batching=%s",
+                numSplits, csr.totalNodes, partTrees.size(), csr.maxLeafCount, batchDesc);
+
+            boolean ok = computeScoresGPU(splitList, csr, clusterTable, clusterTrees, partTrees,
+                                          numGpuTrees, scoreArray, batchSizeHint, cfg.getGpuVramFraction());
+            if (!ok) {
+                Logging.info("GPU weight path infeasible (e.g. shared-memory limit), falling back to CPU");
+                computeScoresCPU(splitList, partTable.entries(), clusterTable,
+                                 clusterTrees, partTrees, scoreArray);
+            }
         } else {
             if (Config.getInstance().getComputeMode() == Config.ComputeMode.GPU) {
                 Logging.info("GPU library not available, falling back to CPU");
             }
-            // CPU: parallel over splits (TRACE: single-threaded for deterministic output)
-            Collection<PartitionTable.Entry> partitions = partTable.entries();
-            if (Logging.isTrace()) {
-                // Single-threaded for readable trace output
-                for (int idx = 0; idx < numSplits; idx++) {
-                    BipartitionSplit sp = splitList.get(idx);
-                    Logging.trace("SPLIT sz=%d|%d  lo=%s  hi=%s",
-                        sp.lo.size, sp.hi.size, sp.lo, sp.hi);
-                    scoreArray[idx] = computeScore(sp, partitions, clusterTable, clusterTrees, partTrees);
-                    Logging.trace("  => score=%d", scoreArray[idx]);
-                }
-            } else {
-                java.util.concurrent.atomic.AtomicInteger wDone = new java.util.concurrent.atomic.AtomicInteger(0);
-                ProgressBar wBar = new ProgressBar("Scoring splits (CPU)", numSplits);
-                Threading.processRangeParallel(numSplits, idx -> {
-                    scoreArray[idx] = computeScore(splitList.get(idx), partitions, clusterTable,
-                                                   clusterTrees, partTrees);
-                    wBar.update(wDone.incrementAndGet());
-                });
-                wBar.done();
-            }
+            computeScoresCPU(splitList, partTable.entries(), clusterTable,
+                             clusterTrees, partTrees, scoreArray);
         }
 
         for (int i = 0; i < numSplits; i++) {
@@ -188,26 +183,26 @@ public class WeightTable {
      * Partition treeIndex values are stored as (p.treeIndex + k) so the kernel naturally
      * reads from the original-tree half of the combined array — no kernel changes needed.
      */
-    private void computeScoresGPU(List<BipartitionSplit> splitList,
-                                   List<PartitionTable.Entry> partList,
-                                   ClusterTable clusterTable,
-                                   List<Tree> clusterTrees,
-                                   List<Tree> partTrees,
-                                   int numGpuTrees,
-                                   long[] scoreArray,
-                                   int batchSizeHint,
-                                   double vramFraction) {
-        int numSplits      = splitList.size();
-        int numParts       = partList.size();
+    private boolean computeScoresGPU(List<BipartitionSplit> splitList,
+                                      NodeCSR csr,
+                                      ClusterTable clusterTable,
+                                      List<Tree> clusterTrees,
+                                      List<Tree> partTrees,
+                                      int numGpuTrees,
+                                      long[] scoreArray,
+                                      int batchSizeHint,
+                                      double vramFraction) {
+        int numSplits       = splitList.size();
         int numClusterTrees = clusterTrees.size();
-        boolean splitTrees = (clusterTrees != partTrees);
-        // partTreeOffset: added to p.treeIndex when packing partsData so the kernel
-        // indexes into the original-tree half of the combined orderings/invIndex.
+        int numPartTrees    = partTrees.size();
+        boolean splitTrees  = (clusterTrees != partTrees);
+        // partTreeOffset: orderings/invIndex slot offset so node-CSR leaf lookups
+        // index into the original-tree half of the combined array.
         int partTreeOffset = splitTrees ? numClusterTrees : 0;
 
         // --- splits: numSplits * 10 ints ---
-        // Cluster treeIndex values are 0..k-1 (completed trees), unchanged.
-        // [loTree, loLeft, loRight, loComp, loSize, hiTree, hiLeft, hiRight, hiComp, hiSize]
+        // Cluster treeIndex values are 0..k-1 (completed trees, used for membership).
+        // [aTree, aLo, aHi, aComp, aSize, bTree, bLo, bHi, bComp, bSize]
         int[] splitsData = new int[numSplits * 10];
         for (int i = 0; i < numSplits; i++) {
             BipartitionSplit split = splitList.get(i);
@@ -227,28 +222,7 @@ public class WeightTable {
                 splitsData[base + 8] = cB.complement ? 1 : 0;
                 splitsData[base + 9] = cB.size;
             }
-            // else: all zeros → kernel will compute sizeC = n - 0 - 0, but the
-            // first valid partition check will likely skip; score stays 0.
-        }
-
-        // --- partitions: numParts * 9 ints ---
-        // treeIndex is stored as (p.treeIndex + partTreeOffset) so the kernel reads
-        // from the original-tree half when splitTrees is true.
-        // [treeIdx, lo1, hi1, lo2, hi2, sz1, sz2, sz3, frequency]
-        int[] partsData = new int[numParts * 9];
-        for (int j = 0; j < numParts; j++) {
-            PartitionTable.Entry pe = partList.get(j);
-            Partition p = pe.exemplar;
-            int base = j * 9;
-            partsData[base + 0] = p.treeIndex + partTreeOffset;
-            partsData[base + 1] = p.leftStart;
-            partsData[base + 2] = p.leftEnd;
-            partsData[base + 3] = p.rightStart;
-            partsData[base + 4] = p.rightEnd;
-            partsData[base + 5] = p.size1;
-            partsData[base + 6] = p.size2;
-            partsData[base + 7] = p.size3;
-            partsData[base + 8] = pe.frequency;
+            // else: all zeros → empty clusters → kernel yields score 0 for this split.
         }
 
         // --- orderings + invIndex: numGpuTrees * n ints each ---
@@ -256,13 +230,12 @@ public class WeightTable {
         // invIndex [t*n + taxon] = positionMap[taxon]  (-1 if absent)
         //
         // Layout when splitTrees:
-        //   slots 0..k-1   filled from clusterTrees (completed)
-        //   slots k..2k-1  filled from partTrees (original)
-        // Layout when !splitTrees: same list fills slots 0..k-1 (identical to before).
+        //   slots 0..k-1   filled from clusterTrees (completed)  — cluster membership
+        //   slots k..2k-1  filled from partTrees (original)      — gene-tree leaves
+        // Layout when !splitTrees: same list fills slots 0..k-1.
         int[] orderings = new int[numGpuTrees * n];
         int[] invIndex  = new int[numGpuTrees * n];
         Arrays.fill(invIndex, -1);
-        // Completed trees → slots 0..k-1
         for (int t = 0; t < numClusterTrees; t++) {
             Tree tree = clusterTrees.get(t);
             int base = t * n;
@@ -273,9 +246,7 @@ public class WeightTable {
                 invIndex[base + taxon] = tree.positionMap[taxon];
             }
         }
-        // Original trees → slots k..2k-1 (only when splitTrees)
         if (splitTrees) {
-            int numPartTrees = partTrees.size();
             for (int t = 0; t < numPartTrees; t++) {
                 Tree tree = partTrees.get(t);
                 int base = (numClusterTrees + t) * n;
@@ -291,22 +262,139 @@ public class WeightTable {
         // --- call GPU ---
         long t1 = System.nanoTime();
         long[] twoScores = GPUWeightCalculator.computeWeightsGPU(
-            splitsData, partsData, orderings, invIndex,
-            numSplits, numParts, numGpuTrees, n, n,
+            splitsData, csr.nodeData, csr.nodeOffset, csr.partLeafCount,
+            orderings, invIndex,
+            numSplits, numPartTrees, partTreeOffset, csr.maxLeafCount,
+            numGpuTrees, n,
             batchSizeHint, vramFraction);
         long gpuMs = (System.nanoTime() - t1) / 1_000_000;
-        Logging.info("  GPU kernel returned in %d ms", gpuMs);
 
         // Input arrays are no longer needed after the kernel returns; free them
-        // before the twoScores loop so GC can reclaim ~7 GB while we fill scoreArray.
+        // before the twoScores loop so GC can reclaim memory while we fill scoreArray.
         splitsData = null;
-        partsData  = null;
         orderings  = null;
         invIndex   = null;
+
+        if (twoScores == null) {
+            Logging.info("  GPU kernel returned null after %d ms (infeasible)", gpuMs);
+            return false;
+        }
+        Logging.info("  GPU kernel returned in %d ms", gpuMs);
 
         // twoScores[i] = 2 * score; divide by 2
         for (int i = 0; i < numSplits; i++) {
             scoreArray[i] = twoScores[i] / 2L;
+        }
+        return true;
+    }
+
+    // -------------------------------------------------------------------------
+    // Per-tree internal-node CSR (gene-tree tripartitions as leaf intervals)
+    // -------------------------------------------------------------------------
+
+    /**
+     * Compact, per-tree representation of every non-root internal node of the
+     * gene trees.  Each such node is one tripartition (M1|M2|M3), stored as a
+     * contiguous leaf interval (lo, mid, hi) where M1 = [lo,mid), M2 = [mid,hi),
+     * M3 = Lg \ [lo,hi).  Mirrors the gene-tree tripartitions extracted by
+     * PartitionTable, but grouped by tree (no global dedup) for the prefix-sum
+     * GPU kernel.
+     */
+    private static final class NodeCSR {
+        int[] nodeData;       // totalNodes * 3   [lo, mid, hi]
+        int[] nodeOffset;     // numTrees + 1     CSR row pointers
+        int[] partLeafCount;  // numTrees         leaf count L per tree
+        int   maxLeafCount;   // max L over trees (shared-memory sizing)
+        int   totalNodes;     // sum of contributing internal nodes
+    }
+
+    private static NodeCSR buildNodeCSR(List<Tree> partTrees) {
+        int numTrees = partTrees.size();
+        int[] nodeOffset    = new int[numTrees + 1];
+        int[] partLeafCount = new int[numTrees];
+        int   maxLeaf = 0;
+        long  total   = 0;
+        for (int g = 0; g < numTrees; g++) {
+            Tree tr = partTrees.get(g);
+            partLeafCount[g] = tr.leafCount;
+            if (tr.leafCount > maxLeaf) maxLeaf = tr.leafCount;
+            int c = countContribNodes(tr.root);
+            nodeOffset[g + 1] = nodeOffset[g] + c;
+            total += c;
+        }
+        if (total > Integer.MAX_VALUE / 3) {
+            throw new IllegalStateException("Too many internal nodes for a single int[] CSR: " + total);
+        }
+        int[] nodeData = new int[(int) total * 3];
+        for (int g = 0; g < numTrees; g++) {
+            int end = fillNodes(partTrees.get(g).root, nodeData, nodeOffset[g]);
+            assert end == nodeOffset[g + 1] : "CSR fill/count mismatch for tree " + g;
+        }
+
+        NodeCSR csr = new NodeCSR();
+        csr.nodeData      = nodeData;
+        csr.nodeOffset    = nodeOffset;
+        csr.partLeafCount = partLeafCount;
+        csr.maxLeafCount  = maxLeaf;
+        csr.totalNodes    = (int) total;
+        return csr;
+    }
+
+    /** Count non-root internal nodes (each yields one tripartition). */
+    private static int countContribNodes(TreeNode node) {
+        if (node.isLeaf()) return 0;
+        int c = countContribNodes(node.left) + countContribNodes(node.right);
+        if (!node.isRoot()) c++;
+        return c;
+    }
+
+    /**
+     * Post-order fill of (lo, mid, hi) for every non-root internal node, starting
+     * at node-index {@code pos}; returns the next free node-index.  Order matches
+     * PartitionTable's extraction (left, right, self).
+     */
+    private static int fillNodes(TreeNode node, int[] nodeData, int pos) {
+        if (node.isLeaf()) return pos;
+        pos = fillNodes(node.left,  nodeData, pos);
+        pos = fillNodes(node.right, nodeData, pos);
+        if (!node.isRoot()) {
+            int b = pos * 3;
+            nodeData[b]     = node.rangeStart;     // lo
+            nodeData[b + 1] = node.left.rangeEnd;  // mid  (= node.right.rangeStart)
+            nodeData[b + 2] = node.rangeEnd;       // hi
+            pos++;
+        }
+        return pos;
+    }
+
+    // -------------------------------------------------------------------------
+    // CPU path (also the fallback when the GPU path is infeasible)
+    // -------------------------------------------------------------------------
+
+    private void computeScoresCPU(List<BipartitionSplit> splitList,
+                                   Collection<PartitionTable.Entry> partitions,
+                                   ClusterTable clusterTable,
+                                   List<Tree> clusterTrees, List<Tree> partTrees,
+                                   long[] scoreArray) {
+        int numSplits = splitList.size();
+        // CPU: parallel over splits (TRACE: single-threaded for deterministic output)
+        if (Logging.isTrace()) {
+            for (int idx = 0; idx < numSplits; idx++) {
+                BipartitionSplit sp = splitList.get(idx);
+                Logging.trace("SPLIT sz=%d|%d  lo=%s  hi=%s",
+                    sp.lo.size, sp.hi.size, sp.lo, sp.hi);
+                scoreArray[idx] = computeScore(sp, partitions, clusterTable, clusterTrees, partTrees);
+                Logging.trace("  => score=%d", scoreArray[idx]);
+            }
+        } else {
+            java.util.concurrent.atomic.AtomicInteger wDone = new java.util.concurrent.atomic.AtomicInteger(0);
+            ProgressBar wBar = new ProgressBar("Scoring splits (CPU)", numSplits);
+            Threading.processRangeParallel(numSplits, idx -> {
+                scoreArray[idx] = computeScore(splitList.get(idx), partitions, clusterTable,
+                                               clusterTrees, partTrees);
+                wBar.update(wDone.incrementAndGet());
+            });
+            wBar.done();
         }
     }
 

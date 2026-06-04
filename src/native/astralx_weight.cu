@@ -1,33 +1,60 @@
 /**
  * ASTRAL-X GPU weight calculation kernel (CUDA + JNI).
  *
- * One CUDA thread per candidate split.  Each thread iterates over every
- * gene-tree tripartition and accumulates 2*QI weighted by tripartition
- * frequency.  The result array (twoScores) is divided by 2 on the Java side.
+ * PREFIX-SUM TREE-DP FORMULATION
+ * ------------------------------
+ * One CUDA *thread block* per candidate split.  The block loops over every gene
+ * tree on-device.  For each tree it builds, in shared memory, two prefix-sum
+ * arrays over the tree's leaf postorder array — one for each side (A, B) of the
+ * candidate split:
  *
- * Data layout (mirrors STELAR-X compact pattern):
- *   orderings[t * numTaxa + pos]   = taxon id at postorder position pos in tree t
- *   invIndex [t * numTaxa + taxon] = postorder position of taxon in tree t (-1 if absent)
+ *     prefixA[p] = number of the first p leaves (in this tree's postorder) that
+ *                  belong to cluster A
+ *
+ * A gene-tree tripartition is a contiguous postorder leaf interval [lo,hi) split
+ * at mid, so every core intersection becomes an O(1) prefix difference:
+ *
+ *     |M1 ∩ A| = prefixA[mid] - prefixA[lo]
+ *     |M2 ∩ A| = prefixA[hi]  - prefixA[mid]
+ *     |Lg ∩ A| = prefixA[L]                      (row sum; free for incomplete trees)
+ *
+ * The remaining 5 entries of the 3×3 matrix are derived by the row/column
+ * constraints (see DESIGN/intersection-optimization.md), then 2*QI is summed
+ * over all internal nodes weighted by 1 (every node contributes once — no
+ * tripartition dedup; identical trees may carry a multiplicity, see host code).
+ *
+ * This replaces the old element-by-element coreIntersect() walk: per (split,
+ * tree) cost is now exactly O(L) regardless of tree balance, with no scattered
+ * membership probes inside the hot loop.
+ *
+ * Membership test (leaf taxon t ∈ cluster A):
+ *     posA = invIndex[aTree*numTaxa + t]
+ *     inA  = (posA in [aLo, aHi)) XOR aComp
+ * Cluster exemplar trees are *completed* (full taxon set), so invIndex is always
+ * valid — no missing-taxon special case in the membership test.
+ *
+ * Data layout:
+ *   orderings[t*numTaxa + pos]   = taxon id at postorder leaf position pos in tree t
+ *   invIndex [t*numTaxa + taxon] = postorder position of taxon in tree t (-1 if absent)
  *
  * Split layout (10 ints per split):
- *   [0] loTreeIdx  [1] loLeft  [2] loRight  [3] loComplement  [4] loSize
- *   [5] hiTreeIdx  [6] hiLeft  [7] hiRight  [8] hiComplement  [9] hiSize
+ *   [0] aTree  [1] aLo  [2] aHi  [3] aComp  [4] aSize
+ *   [5] bTree  [6] bLo  [7] bHi  [8] bComp  [9] bSize
  *
- * Partition layout (9 ints per partition):
- *   [0] treeIdx  [1] lo1  [2] hi1  [3] lo2  [4] hi2
- *   [5] sz1  [6] sz2  [7] sz3  [8] frequency
+ * Per-tree node CSR (static):
+ *   nodeOffset[g] .. nodeOffset[g+1]  index into nodeData for tree g's internal nodes
+ *   nodeData[3*ni + {0,1,2}] = (lo, mid, hi)  leaf-interval of internal node ni
+ *   partLeafCount[g] = L (leaf count of gene tree g)
  *
  * Batching:
- *   Static data (orderings, invIndex, parts) is uploaded to the device ONCE.
- *   Splits are processed in adaptive batches whose size is derived from free
- *   VRAM after the static upload.  This bounds peak VRAM at:
- *
- *     static:  numTrees×numTaxa×8B + numParts×36B
- *     dynamic: batchSize × 48B  (10 ints split-in + 1 long long score-out)
+ *   Static data (orderings, invIndex, nodeData, nodeOffset, partLeafCount) is
+ *   uploaded ONCE.  Splits are processed in adaptive batches; per-split device
+ *   memory is 40 B in + 8 B out (unchanged from the old kernel), so the existing
+ *   VRAM-budget logic carries over verbatim.
  *
  *   batchSizeHint semantics (passed from Java):
- *      0  — auto: query cudaMemGetInfo, use 75% of remaining free VRAM
- *     -1  — no batching: single launch with all splits (original behaviour)
+ *      0  — auto: query cudaMemGetInfo, use vramFraction of remaining free VRAM
+ *     -1  — no batching: single launch with all splits
  *     >0  — manual override: use exactly this value as batchSize
  */
 
@@ -36,145 +63,188 @@
 #include <cuda_runtime.h>
 #include <jni.h>
 
-// ---------------------------------------------------------------------------
-// Device helpers
-// ---------------------------------------------------------------------------
+// Fixed block size.  Must match the static reduction buffer below and the
+// dynamic shared-memory scan area sized on the host.
+#define WB_BLOCK 256
 
-/**
- * Range intersection: count taxa in [loA,hiA) of tree tA that also appear
- * in [loB,hiB) of tree tB.  Iterates the smaller range for efficiency.
- */
-__device__ int coreIntersect(
-    int tA, int loA, int hiA,
-    int tB, int loB, int hiB,
+// ---------------------------------------------------------------------------
+// Device helper: cooperative prefix-sum of cluster membership over a tree's
+// leaves, written into pX[0..L].  Uses scan[] (WB_BLOCK ints) as scratch.
+//
+//   pX[p] = number of leaves among the first p (postorder) that are in the
+//           cluster (clLo,clHi,clComp) of tree clBase.
+//
+// All threads of the block must call this uniformly (it issues __syncthreads).
+// ---------------------------------------------------------------------------
+__device__ void buildPrefix(
+    int* __restrict__ pX, int* __restrict__ scan, int L,
+    size_t gBase, size_t clBase, int clLo, int clHi, int clComp,
     const int* __restrict__ orderings,
     const int* __restrict__ invIndex,
-    int numTaxa)
+    int tid, int nthreads)
 {
-    int szA = hiA - loA, szB = hiB - loB;
-    int count = 0;
-    if (szA <= szB) {
-        for (int pos = loA; pos < hiA; pos++) {
-            int taxon = orderings[tA * numTaxa + pos];
-            int posB  = invIndex [tB * numTaxa + taxon];
-            if (posB >= loB && posB < hiB) count++;
-        }
-    } else {
-        for (int pos = loB; pos < hiB; pos++) {
-            int taxon = orderings[tB * numTaxa + pos];
-            int posA  = invIndex [tA * numTaxa + taxon];
-            if (posA >= loA && posA < hiA) count++;
-        }
+    if (L <= 0) {
+        if (tid == 0) pX[0] = 0;
+        __syncthreads();
+        return;
     }
-    return count;
-}
 
-/**
- * Intersection with optional complement.  If cComp==1, actual set is the
- * complement of [loC, hiC) within tree tC, so
- *   |comp(C) ∩ M| = |M| - |C ∩ M|
- */
-__device__ int intersect(
-    int tGT, int loGT, int hiGT,
-    int tC,  int loC,  int hiC, int cComp, int szGTRange,
-    const int* __restrict__ orderings,
-    const int* __restrict__ invIndex,
-    int numTaxa)
-{
-    int raw = coreIntersect(tGT, loGT, hiGT, tC, loC, hiC, orderings, invIndex, numTaxa);
-    return cComp ? (szGTRange - raw) : raw;
+    int chunk = (L + nthreads - 1) / nthreads;   // ceil
+    int start = tid * chunk;
+    int end   = start + chunk;
+    if (start > L) start = L;
+    if (end   > L) end   = L;
+
+    // Pass A: write indicator into pX[start..end), accumulate this chunk's sum.
+    int sum = 0;
+    for (int p = start; p < end; p++) {
+        int t   = orderings[gBase + (size_t)p];
+        int pos = invIndex[clBase + (size_t)t];
+        int in  = (pos >= clLo && pos < clHi) ? 1 : 0;
+        in     ^= clComp;          // clComp is 0/1
+        pX[p]   = in;
+        sum    += in;
+    }
+    scan[tid] = sum;
+    __syncthreads();
+
+    // Inclusive scan of chunk sums (Hillis-Steele over WB_BLOCK elements).
+    for (int off = 1; off < nthreads; off <<= 1) {
+        int v = (tid >= off) ? scan[tid - off] : 0;
+        __syncthreads();
+        if (tid >= off) scan[tid] += v;
+        __syncthreads();
+    }
+    int excl = scan[tid] - sum;   // exclusive offset = sum of all previous chunks
+
+    // Pass B: convert per-chunk indicators to global prefix (value BEFORE p).
+    int acc = excl;
+    for (int p = start; p < end; p++) {
+        int v = pX[p];
+        pX[p] = acc;
+        acc  += v;
+    }
+    if (start < L && end == L) pX[L] = acc;   // total row sum at the very end
+
+    __syncthreads();
 }
 
 // ---------------------------------------------------------------------------
-// Main kernel: 1 thread per split in current batch
+// Main kernel: one block per split in the current batch.
 // ---------------------------------------------------------------------------
-
 __global__ void computeWeightsKernel(
-    const int* __restrict__ splits,    // curBatch * 10
-    const int* __restrict__ parts,     // numParts  * 9
-    const int* __restrict__ orderings, // numTrees  * numTaxa
-    const int* __restrict__ invIndex,  // numTrees  * numTaxa
+    const int* __restrict__ splits,        // curBatch * 10
+    const int* __restrict__ nodeData,      // totalNodes * 3
+    const int* __restrict__ nodeOffset,    // numPartTrees + 1
+    const int* __restrict__ partLeafCount, // numPartTrees
+    const int* __restrict__ orderings,     // numGpuTrees * numTaxa
+    const int* __restrict__ invIndex,      // numGpuTrees * numTaxa
     int curBatch,
-    int numParts,
+    int numPartTrees,
+    int partTreeOffset,
+    int maxLeafCount,
     int numTaxa,
     int totalN,
-    long long* __restrict__ twoScores  // output: curBatch entries
+    long long* __restrict__ twoScores      // output: curBatch entries
 )
 {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= curBatch) return;
+    int s = blockIdx.x;
+    if (s >= curBatch) return;
 
-    // Load split
-    const int* sp = splits + idx * 10;
-    int loTree = sp[0], loLeft = sp[1], loRight = sp[2], loComp = sp[3], sizeA = sp[4];
-    int hiTree = sp[5], hiLeft = sp[6], hiRight = sp[7], hiComp = sp[8], sizeB = sp[9];
+    int tid      = threadIdx.x;
+    int nthreads = blockDim.x;
 
-    int sizeC = totalN - sizeA - sizeB;
-    if (sizeC < 0) { twoScores[idx] = 0LL; return; }
+    // Shared layout: pA[maxLeafCount+1], pB[maxLeafCount+1], scan[WB_BLOCK]
+    extern __shared__ int smem[];
+    int stride = maxLeafCount + 1;
+    int* pA   = smem;
+    int* pB   = smem + stride;
+    int* scan = smem + 2 * stride;
 
-    // 6 permutations: (pi,pj,pk) index into arrays a[], b[], c[]
+    __shared__ long long red[WB_BLOCK];
+
+    // Load split.
+    const int* sp = splits + (size_t)s * 10;
+    int aTree = sp[0], aLo = sp[1], aHi = sp[2], aComp = sp[3], aSize = sp[4];
+    int bTree = sp[5], bLo = sp[6], bHi = sp[7], bComp = sp[8], bSize = sp[9];
+
+    // Invalid / overlapping split → zero (defensive; real DP splits are disjoint).
+    if (aSize + bSize > totalN) {
+        if (tid == 0) twoScores[s] = 0LL;
+        return;
+    }
+
+    size_t aBase = (size_t)aTree * numTaxa;
+    size_t bBase = (size_t)bTree * numTaxa;
+
+    // 6 permutations for 2*QI.
     const int PI[6] = {0, 0, 1, 1, 2, 2};
     const int PJ[6] = {1, 2, 0, 2, 0, 1};
     const int PK[6] = {2, 1, 2, 0, 1, 0};
 
-    long long twoScore = 0LL;
+    long long threadAccum = 0LL;
 
-    for (int j = 0; j < numParts; j++) {
-        const int* pt = parts + j * 9;
-        int tGT = pt[0];
-        int lo1 = pt[1], hi1 = pt[2];
-        int lo2 = pt[3], hi2 = pt[4];
-        int sz1 = pt[5], sz2 = pt[6], sz3 = pt[7];
-        int freq = pt[8];
+    for (int g = 0; g < numPartTrees; g++) {
+        int    L     = partLeafCount[g];
+        size_t gBase = (size_t)(partTreeOffset + g) * numTaxa;
 
-        // 4 core intersections
-        int a0 = intersect(tGT, lo1, hi1, loTree, loLeft, loRight, loComp, sz1, orderings, invIndex, numTaxa);
-        int a1 = intersect(tGT, lo2, hi2, loTree, loLeft, loRight, loComp, sz2, orderings, invIndex, numTaxa);
-        int b0 = intersect(tGT, lo1, hi1, hiTree, hiLeft, hiRight, hiComp, sz1, orderings, invIndex, numTaxa);
-        int b1 = intersect(tGT, lo2, hi2, hiTree, hiLeft, hiRight, hiComp, sz2, orderings, invIndex, numTaxa);
+        buildPrefix(pA, scan, L, gBase, aBase, aLo, aHi, aComp, orderings, invIndex, tid, nthreads);
+        buildPrefix(pB, scan, L, gBase, bBase, bLo, bHi, bComp, orderings, invIndex, tid, nthreads);
 
-        // Row sums: for incomplete gene trees L_GT < totalN, so |A∩Lg_GT| != sizeA
-        int L_GT = sz1 + sz2 + sz3;
-        int lgA, lgB;
-        if (L_GT == totalN) {
-            lgA = sizeA;
-            lgB = sizeB;
-        } else {
-            int coreA = coreIntersect(tGT, 0, L_GT, loTree, loLeft, loRight, orderings, invIndex, numTaxa);
-            lgA = loComp ? (L_GT - coreA) : coreA;
-            int coreB = coreIntersect(tGT, 0, L_GT, hiTree, hiLeft, hiRight, orderings, invIndex, numTaxa);
-            lgB = hiComp ? (L_GT - coreB) : coreB;
+        int lgA = pA[L];
+        int lgB = pB[L];
+
+        int nbeg = nodeOffset[g];
+        int nend = nodeOffset[g + 1];
+        for (int ni = nbeg + tid; ni < nend; ni += nthreads) {
+            size_t nb = (size_t)ni * 3;
+            int lo  = nodeData[nb];
+            int mid = nodeData[nb + 1];
+            int hi  = nodeData[nb + 2];
+
+            int a0 = pA[mid] - pA[lo];
+            int a1 = pA[hi]  - pA[mid];
+            int b0 = pB[mid] - pB[lo];
+            int b1 = pB[hi]  - pB[mid];
+
+            int sz1 = mid - lo;
+            int sz2 = hi  - mid;
+            int sz3 = L   - (hi - lo);
+
+            int a2 = lgA - a0 - a1;
+            int b2 = lgB - b0 - b1;
+            int c0 = sz1 - a0 - b0;
+            int c1 = sz2 - a1 - b1;
+            int c2 = sz3 - a2 - b2;
+
+            if (a2 < 0 || b2 < 0 || c0 < 0 || c1 < 0 || c2 < 0) continue;
+
+            long long a[3] = {a0, a1, a2};
+            long long b[3] = {b0, b1, b2};
+            long long c[3] = {c0, c1, c2};
+
+            long long twoQI = 0LL;
+            #pragma unroll
+            for (int p = 0; p < 6; p++) {
+                long long ai = a[PI[p]], bj = b[PJ[p]], ck = c[PK[p]];
+                long long su = ai + bj + ck - 3;
+                if (su > 0) twoQI += ai * bj * ck * su;
+            }
+            threadAccum += twoQI;
         }
 
-        // Derive remaining 5 (c2 uses column constraint on M3, not row C)
-        int a2 = lgA  - a0 - a1;
-        int b2 = lgB  - b0 - b1;
-        int c0 = sz1  - a0 - b0;
-        int c1 = sz2  - a1 - b1;
-        int c2 = sz3  - a2 - b2;
-
-        if (a2 < 0 || b2 < 0 || c0 < 0 || c1 < 0 || c2 < 0) continue;
-
-        // 2*QI = sum over 6 perms (i,j,k): a[i]*b[j]*c[k]*(a[i]+b[j]+c[k]-3)
-        long long a[3] = {a0, a1, a2};
-        long long b[3] = {b0, b1, b2};
-        long long c[3] = {c0, c1, c2};
-
-        long long twoQI = 0LL;
-        for (int p = 0; p < 6; p++) {
-            long long ai = a[PI[p]], bj = b[PJ[p]], ck = c[PK[p]];
-            long long s  = ai + bj + ck - 3;
-            if (s > 0) twoQI += ai * bj * ck * s;
-        }
-        twoScore += (long long)freq * twoQI;
+        __syncthreads();   // pA/pB reused next iteration; ensure node loop done
     }
 
-    twoScores[idx] = twoScore;
+    // Block reduction of threadAccum → twoScores[s].
+    red[tid] = threadAccum;
+    __syncthreads();
+    for (int off = nthreads / 2; off > 0; off >>= 1) {
+        if (tid < off) red[tid] += red[tid + off];
+        __syncthreads();
+    }
+    if (tid == 0) twoScores[s] = red[0];
 }
-
-// ---------------------------------------------------------------------------
-// JNI entry point
-// ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
 // Progress-bar helpers (host-side, used in the batch loop)
@@ -197,8 +267,6 @@ static void wb_fmt_duration(double secs, char* buf, int buflen) {
         snprintf(buf, buflen, "%dh%02dm", s / 3600, (s % 3600) / 60);
 }
 
-// Build a Unicode block progress bar into buf (must hold BAR_W*3+1 bytes).
-// Filled portion uses █ (U+2588), remainder uses ░ (U+2591).
 static int wb_use_color(void) {
     if (getenv("NO_COLOR"))    return 0;
     if (getenv("FORCE_COLOR")) return 1;
@@ -246,82 +314,113 @@ Java_astralx_gpu_GPUWeightCalculator_queryVRAMMiB(JNIEnv* env, jclass cls)
 JNIEXPORT jlongArray JNICALL
 Java_astralx_gpu_GPUWeightCalculator_computeWeightsGPU(
     JNIEnv* env, jclass cls,
-    jintArray jSplits, jintArray jParts,
-    jintArray jOrderings, jintArray jInvIndex,
-    jint numSplits, jint numParts,
-    jint numTrees, jint numTaxa, jint totalN,
+    jintArray jSplits, jintArray jNodeData, jintArray jNodeOffset,
+    jintArray jPartLeafCount, jintArray jOrderings, jintArray jInvIndex,
+    jint numSplits, jint numPartTrees, jint partTreeOffset, jint maxLeafCount,
+    jint numGpuTrees, jint numTaxa,
     jint batchSizeHint, jdouble vramFraction)
 {
     // -------------------------------------------------------------------------
     // Pin host arrays
     // -------------------------------------------------------------------------
-    jint* hSplits    = env->GetIntArrayElements(jSplits,    NULL);
-    jint* hParts     = env->GetIntArrayElements(jParts,     NULL);
-    jint* hOrderings = env->GetIntArrayElements(jOrderings, NULL);
-    jint* hInvIndex  = env->GetIntArrayElements(jInvIndex,  NULL);
+    jint* hSplits        = env->GetIntArrayElements(jSplits,        NULL);
+    jint* hNodeData      = env->GetIntArrayElements(jNodeData,      NULL);
+    jint* hNodeOffset    = env->GetIntArrayElements(jNodeOffset,    NULL);
+    jint* hPartLeafCount = env->GetIntArrayElements(jPartLeafCount, NULL);
+    jint* hOrderings     = env->GetIntArrayElements(jOrderings,     NULL);
+    jint* hInvIndex      = env->GetIntArrayElements(jInvIndex,      NULL);
+
+    jsize nodeDataLen = env->GetArrayLength(jNodeData);   // = totalNodes * 3
 
     // -------------------------------------------------------------------------
-    // Upload static data ONCE (orderings, invIndex, parts stay resident)
+    // Shared-memory feasibility check (opt-in beyond 48 KB if the device allows)
     // -------------------------------------------------------------------------
-    int      *dParts, *dOrderings, *dInvIndex;
+    size_t sharedBytes = ((size_t)2 * (maxLeafCount + 1) + WB_BLOCK) * sizeof(int);
+    {
+        int maxOptin = 0;
+        cudaDeviceGetAttribute(&maxOptin, cudaDevAttrMaxSharedMemoryPerBlockOptin, 0);
+        if ((int)sharedBytes > maxOptin) {
+            fprintf(stderr,
+                "[ASTRAL-X GPU] weight: required shared memory %.1f KB exceeds device "
+                "opt-in limit %.1f KB (maxLeafCount=%d) — falling back to CPU.\n",
+                sharedBytes / 1024.0, maxOptin / 1024.0, (int)maxLeafCount);
+            env->ReleaseIntArrayElements(jSplits,        hSplits,        JNI_ABORT);
+            env->ReleaseIntArrayElements(jNodeData,      hNodeData,      JNI_ABORT);
+            env->ReleaseIntArrayElements(jNodeOffset,    hNodeOffset,    JNI_ABORT);
+            env->ReleaseIntArrayElements(jPartLeafCount, hPartLeafCount, JNI_ABORT);
+            env->ReleaseIntArrayElements(jOrderings,     hOrderings,     JNI_ABORT);
+            env->ReleaseIntArrayElements(jInvIndex,      hInvIndex,      JNI_ABORT);
+            return NULL;   // Java falls back to the CPU path
+        }
+        // Opt in to larger dynamic shared memory if needed (default cap is 48 KB).
+        if (sharedBytes > 49152) {
+            cudaFuncSetAttribute(computeWeightsKernel,
+                                 cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                 (int)sharedBytes);
+        }
+    }
 
-    size_t partsSz    = (size_t)numParts  *  9 * sizeof(int);
-    size_t orderingSz = (size_t)numTrees  * numTaxa * sizeof(int);
+    // -------------------------------------------------------------------------
+    // Upload static data ONCE (orderings, invIndex, node CSR stay resident)
+    // -------------------------------------------------------------------------
+    int *dNodeData, *dNodeOffset, *dPartLeafCount, *dOrderings, *dInvIndex;
 
-    cudaMalloc(&dParts,     partsSz);
-    cudaMalloc(&dOrderings, orderingSz);
-    cudaMalloc(&dInvIndex,  orderingSz);
+    size_t nodeDataSz   = (size_t)nodeDataLen          * sizeof(int);
+    size_t nodeOffsetSz = (size_t)(numPartTrees + 1)   * sizeof(int);
+    size_t partLeafSz   = (size_t)numPartTrees         * sizeof(int);
+    size_t orderingSz   = (size_t)numGpuTrees * numTaxa * sizeof(int);
 
-    cudaMemcpy(dParts,     hParts,     partsSz,    cudaMemcpyHostToDevice);
-    cudaMemcpy(dOrderings, hOrderings, orderingSz, cudaMemcpyHostToDevice);
-    cudaMemcpy(dInvIndex,  hInvIndex,  orderingSz, cudaMemcpyHostToDevice);
+    cudaMalloc(&dNodeData,      nodeDataSz);
+    cudaMalloc(&dNodeOffset,    nodeOffsetSz);
+    cudaMalloc(&dPartLeafCount, partLeafSz);
+    cudaMalloc(&dOrderings,     orderingSz);
+    cudaMalloc(&dInvIndex,      orderingSz);
+
+    cudaMemcpy(dNodeData,      hNodeData,      nodeDataSz,   cudaMemcpyHostToDevice);
+    cudaMemcpy(dNodeOffset,    hNodeOffset,    nodeOffsetSz, cudaMemcpyHostToDevice);
+    cudaMemcpy(dPartLeafCount, hPartLeafCount, partLeafSz,   cudaMemcpyHostToDevice);
+    cudaMemcpy(dOrderings,     hOrderings,     orderingSz,   cudaMemcpyHostToDevice);
+    cudaMemcpy(dInvIndex,      hInvIndex,      orderingSz,   cudaMemcpyHostToDevice);
 
     // Analytical VRAM budget: show exactly what is resident on-device
     {
-        size_t staticTotal = partsSz + 2 * orderingSz;
+        size_t staticTotal = nodeDataSz + nodeOffsetSz + partLeafSz + 2 * orderingSz;
         size_t freeAfterStatic = 0, totalVRAM = 0;
         cudaMemGetInfo(&freeAfterStatic, &totalVRAM);
         fprintf(stderr,
-            "[ASTRAL-X GPU] weight static data uploaded:\n"
-            "  orderings : %6.1f MB\n"
-            "  invIndex  : %6.1f MB\n"
-            "  parts     : %6.1f MB\n"
+            "[ASTRAL-X GPU] weight static data uploaded (prefix-sum tree-DP):\n"
+            "  orderings   : %6.1f MB\n"
+            "  invIndex    : %6.1f MB\n"
+            "  nodeData    : %6.1f MB  (%d internal nodes × 3 ints)\n"
+            "  nodeOffset  : %6.1f MB\n"
+            "  shared/block: %6.1f KB  (maxLeafCount=%d)\n"
             "  ─────────────────────\n"
             "  static total : %6.1f MB   (VRAM free after: %.1f MB / %.1f MB)\n",
-            orderingSz / 1e6,
-            orderingSz / 1e6,
-            partsSz    / 1e6,
-            staticTotal / 1e6,
-            freeAfterStatic / 1e6,
-            totalVRAM / 1e6);
+            orderingSz / 1e6, orderingSz / 1e6,
+            nodeDataSz / 1e6, nodeDataLen / 3,
+            nodeOffsetSz / 1e6,
+            sharedBytes / 1024.0, (int)maxLeafCount,
+            staticTotal / 1e6, freeAfterStatic / 1e6, totalVRAM / 1e6);
         fflush(stderr);
     }
 
     // -------------------------------------------------------------------------
-    // Determine batch size
-    //   batchSizeHint == -1  → no batching (single launch, original behaviour)
-    //   batchSizeHint ==  0  → auto: fill 75% of remaining free VRAM
-    //   batchSizeHint >   0  → manual override
+    // Determine batch size (per-split footprint unchanged: 40 B in + 8 B out)
     // -------------------------------------------------------------------------
     int batchSize;
 
     if (batchSizeHint == -1) {
-        // No batching: process all splits in one launch
         batchSize = numSplits;
         fprintf(stderr, "[ASTRAL-X GPU] batching disabled — single launch, %d splits\n",
                 numSplits);
     } else if (batchSizeHint > 0) {
-        // Manual override
         batchSize = (batchSizeHint < numSplits) ? batchSizeHint : numSplits;
         fprintf(stderr, "[ASTRAL-X GPU] manual batch size: %d  (numSplits=%d)\n",
                 batchSize, numSplits);
     } else {
-        // Auto: query free VRAM after static upload
         size_t freeVRAM = 0, totalVRAM = 0;
         cudaMemGetInfo(&freeVRAM, &totalVRAM);
-        // vramFraction is the usable portion; remainder is headroom for driver etc.
         size_t usable = (size_t)((double)freeVRAM * (double)vramFraction);
-        // 48 bytes per split: 10 ints (40 B split data) + 8 B score
         size_t perSplitBytes = 10 * sizeof(int) + sizeof(long long);
         long long autoSize = (long long)(usable / perSplitBytes);
         if (autoSize < 1) autoSize = 1;
@@ -347,7 +446,6 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsGPU(
         cudaError_t e1 = cudaMalloc(&dSplits,    splitBufSz);
         cudaError_t e2 = cudaMalloc(&dTwoScores, scoreBufSz);
         if (e1 == cudaSuccess && e2 == cudaSuccess) break;
-        // Partial allocation: free any that succeeded before retrying
         if (dSplits)    { cudaFree(dSplits);    dSplits    = NULL; }
         if (dTwoScores) { cudaFree(dTwoScores); dTwoScores = NULL; }
         batchSize /= 2;
@@ -356,15 +454,17 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsGPU(
     }
     if (batchSize <= 0 || dSplits == NULL || dTwoScores == NULL) {
         fprintf(stderr, "[ASTRAL-X GPU] FATAL: cannot allocate GPU batch buffers\n");
-        cudaFree(dParts); cudaFree(dOrderings); cudaFree(dInvIndex);
-        env->ReleaseIntArrayElements(jSplits,    hSplits,    JNI_ABORT);
-        env->ReleaseIntArrayElements(jParts,     hParts,     JNI_ABORT);
-        env->ReleaseIntArrayElements(jOrderings, hOrderings, JNI_ABORT);
-        env->ReleaseIntArrayElements(jInvIndex,  hInvIndex,  JNI_ABORT);
+        cudaFree(dNodeData); cudaFree(dNodeOffset); cudaFree(dPartLeafCount);
+        cudaFree(dOrderings); cudaFree(dInvIndex);
+        env->ReleaseIntArrayElements(jSplits,        hSplits,        JNI_ABORT);
+        env->ReleaseIntArrayElements(jNodeData,      hNodeData,      JNI_ABORT);
+        env->ReleaseIntArrayElements(jNodeOffset,    hNodeOffset,    JNI_ABORT);
+        env->ReleaseIntArrayElements(jPartLeafCount, hPartLeafCount, JNI_ABORT);
+        env->ReleaseIntArrayElements(jOrderings,     hOrderings,     JNI_ABORT);
+        env->ReleaseIntArrayElements(jInvIndex,      hInvIndex,      JNI_ABORT);
         return NULL;
     }
 
-    // Log final batch configuration
     {
         int numBatchesPlan = (numSplits + batchSize - 1) / batchSize;
         size_t splitBufMB = (size_t)batchSize * 10 * sizeof(int);
@@ -388,7 +488,6 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsGPU(
     // -------------------------------------------------------------------------
     // Batch loop: stream splits in, stream scores out
     // -------------------------------------------------------------------------
-    int    blockSize  = 256;
     int    numBatches = (numSplits + batchSize - 1) / batchSize;
     double t_loop_start = wb_now_sec();
     const char* GRN = wb_use_color() ? "\033[32m" : "";
@@ -399,17 +498,15 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsGPU(
         int offset   = b * batchSize;
         int curBatch = (offset + batchSize <= numSplits) ? batchSize : (numSplits - offset);
 
-        // Upload this batch's splits
         cudaMemcpy(dSplits,
                    hSplits + (size_t)offset * 10,
                    (size_t)curBatch * 10 * sizeof(int),
                    cudaMemcpyHostToDevice);
 
-        // Launch kernel for this batch
-        int gridSize = (curBatch + blockSize - 1) / blockSize;
-        computeWeightsKernel<<<gridSize, blockSize>>>(
-            dSplits, dParts, dOrderings, dInvIndex,
-            curBatch, numParts, numTaxa, totalN,
+        // One block per split; WB_BLOCK threads cooperate per split.
+        computeWeightsKernel<<<curBatch, WB_BLOCK, sharedBytes>>>(
+            dSplits, dNodeData, dNodeOffset, dPartLeafCount, dOrderings, dInvIndex,
+            curBatch, numPartTrees, partTreeOffset, maxLeafCount, numTaxa, numTaxa,
             dTwoScores);
 
         cudaError_t err = cudaDeviceSynchronize();
@@ -418,7 +515,6 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsGPU(
                     b + 1, numBatches, cudaGetErrorString(err));
         }
 
-        // Copy this batch's scores back to host
         cudaMemcpy(hTwoScores + offset,
                    dTwoScores,
                    (size_t)curBatch * sizeof(long long),
@@ -433,23 +529,13 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsGPU(
             wb_build_bar(bar_buf, b + 1, numBatches);
 
             if (rem == 0) {
-                // Final batch: end the line with total time
                 char dur_buf[32];
                 wb_fmt_duration(elapsed, dur_buf, sizeof(dur_buf));
                 fprintf(stderr,
                     "\r  %s[GPU]%s weight  %s[%s]%s  %d/%d  100%%  done in %s"
-                    "                    \n",   // trailing spaces clear any leftover ETA text
+                    "                    \n",
                     GRN, RST, GRN, bar_buf, RST, numBatches, numBatches, dur_buf);
-            } else if (b == 0) {
-                // First batch done: show ETA from first sample
-                char eta_buf[32];
-                wb_fmt_duration(avg_sec * rem, eta_buf, sizeof(eta_buf));
-                fprintf(stderr,
-                    "\r  %s[GPU]%s weight  %s[%s]%s  %d/%d  %5.1f%%  "
-                    "%.2fs/batch  ETA: %-8s",
-                    GRN, RST, GRN, bar_buf, RST, b + 1, numBatches, pct, avg_sec, eta_buf);
             } else {
-                // Subsequent batches: rolling average ETA
                 char eta_buf[32];
                 wb_fmt_duration(avg_sec * rem, eta_buf, sizeof(eta_buf));
                 fprintf(stderr,
@@ -473,14 +559,18 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsGPU(
     delete[] hTwoScores;
     cudaFree(dSplits);
     cudaFree(dTwoScores);
-    cudaFree(dParts);
+    cudaFree(dNodeData);
+    cudaFree(dNodeOffset);
+    cudaFree(dPartLeafCount);
     cudaFree(dOrderings);
     cudaFree(dInvIndex);
 
-    env->ReleaseIntArrayElements(jSplits,    hSplits,    JNI_ABORT);
-    env->ReleaseIntArrayElements(jParts,     hParts,     JNI_ABORT);
-    env->ReleaseIntArrayElements(jOrderings, hOrderings, JNI_ABORT);
-    env->ReleaseIntArrayElements(jInvIndex,  hInvIndex,  JNI_ABORT);
+    env->ReleaseIntArrayElements(jSplits,        hSplits,        JNI_ABORT);
+    env->ReleaseIntArrayElements(jNodeData,      hNodeData,      JNI_ABORT);
+    env->ReleaseIntArrayElements(jNodeOffset,    hNodeOffset,    JNI_ABORT);
+    env->ReleaseIntArrayElements(jPartLeafCount, hPartLeafCount, JNI_ABORT);
+    env->ReleaseIntArrayElements(jOrderings,     hOrderings,     JNI_ABORT);
+    env->ReleaseIntArrayElements(jInvIndex,      hInvIndex,      JNI_ABORT);
 
     return result;
 }

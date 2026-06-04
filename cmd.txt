@@ -193,8 +193,9 @@ bash build.sh
 
 
 
-
+###############################################################
 ## TESTING 
+###############################################################
 
 
 ####### OVERALL
@@ -203,6 +204,9 @@ bash test/run_tests.sh --cpu
 bash test/run_tests.sh --gpu
 
 ####### SIMILARITY MATRIX TESTING 
+###############################################################
+
+
 
 # CPU path — all 4 hand-crafted cases
 bash test/simmat_comparison/run_simmat_tests.sh --no-gen
@@ -210,11 +214,18 @@ bash test/simmat_comparison/run_simmat_tests.sh --no-gen
 # GPU path — same cases
 bash test/simmat_comparison/run_simmat_tests.sh --no-gen --mode gpu
 
+
+
 ####### UPGMA GUIDE TREE TESTING 
+###############################################################
 
 bash test/simmat_comparison/run_upgma_tests.sh
 
 
+
+
+####### TREE COMPLETION TESTING 
+###############################################################
  
 
 python3 test/simmat_comparison/compare_completed_trees.py \

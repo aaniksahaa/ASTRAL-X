@@ -198,7 +198,12 @@ public class Main {
                 dumpClusters(clusterTable, trees, registry, cfg.getDumpClustersFile());
             }
 
-            // ── Phase 3.5: Greedy consensus + polytomy resolution (Part I in place) ──
+            // ── Phase 3.5: Greedy consensus + polytomy resolution (EXPERIMENTAL) ──
+            // INCOMPLETE feature — emission of resolved polytomies into X is not
+            // yet wired up.  Skipped entirely by default: no compute, no memory.
+            // Enabled only via --consensus-experimental (build path) or the
+            // explicit --verify-greedy-consensus entry point.
+            //
             // Use ONLY the gene trees (no UPGMA guide tree) so the bipartition
             // frequencies match ASTRAL-MP's `addExtraBipartitionByHeuristics`
             // (which runs greedy consensus over the gene trees alone).
@@ -209,22 +214,24 @@ public class Main {
             //   - autocomplete ON :  trees = completed gene trees + UPGMA
             //                        originalTrees still references the
             //                        pre-completion / pre-UPGMA list size.
-            List<Tree> geneTreesForGreedy = trees.subList(0, originalTrees.size());
+            if (cfg.isVerifyGreedyConsensus() || cfg.isConsensusExperimental()) {
+                List<Tree> geneTreesForGreedy = trees.subList(0, originalTrees.size());
 
-            if (cfg.isVerifyGreedyConsensus()) {
-                GreedyConsensusVerifier.dump(geneTreesForGreedy, registry, clusterTable,
-                                             pref, hasher, similarityMatrix, cfg.getOutputFile());
-                return;
+                if (cfg.isVerifyGreedyConsensus()) {
+                    GreedyConsensusVerifier.dump(geneTreesForGreedy, registry, clusterTable,
+                                                 pref, hasher, similarityMatrix, cfg.getOutputFile());
+                    return;
+                }
+                long t35 = PhaseLogger.begin("Phase 3.5 Greedy consensus build + polytomy resolution", false);
+                GreedyConsensus.Result gcResult =
+                    GreedyConsensus.build(clusterTable, geneTreesForGreedy, pref, hasher,
+                                           similarityMatrix, registry.size());
+                PhaseLogger.end("Phase 3.5 Greedy consensus build + polytomy resolution", t35, false);
+                // gcResult.snapshots are consumed by Part II (polytomy resolution → X)
+                // — wiring to that phase will land in a follow-up commit.
+                @SuppressWarnings("unused")
+                var _gcUnused = gcResult;
             }
-            long t35 = PhaseLogger.begin("Phase 3.5 Greedy consensus build + polytomy resolution", false);
-            GreedyConsensus.Result gcResult =
-                GreedyConsensus.build(clusterTable, geneTreesForGreedy, pref, hasher,
-                                       similarityMatrix, registry.size());
-            PhaseLogger.end("Phase 3.5 Greedy consensus build + polytomy resolution", t35, false);
-            // gcResult.snapshots are consumed by Part II (polytomy resolution → X)
-            // — wiring to that phase will land in a follow-up commit.
-            @SuppressWarnings("unused")
-            var _gcUnused = gcResult;
 
             // ── Phase 4: Gene-tree tripartition extraction (from ORIGINAL trees) ──
             // Uses originalTrees so tripartitions reflect actual gene-tree signal.
@@ -343,6 +350,7 @@ public class Main {
                 case "--verify-similarity-matrix"  -> cfg.setVerifySimilarityMatrix(true);
                 case "--verify-upgma"              -> cfg.setVerifyUpgma(true);
                 case "--verify-greedy-consensus"   -> cfg.setVerifyGreedyConsensus(true);
+                case "--consensus-experimental"    -> cfg.setConsensusExperimental(true);
                 case "--autocomplete-incomplete-gene-trees" -> cfg.setAutoCompleteIncompleteTrees(true);
                 case "--completion-method" -> {
                     if (++i >= args.length) return false;

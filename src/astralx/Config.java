@@ -252,6 +252,13 @@ public class Config {
     public boolean isVerifyGreedyConsensus()        { return verifyGreedyConsensus; }
     public void setVerifyGreedyConsensus(boolean v) { this.verifyGreedyConsensus = v; }
 
+    // Greedy consensus build + polytomy resolution + emission to X is an
+    // INCOMPLETE, EXPERIMENTAL feature.  It is OFF by default: Phase 3.5 is
+    // skipped entirely (no compute, no memory) unless this flag is set.
+    private boolean consensusExperimental = false;
+    public boolean isConsensusExperimental()        { return consensusExperimental; }
+    public void setConsensusExperimental(boolean v) { this.consensusExperimental = v; }
+
     // ── Comparison / debug dump flags ─────────────────────────────────────────
     private String dumpClustersFile = null;
     public String getDumpClustersFile()       { return dumpClustersFile; }
