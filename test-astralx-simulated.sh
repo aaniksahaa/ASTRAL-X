@@ -9,7 +9,7 @@ set -euo pipefail
 # piped through tee further down the call chain.
 [[ -t 1 || -t 2 ]] && export FORCE_COLOR=1
 
-NTFY_CHANNEL_NAME="${NTFY_CHANNEL_NAME:-anik-phylo}"
+NTFY_CHANNEL_NAME="${NTFY_CHANNEL_NAME:-anik-phylo-asx}"
 
 TAXA_NUM=""
 GENE_TREES=""
@@ -43,10 +43,33 @@ sanitize_setting_part() {
   printf '%s' "$value"
 }
 
+# Extract the canonical weight-intersection-method from an opts string.
+# Returns 'prefix-sum' (the default) when not specified.
+extract_weight_method_from_opts() {
+  local raw="$1"
+  local -a tokens=()
+  local i wim_val=""
+  read -r -a tokens <<< "$raw"
+  i=0
+  while (( i < ${#tokens[@]} )); do
+    if [[ "${tokens[$i]}" == "--weight-intersection-method" ]] && (( i + 1 < ${#tokens[@]} )); then
+      wim_val="${tokens[$((i + 1))]}"
+      ((i+=2))
+    else
+      ((i+=1))
+    fi
+  done
+  case "${wim_val,,}" in
+    ""|prefix-sum|prefix_sum|prefixsum|prefix)                                   printf 'prefix-sum' ;;
+    smaller-side-traversal|smaller_side_traversal|smaller-side|smallerside|legacy) printf 'smaller-side-traversal' ;;
+    *)                                                                          printf '%s' "$wim_val" ;;
+  esac
+}
+
 build_setting_name_from_opts() {
   local raw="$1"
   local -a tokens=()
-  local i search_mode_val=""
+  local i search_mode_val="" wim_val=""
 
   if [[ -z "${raw// }" ]]; then
     printf 'default'
@@ -59,15 +82,38 @@ build_setting_name_from_opts() {
     if [[ "${tokens[$i]}" == "--search-mode" ]] && (( i + 1 < ${#tokens[@]} )); then
       search_mode_val="${tokens[$((i + 1))]}"
       ((i+=2))
+    elif [[ "${tokens[$i]}" == "--weight-intersection-method" ]] && (( i + 1 < ${#tokens[@]} )); then
+      wim_val="${tokens[$((i + 1))]}"
+      ((i+=2))
     else
       ((i+=1))
     fi
   done
 
+  # Base name from search-mode (unchanged — preserves existing result dirs).
+  local base
   if [[ -n "$search_mode_val" ]]; then
-    printf 'search-mode_%s' "$(sanitize_setting_part "$search_mode_val")"
+    base="search-mode_$(sanitize_setting_part "$search_mode_val")"
   else
-    printf 'default'
+    base="default"
+  fi
+
+  # Append a weight-intersection-method tag ONLY when it differs from the
+  # default (prefix-sum), so existing prefix-sum runs keep their original path.
+  local wim_canon=""
+  case "${wim_val,,}" in
+    ""|prefix-sum|prefix_sum|prefixsum|prefix)
+      wim_canon="" ;;                                   # default → no tag
+    smaller-side-traversal|smaller_side_traversal|smaller-side|smallerside|legacy)
+      wim_canon="smaller-side-traversal" ;;
+    *)
+      wim_canon="$(sanitize_setting_part "$wim_val")" ;; # unknown → tag verbatim
+  esac
+
+  if [[ -n "$wim_canon" ]]; then
+    printf '%s__wim_%s' "$base" "$wim_canon"
+  else
+    printf '%s' "$base"
   fi
 }
 
@@ -150,6 +196,7 @@ if [[ "$ASTRALX_ROOT_SET" == false ]]; then
 fi
 
 SETTING_NAME="$(build_setting_name_from_opts "$ASTRALX_OPTS")"
+WEIGHT_METHOD="$(extract_weight_method_from_opts "$ASTRALX_OPTS")"
 
 PAIR="${TAXA_NUM}_${GENE_TREES}"
 if [[ "$SIMPHY_DATA_DIR_SET" == true ]]; then
@@ -314,6 +361,7 @@ fi
 
 echo
 echo "ASTRAL-X finished in ${RUNNING_TIME}s (exit code ${ASTRALX_EXIT_CODE})"
+echo "Weight method: ${WEIGHT_METHOD}"
 echo "RF rate: ${RF_RATE}"
 echo "Quartet score: ${OPTIMAL_QUARTET_SCORE}"
 echo "Max CPU RAM (MB): ${MAX_CPU_MB}"
@@ -327,6 +375,7 @@ if [[ "$NO_NOTIFY" == false ]] && command -v curl >/dev/null 2>&1; then
   CSV_ROW="astralx,${SETTING_NAME},${TAXA_NUM},${GENE_TREES},${REPLICATE},${SB},${SPMIN},${SPMAX},${RF_RATE},${OPTIMAL_QUARTET_SCORE},${RUNNING_TIME},${MAX_CPU_MB},${MAX_GPU_MB}"
   curl -s -d "${STATUS_EMOJI} ASTRAL-X ${STATUS_TEXT} for ${TAXA_NUM} taxa and ${GENE_TREES} gene trees
 
+Weight method: ${WEIGHT_METHOD}
 RF Rate: ${RF_RATE}
 Quartet score: ${OPTIMAL_QUARTET_SCORE}
 Running time: ${RUNNING_TIME}s

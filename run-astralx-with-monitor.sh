@@ -11,7 +11,7 @@ set -euo pipefail
 # terminal is connected.  Java's Banner.detectColor() honours FORCE_COLOR.
 [[ -t 1 || -t 2 ]] && export FORCE_COLOR=1
 
-NTFY_CHANNEL_NAME="${NTFY_CHANNEL_NAME:-anik-phylo}"
+NTFY_CHANNEL_NAME="${NTFY_CHANNEL_NAME:-anik-phylo-asx}"
 
 INPUT_FILE=""
 OUTPUT_FILE=""
@@ -182,11 +182,24 @@ else
   GPU_MONITOR=false
 fi
 
+# Canonical weight-intersection-method (default prefix-sum) for logs/notifications.
+WEIGHT_METHOD="prefix-sum"
+for ((wi = 0; wi < ${#ASTRALX_ARGS[@]}; wi++)); do
+  if [[ "${ASTRALX_ARGS[$wi]}" == "--weight-intersection-method" ]] && (( wi + 1 < ${#ASTRALX_ARGS[@]} )); then
+    case "${ASTRALX_ARGS[$((wi + 1))],,}" in
+      smaller-side-traversal|smaller_side_traversal|smaller-side|smallerside|legacy) WEIGHT_METHOD="smaller-side-traversal" ;;
+      prefix-sum|prefix_sum|prefixsum|prefix)                                        WEIGHT_METHOD="prefix-sum" ;;
+      *)                                                                            WEIGHT_METHOD="${ASTRALX_ARGS[$((wi + 1))]}" ;;
+    esac
+  fi
+done
+
 echo "=== ASTRAL-X Monitor Wrapper ==="
 echo "Input file:     $INPUT_FILE"
 echo "Output file:    $OUTPUT_FILE"
 echo "ASTRAL-X root:  $ASTRALX_ROOT"
 echo "ASTRAL-X opts:  ${ASTRALX_ARGS[*]:-(defaults)}"
+echo "Weight method:  $WEIGHT_METHOD"
 if [[ -n "$REFERENCE_SPECIES_TREE" ]]; then
   echo "Reference tree: $REFERENCE_SPECIES_TREE"
 fi
@@ -292,6 +305,7 @@ if [[ "$NO_NOTIFY" == false ]] && command -v curl >/dev/null 2>&1; then
   STATUS_TEXT=$(if [[ $ASTRALX_EXIT_CODE -eq 0 ]]; then echo "completed"; else echo "failed (exit $ASTRALX_EXIT_CODE)"; fi)
   NOTIFY_BODY="${STATUS_EMOJI} ASTRAL-X ${STATUS_TEXT}
 
+Weight method: ${WEIGHT_METHOD}
 Running time: ${RUNNING_TIME}s
 Max CPU RAM: ${MAX_CPU_MB} MB
 Max GPU VRAM: ${MAX_GPU_MB} MB

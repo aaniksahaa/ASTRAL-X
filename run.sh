@@ -41,6 +41,7 @@ Optional:
   --cpu              Force CPU mode
   --gpu              Force GPU mode
   --search-mode      local | full
+  --weight-intersection-method  prefix-sum | smaller-side-traversal  (default: prefix-sum)
   --threads, -t      Thread count
   --seeds, -m        Number of hash seeds
   --rooted           Treat input as rooted
@@ -101,11 +102,11 @@ while [[ $# -gt 0 ]]; do
       COMPUTE_MODE_SET=true
       shift
       ;;
-    --search-mode|-t|--threads|-m|--seeds|--gpu-batch-size|--gpu-batches|--gpu-vram-control-factor|--gpu-vram-occupancy-factor|--gpu-dp-state-space-construction-output-cap|--gpu-dist-tile-size|--dump-completed-gene-trees|--completion-method)
+    --search-mode|-t|--threads|-m|--seeds|--weight-intersection-method|--gpu-batch-size|--gpu-batches|--gpu-vram-control-factor|--gpu-vram-occupancy-factor|--gpu-dp-state-space-construction-output-cap|--gpu-dist-tile-size|--dump-completed-gene-trees|--completion-method)
       PROGRAM_ARGS+=("$1" "$2")
       shift 2
       ;;
-    --rooted|--unrooted|--no-gpu-batch|--verify-parse|--verify-hash|--verify-clusters|--verify-partitions|--verify-dp|--verify-weights|--verify-distance-matrix|--verify-similarity-matrix|--verify-upgma|--autocomplete-incomplete-gene-trees|-v|-vv|-vvv|-q|--quiet)
+    --rooted|--unrooted|--no-gpu-batch|--consensus-experimental|--verify-parse|--verify-hash|--verify-clusters|--verify-partitions|--verify-dp|--verify-weights|--verify-distance-matrix|--verify-similarity-matrix|--verify-upgma|--verify-greedy-consensus|--autocomplete-incomplete-gene-trees|-v|-vv|-vvv|-q|--quiet)
       PROGRAM_ARGS+=("$1")
       shift
       ;;
