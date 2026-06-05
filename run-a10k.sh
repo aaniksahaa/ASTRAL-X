@@ -247,8 +247,7 @@ for REPL in "${REPL_LIST[@]}"; do
     if [[ "$GPU_MONITOR" == false ]]; then CMD+=(--no-gpu-monitor); fi
     if [[ "$NO_NOTIFY" == true ]]; then CMD+=(--no-notify); fi
     if [[ -n "$ASTRALX_OPTS_ITEM" ]]; then
-      read -r -a EXTRA <<< "$ASTRALX_OPTS_ITEM"
-      CMD+=("${EXTRA[@]}")
+      CMD+=(--opts "$ASTRALX_OPTS_ITEM")
     fi
 
     echo "==> Running astralx on ${REPL} (${TREE_TYPE}, ${SETTING_NAME})"
