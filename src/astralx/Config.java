@@ -11,6 +11,20 @@ public class Config {
      */
     public enum CompletionMethod { SIMILARITY, DISTANCE }
 
+    /**
+     * How the GPU weight kernel counts gene-tree ↔ candidate-cluster intersections.
+     * CLI: --weight-intersection-method {prefix-sum | smaller-side-traversal}
+     *   PREFIX_SUM             — default. Per-tree leaf prefix sums (with its own
+     *                            shared/auto-global adaptive sub-paths); each
+     *                            intersection is an O(1) prefix difference. Builds
+     *                            O(L) prefix working memory per active block.
+     *   SMALLER_SIDE_TRAVERSAL — legacy. One thread per split; each thread walks the
+     *                            smaller side of every intersection element-by-element.
+     *                            No prefix sums are built at all (no per-thread state),
+     *                            saving that memory.
+     */
+    public enum WeightIntersectionMethod { PREFIX_SUM, SMALLER_SIDE_TRAVERSAL }
+
     private static Config instance;
 
     private String inputFile;
@@ -22,6 +36,7 @@ public class Config {
     private int verbosity = 1; // 0=quiet 1=INFO 2=DEBUG 3=TRACE
     private boolean treatAsUnrooted = true;
     private SearchMode searchMode = SearchMode.LOCAL;
+    private WeightIntersectionMethod weightIntersectionMethod = WeightIntersectionMethod.PREFIX_SUM;
 
     /**
      * GPU split-batching control.
@@ -139,6 +154,8 @@ public class Config {
     public void setTreatAsUnrooted(boolean u) { this.treatAsUnrooted = u; }
     public SearchMode getSearchMode()          { return searchMode; }
     public void setSearchMode(SearchMode s)   { this.searchMode = s; }
+    public WeightIntersectionMethod getWeightIntersectionMethod()        { return weightIntersectionMethod; }
+    public void setWeightIntersectionMethod(WeightIntersectionMethod m)  { this.weightIntersectionMethod = m; }
     public boolean isGpuBatch()               { return gpuBatch; }
     public void setGpuBatch(boolean b)        { this.gpuBatch = b; }
     public int getGpuBatchSize()              { return gpuBatchSize; }

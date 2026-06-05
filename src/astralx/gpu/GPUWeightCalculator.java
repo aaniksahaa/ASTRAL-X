@@ -93,6 +93,48 @@ public class GPUWeightCalculator {
     );
 
     /**
+     * Legacy "smaller-side traversal" weight calculation (no prefix sums).
+     *
+     * One CUDA thread per split, zero per-thread working state: each thread loops
+     * over every deduplicated gene-tree tripartition and computes each of the 4
+     * core intersections by walking the smaller of the two ranges element-by-element
+     * (looking taxa up in invIndex).  No prefix-sum arrays are built or allocated,
+     * so device memory is just the static parts/orderings/invIndex plus the split
+     * batch — there is no O(L) prefix working set.
+     *
+     * Static data (parts, orderings, invIndex) is uploaded once; splits stream in
+     * adaptive batches exactly like the prefix-sum path.
+     *
+     * @param splits     flat int array, numSplits × 10
+     *                   [aTree,aLo,aHi,aComp,aSize, bTree,bLo,bHi,bComp,bSize]
+     * @param parts      flat int array, numParts × 9 (deduplicated tripartitions)
+     *                   [treeIdx, lo1, hi1, lo2, hi2, sz1, sz2, sz3, frequency]
+     * @param orderings  flat int array, numGpuTrees × numTaxa
+     * @param invIndex   flat int array, numGpuTrees × numTaxa
+     * @param numSplits  number of candidate splits
+     * @param numParts   number of unique gene-tree tripartitions
+     * @param numGpuTrees total orderings/invIndex slots
+     * @param numTaxa    total taxon count (registry size)
+     * @param totalN     total taxon count (same as numTaxa, used for sizeC)
+     * @param batchSizeHint 0=auto, -1=no batching, >0=exact batch size
+     * @param vramFraction  fraction of free VRAM to use when batchSizeHint==0
+     * @return long[numSplits] where result[i] = 2 * score(split i), or null on failure
+     */
+    public static native long[] computeWeightsSmallerSideGPU(
+        int[] splits,
+        int[] parts,
+        int[] orderings,
+        int[] invIndex,
+        int numSplits,
+        int numParts,
+        int numGpuTrees,
+        int numTaxa,
+        int totalN,
+        int batchSizeHint,
+        double vramFraction
+    );
+
+    /**
      * Query GPU free and total VRAM via cudaMemGetInfo.
      * Returns long[2] = {freeMiB, totalMiB}, or null if unavailable.
      */

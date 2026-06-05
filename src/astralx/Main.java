@@ -325,6 +325,21 @@ public class Main {
                     cfg.setSearchMode(args[i].equalsIgnoreCase("full")
                         ? Config.SearchMode.FULL : Config.SearchMode.LOCAL);
                 }
+                case "--weight-intersection-method" -> {
+                    if (++i >= args.length) return false;
+                    String m = args[i].toLowerCase().replace('_', '-');
+                    switch (m) {
+                        case "prefix-sum", "prefixsum", "prefix" ->
+                            cfg.setWeightIntersectionMethod(Config.WeightIntersectionMethod.PREFIX_SUM);
+                        case "smaller-side-traversal", "smaller-side", "smallerside", "legacy" ->
+                            cfg.setWeightIntersectionMethod(Config.WeightIntersectionMethod.SMALLER_SIDE_TRAVERSAL);
+                        default -> {
+                            System.err.println("Unknown --weight-intersection-method: " + args[i]
+                                + "  (expected: prefix-sum | smaller-side-traversal)");
+                            return false;
+                        }
+                    }
+                }
                 case "-v"              -> cfg.setVerbosity(Logging.INFO);
                 case "-vv"             -> cfg.setVerbosity(Logging.DEBUG);
                 case "-vvv"            -> cfg.setVerbosity(Logging.TRACE);

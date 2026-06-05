@@ -294,6 +294,131 @@ __global__ void computeWeightsKernel(
     }
 }
 
+// ===========================================================================
+// LEGACY "smaller-side traversal" path (activated by --weight-intersection-method
+// smaller-side-traversal).  One thread per split, ZERO per-thread state, NO prefix sums:
+// each of the 4 core intersections is counted by walking the smaller of the two
+// ranges element-by-element.  Completely independent of the prefix-sum path above
+// — no shared/global prefix memory is touched here.
+// ===========================================================================
+
+// Range intersection: count taxa in [loA,hiA) of tree tA that also appear in
+// [loB,hiB) of tree tB.  Iterates the SMALLER range for efficiency.
+__device__ int ssCoreIntersect(
+    int tA, int loA, int hiA,
+    int tB, int loB, int hiB,
+    const int* __restrict__ orderings,
+    const int* __restrict__ invIndex,
+    int numTaxa)
+{
+    int szA = hiA - loA, szB = hiB - loB;
+    int count = 0;
+    if (szA <= szB) {
+        for (int pos = loA; pos < hiA; pos++) {
+            int taxon = orderings[(size_t)tA * numTaxa + pos];
+            int posB  = invIndex [(size_t)tB * numTaxa + taxon];
+            if (posB >= loB && posB < hiB) count++;
+        }
+    } else {
+        for (int pos = loB; pos < hiB; pos++) {
+            int taxon = orderings[(size_t)tB * numTaxa + pos];
+            int posA  = invIndex [(size_t)tA * numTaxa + taxon];
+            if (posA >= loA && posA < hiA) count++;
+        }
+    }
+    return count;
+}
+
+// Intersection with optional complement of the cluster side.
+__device__ int ssIntersect(
+    int tGT, int loGT, int hiGT,
+    int tC,  int loC,  int hiC, int cComp, int szGTRange,
+    const int* __restrict__ orderings,
+    const int* __restrict__ invIndex,
+    int numTaxa)
+{
+    int raw = ssCoreIntersect(tGT, loGT, hiGT, tC, loC, hiC, orderings, invIndex, numTaxa);
+    return cComp ? (szGTRange - raw) : raw;
+}
+
+// One thread per split; loop all deduplicated tripartitions (parts, 9 ints each).
+__global__ void computeWeightsSmallerSideKernel(
+    const int* __restrict__ splits,    // curBatch * 10
+    const int* __restrict__ parts,     // numParts  * 9
+    const int* __restrict__ orderings, // numGpuTrees * numTaxa
+    const int* __restrict__ invIndex,  // numGpuTrees * numTaxa
+    int curBatch,
+    int numParts,
+    int numTaxa,
+    int totalN,
+    long long* __restrict__ twoScores)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= curBatch) return;
+
+    const int* sp = splits + (size_t)idx * 10;
+    int loTree = sp[0], loLeft = sp[1], loRight = sp[2], loComp = sp[3], sizeA = sp[4];
+    int hiTree = sp[5], hiLeft = sp[6], hiRight = sp[7], hiComp = sp[8], sizeB = sp[9];
+
+    int sizeC = totalN - sizeA - sizeB;
+    if (sizeC < 0) { twoScores[idx] = 0LL; return; }
+
+    const int PI[6] = {0, 0, 1, 1, 2, 2};
+    const int PJ[6] = {1, 2, 0, 2, 0, 1};
+    const int PK[6] = {2, 1, 2, 0, 1, 0};
+
+    long long twoScore = 0LL;
+
+    for (int j = 0; j < numParts; j++) {
+        const int* pt = parts + (size_t)j * 9;
+        int tGT = pt[0];
+        int lo1 = pt[1], hi1 = pt[2];
+        int lo2 = pt[3], hi2 = pt[4];
+        int sz1 = pt[5], sz2 = pt[6], sz3 = pt[7];
+        int freq = pt[8];
+
+        int a0 = ssIntersect(tGT, lo1, hi1, loTree, loLeft, loRight, loComp, sz1, orderings, invIndex, numTaxa);
+        int a1 = ssIntersect(tGT, lo2, hi2, loTree, loLeft, loRight, loComp, sz2, orderings, invIndex, numTaxa);
+        int b0 = ssIntersect(tGT, lo1, hi1, hiTree, hiLeft, hiRight, hiComp, sz1, orderings, invIndex, numTaxa);
+        int b1 = ssIntersect(tGT, lo2, hi2, hiTree, hiLeft, hiRight, hiComp, sz2, orderings, invIndex, numTaxa);
+
+        int L_GT = sz1 + sz2 + sz3;
+        int lgA, lgB;
+        if (L_GT == totalN) {
+            lgA = sizeA;
+            lgB = sizeB;
+        } else {
+            int coreA = ssCoreIntersect(tGT, 0, L_GT, loTree, loLeft, loRight, orderings, invIndex, numTaxa);
+            lgA = loComp ? (L_GT - coreA) : coreA;
+            int coreB = ssCoreIntersect(tGT, 0, L_GT, hiTree, hiLeft, hiRight, orderings, invIndex, numTaxa);
+            lgB = hiComp ? (L_GT - coreB) : coreB;
+        }
+
+        int a2 = lgA - a0 - a1;
+        int b2 = lgB - b0 - b1;
+        int c0 = sz1 - a0 - b0;
+        int c1 = sz2 - a1 - b1;
+        int c2 = sz3 - a2 - b2;
+
+        if (a2 < 0 || b2 < 0 || c0 < 0 || c1 < 0 || c2 < 0) continue;
+
+        long long a[3] = {a0, a1, a2};
+        long long b[3] = {b0, b1, b2};
+        long long c[3] = {c0, c1, c2};
+
+        long long twoQI = 0LL;
+        #pragma unroll
+        for (int p = 0; p < 6; p++) {
+            long long ai = a[PI[p]], bj = b[PJ[p]], ck = c[PK[p]];
+            long long su = ai + bj + ck - 3;
+            if (su > 0) twoQI += ai * bj * ck * su;
+        }
+        twoScore += (long long) freq * twoQI;
+    }
+
+    twoScores[idx] = twoScore;
+}
+
 // ---------------------------------------------------------------------------
 // Progress-bar helpers (host-side, used in the batch loop)
 // ---------------------------------------------------------------------------
@@ -683,6 +808,167 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsGPU(
     env->ReleaseIntArrayElements(jPartLeafCount, hPartLeafCount, JNI_ABORT);
     env->ReleaseIntArrayElements(jOrderings,     hOrderings,     JNI_ABORT);
     env->ReleaseIntArrayElements(jInvIndex,      hInvIndex,      JNI_ABORT);
+
+    return result;
+}
+
+// ---------------------------------------------------------------------------
+// LEGACY JNI entry point: smaller-side traversal (no prefix sums).
+// ---------------------------------------------------------------------------
+JNIEXPORT jlongArray JNICALL
+Java_astralx_gpu_GPUWeightCalculator_computeWeightsSmallerSideGPU(
+    JNIEnv* env, jclass cls,
+    jintArray jSplits, jintArray jParts, jintArray jOrderings, jintArray jInvIndex,
+    jint numSplits, jint numParts, jint numGpuTrees, jint numTaxa, jint totalN,
+    jint batchSizeHint, jdouble vramFraction)
+{
+    jint* hSplits    = env->GetIntArrayElements(jSplits,    NULL);
+    jint* hParts     = env->GetIntArrayElements(jParts,     NULL);
+    jint* hOrderings = env->GetIntArrayElements(jOrderings, NULL);
+    jint* hInvIndex  = env->GetIntArrayElements(jInvIndex,  NULL);
+
+    // --- Upload static data once (parts, orderings, invIndex) ---
+    int *dParts, *dOrderings, *dInvIndex;
+    size_t partsSz    = (size_t)numParts  * 9 * sizeof(int);
+    size_t orderingSz = (size_t)numGpuTrees * numTaxa * sizeof(int);
+
+    cudaMalloc(&dParts,     partsSz);
+    cudaMalloc(&dOrderings, orderingSz);
+    cudaMalloc(&dInvIndex,  orderingSz);
+    cudaMemcpy(dParts,     hParts,     partsSz,    cudaMemcpyHostToDevice);
+    cudaMemcpy(dOrderings, hOrderings, orderingSz, cudaMemcpyHostToDevice);
+    cudaMemcpy(dInvIndex,  hInvIndex,  orderingSz, cudaMemcpyHostToDevice);
+
+    {
+        size_t staticTotal = partsSz + 2 * orderingSz;
+        size_t freeAfterStatic = 0, totalVRAM = 0;
+        cudaMemGetInfo(&freeAfterStatic, &totalVRAM);
+        fprintf(stderr,
+            "[ASTRAL-X GPU] weight static data uploaded (smaller-side traversal, no prefix sums):\n"
+            "  orderings : %6.1f MB\n"
+            "  invIndex  : %6.1f MB\n"
+            "  parts     : %6.1f MB  (%d unique tripartitions × 9 ints)\n"
+            "  ─────────────────────\n"
+            "  static total : %6.1f MB   (VRAM free after: %.1f MB / %.1f MB)\n",
+            orderingSz / 1e6, orderingSz / 1e6, partsSz / 1e6, numParts,
+            staticTotal / 1e6, freeAfterStatic / 1e6, totalVRAM / 1e6);
+        fflush(stderr);
+    }
+
+    // --- Determine batch size (per-split: 40 B in + 8 B out) ---
+    int batchSize;
+    if (batchSizeHint == -1) {
+        batchSize = numSplits;
+        fprintf(stderr, "[ASTRAL-X GPU] batching disabled — single launch, %d splits\n", numSplits);
+    } else if (batchSizeHint > 0) {
+        batchSize = (batchSizeHint < numSplits) ? batchSizeHint : numSplits;
+        fprintf(stderr, "[ASTRAL-X GPU] manual batch size: %d  (numSplits=%d)\n", batchSize, numSplits);
+    } else {
+        size_t freeVRAM = 0, totalVRAM = 0;
+        cudaMemGetInfo(&freeVRAM, &totalVRAM);
+        size_t usable = (size_t)((double)freeVRAM * (double)vramFraction);
+        size_t perSplitBytes = 10 * sizeof(int) + sizeof(long long);
+        long long autoSize = (long long)(usable / perSplitBytes);
+        if (autoSize < 1) autoSize = 1;
+        if (autoSize > (long long)numSplits) autoSize = (long long)numSplits;
+        batchSize = (int)autoSize;
+        fprintf(stderr,
+            "[ASTRAL-X GPU] adaptive batch: freeVRAM=%.2f GB, occupancy=%.0f%%, usable=%.2f GB, "
+            "perSplit=%zu B → batchSize=%d  (numSplits=%d, numBatches=%d)\n",
+            freeVRAM / 1e9, (double)vramFraction * 100.0, usable / 1e9,
+            perSplitBytes, batchSize, numSplits, (numSplits + batchSize - 1) / batchSize);
+    }
+
+    int*       dSplits    = NULL;
+    long long* dTwoScores = NULL;
+    while (batchSize > 0) {
+        size_t splitBufSz = (size_t)batchSize * 10 * sizeof(int);
+        size_t scoreBufSz = (size_t)batchSize * sizeof(long long);
+        cudaError_t e1 = cudaMalloc(&dSplits,    splitBufSz);
+        cudaError_t e2 = cudaMalloc(&dTwoScores, scoreBufSz);
+        if (e1 == cudaSuccess && e2 == cudaSuccess) break;
+        if (dSplits)    { cudaFree(dSplits);    dSplits    = NULL; }
+        if (dTwoScores) { cudaFree(dTwoScores); dTwoScores = NULL; }
+        batchSize /= 2;
+        fprintf(stderr, "[ASTRAL-X GPU] cudaMalloc failed, retrying with batchSize=%d\n", batchSize);
+    }
+    if (batchSize <= 0 || dSplits == NULL || dTwoScores == NULL) {
+        fprintf(stderr, "[ASTRAL-X GPU] FATAL: cannot allocate GPU batch buffers\n");
+        cudaFree(dParts); cudaFree(dOrderings); cudaFree(dInvIndex);
+        env->ReleaseIntArrayElements(jSplits,    hSplits,    JNI_ABORT);
+        env->ReleaseIntArrayElements(jParts,     hParts,     JNI_ABORT);
+        env->ReleaseIntArrayElements(jOrderings, hOrderings, JNI_ABORT);
+        env->ReleaseIntArrayElements(jInvIndex,  hInvIndex,  JNI_ABORT);
+        return NULL;
+    }
+
+    long long* hTwoScores = new long long[numSplits]();
+
+    int    blockSize  = WB_BLOCK;
+    int    numBatches = (numSplits + batchSize - 1) / batchSize;
+    double t_loop_start = wb_now_sec();
+    const char* GRN = wb_use_color() ? "\033[32m" : "";
+    const char* RST = wb_use_color() ? "\033[0m"  : "";
+    char   bar_buf[WB_BAR_W * 3 + 1];
+
+    for (int b = 0; b < numBatches; b++) {
+        int offset   = b * batchSize;
+        int curBatch = (offset + batchSize <= numSplits) ? batchSize : (numSplits - offset);
+
+        cudaMemcpy(dSplits, hSplits + (size_t)offset * 10,
+                   (size_t)curBatch * 10 * sizeof(int), cudaMemcpyHostToDevice);
+
+        int gridSize = (curBatch + blockSize - 1) / blockSize;
+        computeWeightsSmallerSideKernel<<<gridSize, blockSize>>>(
+            dSplits, dParts, dOrderings, dInvIndex,
+            curBatch, numParts, numTaxa, totalN, dTwoScores);
+
+        cudaError_t err = cudaDeviceSynchronize();
+        if (err != cudaSuccess) {
+            fprintf(stderr, "[ASTRAL-X GPU] kernel error (batch %d/%d): %s\n",
+                    b + 1, numBatches, cudaGetErrorString(err));
+        }
+
+        cudaMemcpy(hTwoScores + offset, dTwoScores,
+                   (size_t)curBatch * sizeof(long long), cudaMemcpyDeviceToHost);
+
+        if (numBatches > 1) {
+            double elapsed  = wb_now_sec() - t_loop_start;
+            double avg_sec  = elapsed / (b + 1);
+            int    rem      = numBatches - (b + 1);
+            double pct      = 100.0 * (b + 1) / numBatches;
+            wb_build_bar(bar_buf, b + 1, numBatches);
+            if (rem == 0) {
+                char dur_buf[32];
+                wb_fmt_duration(elapsed, dur_buf, sizeof(dur_buf));
+                fprintf(stderr,
+                    "\r  %s[GPU]%s weight  %s[%s]%s  %d/%d  100%%  done in %s                    \n",
+                    GRN, RST, GRN, bar_buf, RST, numBatches, numBatches, dur_buf);
+            } else {
+                char eta_buf[32];
+                wb_fmt_duration(avg_sec * rem, eta_buf, sizeof(eta_buf));
+                fprintf(stderr,
+                    "\r  %s[GPU]%s weight  %s[%s]%s  %d/%d  %5.1f%%  %.2fs/batch  ETA: %-8s",
+                    GRN, RST, GRN, bar_buf, RST, b + 1, numBatches, pct, avg_sec, eta_buf);
+            }
+            fflush(stderr);
+        }
+    }
+
+    jlongArray result = env->NewLongArray(numSplits);
+    env->SetLongArrayRegion(result, 0, numSplits, (jlong*)hTwoScores);
+
+    delete[] hTwoScores;
+    cudaFree(dSplits);
+    cudaFree(dTwoScores);
+    cudaFree(dParts);
+    cudaFree(dOrderings);
+    cudaFree(dInvIndex);
+
+    env->ReleaseIntArrayElements(jSplits,    hSplits,    JNI_ABORT);
+    env->ReleaseIntArrayElements(jParts,     hParts,     JNI_ABORT);
+    env->ReleaseIntArrayElements(jOrderings, hOrderings, JNI_ABORT);
+    env->ReleaseIntArrayElements(jInvIndex,  hInvIndex,  JNI_ABORT);
 
     return result;
 }

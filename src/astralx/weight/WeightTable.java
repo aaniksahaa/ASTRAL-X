@@ -87,10 +87,29 @@ public class WeightTable {
                          && GPUWeightCalculator.tryLoad();
 
         if (useGPU) {
-            // Build the deduplicated node CSR from PartitionTable: each unique
-            // tripartition is stored once (as an exemplar leaf interval lo,mid,hi
-            // plus its frequency), bucketed by exemplar tree.
-            NodeCSR csr = buildDedupNodeCSR(partTable, partTrees);
+            Config cfg = Config.getInstance();
+            boolean smallerSide = (cfg.getWeightIntersectionMethod()
+                                   == Config.WeightIntersectionMethod.SMALLER_SIDE_TRAVERSAL);
+
+            // Each path keeps its own resident-data representation.  PREFIX_SUM builds
+            // the deduplicated node CSR (and the per-block prefix working memory);
+            // SMALLER_SIDE_TRAVERSAL builds none of that — it streams the parts and
+            // walks the smaller side per intersection, with zero per-thread state.
+            NodeCSR csr = smallerSide ? null : buildDedupNodeCSR(partTable, partTrees);
+
+            // Resident data memory (for the vram-control-factor sizing only).
+            long orderingMem = (long) numGpuTrees * n * 2 * Integer.BYTES; // orderings + invIndex
+            long modeDataMem; String modeDataDesc;
+            if (smallerSide) {
+                modeDataMem  = (long) partTable.size() * 9 * Integer.BYTES; // parts
+                modeDataDesc = "parts";
+            } else {
+                modeDataMem  = (long) csr.nodeData.length      * Integer.BYTES
+                             + (long) csr.nodeFreq.length      * Integer.BYTES
+                             + (long) csr.nodeOffset.length    * Integer.BYTES
+                             + (long) csr.partLeafCount.length * Integer.BYTES;
+                modeDataDesc = "nodeCSR";
+            }
 
             // Resolve batchSizeHint
             //   Priority: no-batch  >  gpu-batches  >  gpu-batch-size
@@ -98,7 +117,6 @@ public class WeightTable {
             //   -1  = no batching (single launch)
             //    0  = auto: native queries free VRAM and computes batch size itself
             //   >0  = exact splits-per-batch resolved here; native uses it directly
-            Config cfg = Config.getInstance();
             int batchSizeHint;
             String batchDesc;
             if (!cfg.isGpuBatch()) {
@@ -114,18 +132,14 @@ public class WeightTable {
             } else if (cfg.isGpuVramControlFactorSet()) {
                 // Manual resident-relative sizing:  mem(batch) = F × mem(resident)
                 double F           = cfg.getGpuVramControlFactor();
-                long   nodeMem     = (long) csr.nodeData.length      * Integer.BYTES
-                                   + (long) csr.nodeOffset.length    * Integer.BYTES
-                                   + (long) csr.partLeafCount.length * Integer.BYTES;
-                long   orderingMem = (long) numGpuTrees * n  *  2 * Integer.BYTES; // orderings + invIndex
-                long   residentMem = nodeMem + orderingMem;
+                long   residentMem = modeDataMem + orderingMem;
                 long   batchMem    = (long)(F * residentMem);
                 long   perSplit    = 10L * Integer.BYTES + Long.BYTES;              // 48 B/split
                 batchSizeHint      = (int) Math.max(1, Math.min(numSplits, batchMem / perSplit));
                 int numBatches     = (numSplits + batchSizeHint - 1) / batchSizeHint;
                 batchDesc = String.format(
-                    "vram-control-factor=%.3f  resident=%.1f MB (nodeCSR=%.1f orderings=%.1f)  batch=%.1f MB  → %d batches",
-                    F, residentMem / 1e6, nodeMem / 1e6, orderingMem / 1e6, batchMem / 1e6, numBatches);
+                    "vram-control-factor=%.3f  resident=%.1f MB (%s=%.1f orderings=%.1f)  batch=%.1f MB  → %d batches",
+                    F, residentMem / 1e6, modeDataDesc, modeDataMem / 1e6, orderingMem / 1e6, batchMem / 1e6, numBatches);
             } else {
                 // Default: auto — pass 0 to native; native queries free VRAM after static upload
                 // and computes batchSize = floor(freeVRAM * vramFraction / 48 B)
@@ -133,11 +147,20 @@ public class WeightTable {
                 batchDesc = String.format("auto (free-VRAM adaptive, occupancy=%.0f%%)",
                     cfg.getGpuVramFraction() * 100);
             }
-            Logging.info("Weight table: GPU path  splits=%d  uniqueParts=%d  trees=%d  maxLeaf=%d  batching=%s",
-                numSplits, csr.totalNodes, partTrees.size(), csr.maxLeafCount, batchDesc);
 
-            boolean ok = computeScoresGPU(splitList, csr, clusterTable, clusterTrees, partTrees,
-                                          numGpuTrees, scoreArray, batchSizeHint, cfg.getGpuVramFraction());
+            boolean ok;
+            if (smallerSide) {
+                Logging.info("Weight table: GPU path (smaller-side traversal)  splits=%d  uniqueParts=%d  trees=%d  batching=%s",
+                    numSplits, partTable.size(), partTrees.size(), batchDesc);
+                ok = computeScoresGPUSmallerSide(splitList, partTable, clusterTable,
+                                                 clusterTrees, partTrees, numGpuTrees, scoreArray,
+                                                 batchSizeHint, cfg.getGpuVramFraction());
+            } else {
+                Logging.info("Weight table: GPU path (prefix-sum tree-DP)  splits=%d  uniqueParts=%d  trees=%d  maxLeaf=%d  batching=%s",
+                    numSplits, csr.totalNodes, partTrees.size(), csr.maxLeafCount, batchDesc);
+                ok = computeScoresGPUPrefixSum(splitList, csr, clusterTable, clusterTrees, partTrees,
+                                               numGpuTrees, scoreArray, batchSizeHint, cfg.getGpuVramFraction());
+            }
             if (!ok) {
                 Logging.info("GPU weight path infeasible (e.g. shared-memory limit), falling back to CPU");
                 computeScoresCPU(splitList, partTable.entries(), clusterTable,
@@ -182,26 +205,117 @@ public class WeightTable {
      * Partition treeIndex values are stored as (p.treeIndex + k) so the kernel naturally
      * reads from the original-tree half of the combined array — no kernel changes needed.
      */
-    private boolean computeScoresGPU(List<BipartitionSplit> splitList,
-                                      NodeCSR csr,
-                                      ClusterTable clusterTable,
-                                      List<Tree> clusterTrees,
-                                      List<Tree> partTrees,
-                                      int numGpuTrees,
-                                      long[] scoreArray,
-                                      int batchSizeHint,
-                                      double vramFraction) {
-        int numSplits       = splitList.size();
-        int numClusterTrees = clusterTrees.size();
-        int numPartTrees    = partTrees.size();
-        boolean splitTrees  = (clusterTrees != partTrees);
-        // partTreeOffset: orderings/invIndex slot offset so node-CSR leaf lookups
-        // index into the original-tree half of the combined array.
-        int partTreeOffset = splitTrees ? numClusterTrees : 0;
+    private boolean computeScoresGPUPrefixSum(List<BipartitionSplit> splitList,
+                                               NodeCSR csr,
+                                               ClusterTable clusterTable,
+                                               List<Tree> clusterTrees,
+                                               List<Tree> partTrees,
+                                               int numGpuTrees,
+                                               long[] scoreArray,
+                                               int batchSizeHint,
+                                               double vramFraction) {
+        int numSplits      = splitList.size();
+        int numPartTrees   = partTrees.size();
+        boolean splitTrees = (clusterTrees != partTrees);
+        int partTreeOffset = splitTrees ? clusterTrees.size() : 0;
 
-        // --- splits: numSplits * 10 ints ---
-        // Cluster treeIndex values are 0..k-1 (completed trees, used for membership).
-        // [aTree, aLo, aHi, aComp, aSize, bTree, bLo, bHi, bComp, bSize]
+        int[] splitsData = buildSplitsData(splitList, clusterTable);
+        int[][] oi       = buildOrderingsInvIndex(clusterTrees, partTrees, numGpuTrees);
+        int[] orderings  = oi[0], invIndex = oi[1];
+
+        long t1 = System.nanoTime();
+        long[] twoScores = GPUWeightCalculator.computeWeightsGPU(
+            splitsData, csr.nodeData, csr.nodeFreq, csr.nodeOffset, csr.partLeafCount,
+            orderings, invIndex,
+            numSplits, numPartTrees, partTreeOffset, csr.maxLeafCount,
+            numGpuTrees, n,
+            batchSizeHint, vramFraction);
+        long gpuMs = (System.nanoTime() - t1) / 1_000_000;
+
+        splitsData = null; orderings = null; invIndex = null;   // let GC reclaim
+        if (twoScores == null) {
+            Logging.info("  GPU kernel returned null after %d ms (infeasible)", gpuMs);
+            return false;
+        }
+        Logging.info("  GPU kernel returned in %d ms", gpuMs);
+        for (int i = 0; i < numSplits; i++) scoreArray[i] = twoScores[i] / 2L;
+        return true;
+    }
+
+    /**
+     * Legacy GPU path: smaller-side traversal, no prefix sums.
+     *
+     * Packs the deduplicated tripartitions into the 9-int "parts" layout and calls
+     * the one-thread-per-split kernel that counts each intersection by walking the
+     * smaller range.  Uses the same splits and orderings/invIndex layout as the
+     * prefix-sum path; builds NO node CSR and NO prefix working memory.
+     */
+    private boolean computeScoresGPUSmallerSide(List<BipartitionSplit> splitList,
+                                                 PartitionTable partTable,
+                                                 ClusterTable clusterTable,
+                                                 List<Tree> clusterTrees,
+                                                 List<Tree> partTrees,
+                                                 int numGpuTrees,
+                                                 long[] scoreArray,
+                                                 int batchSizeHint,
+                                                 double vramFraction) {
+        int numSplits      = splitList.size();
+        boolean splitTrees = (clusterTrees != partTrees);
+        int partTreeOffset = splitTrees ? clusterTrees.size() : 0;
+
+        int[] splitsData = buildSplitsData(splitList, clusterTable);
+
+        // --- parts: numParts * 9 ints (deduplicated tripartitions) ---
+        // treeIdx stored as (p.treeIndex + partTreeOffset) so the kernel reads the
+        // original-tree half of the combined orderings/invIndex.
+        // [treeIdx, lo1, hi1, lo2, hi2, sz1, sz2, sz3, frequency]
+        int numParts = partTable.size();
+        int[] partsData = new int[numParts * 9];
+        int j = 0;
+        for (PartitionTable.Entry pe : partTable.entries()) {
+            Partition p = pe.exemplar;
+            int base = j * 9;
+            partsData[base + 0] = p.treeIndex + partTreeOffset;
+            partsData[base + 1] = p.leftStart;
+            partsData[base + 2] = p.leftEnd;
+            partsData[base + 3] = p.rightStart;
+            partsData[base + 4] = p.rightEnd;
+            partsData[base + 5] = p.size1;
+            partsData[base + 6] = p.size2;
+            partsData[base + 7] = p.size3;
+            partsData[base + 8] = pe.frequency;
+            j++;
+        }
+
+        int[][] oi      = buildOrderingsInvIndex(clusterTrees, partTrees, numGpuTrees);
+        int[] orderings = oi[0], invIndex = oi[1];
+
+        long t1 = System.nanoTime();
+        long[] twoScores = GPUWeightCalculator.computeWeightsSmallerSideGPU(
+            splitsData, partsData, orderings, invIndex,
+            numSplits, numParts, numGpuTrees, n, n,
+            batchSizeHint, vramFraction);
+        long gpuMs = (System.nanoTime() - t1) / 1_000_000;
+
+        splitsData = null; partsData = null; orderings = null; invIndex = null;   // let GC reclaim
+        if (twoScores == null) {
+            Logging.info("  GPU kernel returned null after %d ms (infeasible)", gpuMs);
+            return false;
+        }
+        Logging.info("  GPU kernel returned in %d ms", gpuMs);
+        for (int i = 0; i < numSplits; i++) scoreArray[i] = twoScores[i] / 2L;
+        return true;
+    }
+
+    // --- shared GPU input packers (identical layout for both kernels) ---
+
+    /**
+     * splits: numSplits * 10 ints.  Cluster treeIndex values are 0..k-1 (completed
+     * trees, used for membership).
+     * [aTree, aLo, aHi, aComp, aSize, bTree, bLo, bHi, bComp, bSize]
+     */
+    private int[] buildSplitsData(List<BipartitionSplit> splitList, ClusterTable clusterTable) {
+        int numSplits = splitList.size();
         int[] splitsData = new int[numSplits * 10];
         for (int i = 0; i < numSplits; i++) {
             BipartitionSplit split = splitList.get(i);
@@ -223,68 +337,44 @@ public class WeightTable {
             }
             // else: all zeros → empty clusters → kernel yields score 0 for this split.
         }
+        return splitsData;
+    }
 
-        // --- orderings + invIndex: numGpuTrees * n ints each ---
-        // orderings[t*n + pos]   = postorderArray[pos]
-        // invIndex [t*n + taxon] = positionMap[taxon]  (-1 if absent)
-        //
-        // Layout when splitTrees:
-        //   slots 0..k-1   filled from clusterTrees (completed)  — cluster membership
-        //   slots k..2k-1  filled from partTrees (original)      — gene-tree leaves
-        // Layout when !splitTrees: same list fills slots 0..k-1.
+    /**
+     * orderings + invIndex: numGpuTrees * n ints each.
+     *   orderings[t*n + pos]   = postorderArray[pos]
+     *   invIndex [t*n + taxon] = positionMap[taxon]  (-1 if absent)
+     *
+     * Layout when splitTrees (autocomplete active):
+     *   slots 0..k-1   from clusterTrees (completed)  — cluster membership
+     *   slots k..2k-1  from partTrees (original)      — gene-tree leaves
+     * Otherwise the single list fills slots 0..k-1.
+     *
+     * @return int[2][] = {orderings, invIndex}
+     */
+    private int[][] buildOrderingsInvIndex(List<Tree> clusterTrees, List<Tree> partTrees,
+                                            int numGpuTrees) {
+        int numClusterTrees = clusterTrees.size();
+        boolean splitTrees  = (clusterTrees != partTrees);
         int[] orderings = new int[numGpuTrees * n];
         int[] invIndex  = new int[numGpuTrees * n];
         Arrays.fill(invIndex, -1);
         for (int t = 0; t < numClusterTrees; t++) {
             Tree tree = clusterTrees.get(t);
             int base = t * n;
-            for (int pos = 0; pos < tree.leafCount; pos++) {
-                orderings[base + pos] = tree.postorderArray[pos];
-            }
-            for (int taxon = 0; taxon < n; taxon++) {
-                invIndex[base + taxon] = tree.positionMap[taxon];
-            }
+            for (int pos = 0; pos < tree.leafCount; pos++) orderings[base + pos] = tree.postorderArray[pos];
+            for (int taxon = 0; taxon < n; taxon++)        invIndex[base + taxon] = tree.positionMap[taxon];
         }
         if (splitTrees) {
+            int numPartTrees = partTrees.size();
             for (int t = 0; t < numPartTrees; t++) {
                 Tree tree = partTrees.get(t);
                 int base = (numClusterTrees + t) * n;
-                for (int pos = 0; pos < tree.leafCount; pos++) {
-                    orderings[base + pos] = tree.postorderArray[pos];
-                }
-                for (int taxon = 0; taxon < n; taxon++) {
-                    invIndex[base + taxon] = tree.positionMap[taxon];
-                }
+                for (int pos = 0; pos < tree.leafCount; pos++) orderings[base + pos] = tree.postorderArray[pos];
+                for (int taxon = 0; taxon < n; taxon++)        invIndex[base + taxon] = tree.positionMap[taxon];
             }
         }
-
-        // --- call GPU ---
-        long t1 = System.nanoTime();
-        long[] twoScores = GPUWeightCalculator.computeWeightsGPU(
-            splitsData, csr.nodeData, csr.nodeFreq, csr.nodeOffset, csr.partLeafCount,
-            orderings, invIndex,
-            numSplits, numPartTrees, partTreeOffset, csr.maxLeafCount,
-            numGpuTrees, n,
-            batchSizeHint, vramFraction);
-        long gpuMs = (System.nanoTime() - t1) / 1_000_000;
-
-        // Input arrays are no longer needed after the kernel returns; free them
-        // before the twoScores loop so GC can reclaim memory while we fill scoreArray.
-        splitsData = null;
-        orderings  = null;
-        invIndex   = null;
-
-        if (twoScores == null) {
-            Logging.info("  GPU kernel returned null after %d ms (infeasible)", gpuMs);
-            return false;
-        }
-        Logging.info("  GPU kernel returned in %d ms", gpuMs);
-
-        // twoScores[i] = 2 * score; divide by 2
-        for (int i = 0; i < numSplits; i++) {
-            scoreArray[i] = twoScores[i] / 2L;
-        }
-        return true;
+        return new int[][]{ orderings, invIndex };
     }
 
     // -------------------------------------------------------------------------
