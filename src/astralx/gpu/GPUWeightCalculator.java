@@ -56,8 +56,9 @@ public class GPUWeightCalculator {
      *
      * @param splits         flat int array, numSplits × 10
      *                       [aTree,aLo,aHi,aComp,aSize, bTree,bLo,bHi,bComp,bSize]
-     * @param nodeData       flat int array, totalNodes × 3  [lo, mid, hi]
-     * @param nodeOffset     flat int array, numPartTrees + 1  (CSR row pointers)
+     * @param nodeData       flat int array, numUnique × 3  [lo, mid, hi] (exemplar interval)
+     * @param nodeFreq       flat int array, numUnique  (frequency of each unique tripartition)
+     * @param nodeOffset     flat int array, numPartTrees + 1  (CSR row pointers, bucket by exemplar)
      * @param partLeafCount  flat int array, numPartTrees  (leaf count L per gene tree)
      * @param orderings      flat int array, numGpuTrees × numTaxa
      * @param invIndex       flat int array, numGpuTrees × numTaxa
@@ -76,6 +77,7 @@ public class GPUWeightCalculator {
     public static native long[] computeWeightsGPU(
         int[] splits,
         int[] nodeData,
+        int[] nodeFreq,
         int[] nodeOffset,
         int[] partLeafCount,
         int[] orderings,

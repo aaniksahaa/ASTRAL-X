@@ -11,7 +11,6 @@ import astralx.gpu.GPUWeightCalculator;
 import astralx.partition.Partition;
 import astralx.partition.PartitionTable;
 import astralx.tree.Tree;
-import astralx.tree.TreeNode;
 import astralx.util.ProgressBar;
 import astralx.util.Threading;
 
@@ -88,10 +87,10 @@ public class WeightTable {
                          && GPUWeightCalculator.tryLoad();
 
         if (useGPU) {
-            // Build per-tree internal-node CSR over the gene trees (partTrees).
-            // Each non-root internal node contributes one tripartition as a
-            // contiguous leaf interval (lo, mid, hi); no global dedup.
-            NodeCSR csr = buildNodeCSR(partTrees);
+            // Build the deduplicated node CSR from PartitionTable: each unique
+            // tripartition is stored once (as an exemplar leaf interval lo,mid,hi
+            // plus its frequency), bucketed by exemplar tree.
+            NodeCSR csr = buildDedupNodeCSR(partTable, partTrees);
 
             // Resolve batchSizeHint
             //   Priority: no-batch  >  gpu-batches  >  gpu-batch-size
@@ -134,7 +133,7 @@ public class WeightTable {
                 batchDesc = String.format("auto (free-VRAM adaptive, occupancy=%.0f%%)",
                     cfg.getGpuVramFraction() * 100);
             }
-            Logging.info("Weight table: GPU path  splits=%d  internalNodes=%d  trees=%d  maxLeaf=%d  batching=%s",
+            Logging.info("Weight table: GPU path  splits=%d  uniqueParts=%d  trees=%d  maxLeaf=%d  batching=%s",
                 numSplits, csr.totalNodes, partTrees.size(), csr.maxLeafCount, batchDesc);
 
             boolean ok = computeScoresGPU(splitList, csr, clusterTable, clusterTrees, partTrees,
@@ -262,7 +261,7 @@ public class WeightTable {
         // --- call GPU ---
         long t1 = System.nanoTime();
         long[] twoScores = GPUWeightCalculator.computeWeightsGPU(
-            splitsData, csr.nodeData, csr.nodeOffset, csr.partLeafCount,
+            splitsData, csr.nodeData, csr.nodeFreq, csr.nodeOffset, csr.partLeafCount,
             orderings, invIndex,
             numSplits, numPartTrees, partTreeOffset, csr.maxLeafCount,
             numGpuTrees, n,
@@ -293,78 +292,79 @@ public class WeightTable {
     // -------------------------------------------------------------------------
 
     /**
-     * Compact, per-tree representation of every non-root internal node of the
-     * gene trees.  Each such node is one tripartition (M1|M2|M3), stored as a
-     * contiguous leaf interval (lo, mid, hi) where M1 = [lo,mid), M2 = [mid,hi),
-     * M3 = Lg \ [lo,hi).  Mirrors the gene-tree tripartitions extracted by
-     * PartitionTable, but grouped by tree (no global dedup) for the prefix-sum
-     * GPU kernel.
+     * Compact, per-exemplar-tree representation of the DEDUPLICATED gene-tree
+     * tripartitions.  Each unique tripartition (M1|M2|M3) is stored once, as a
+     * contiguous leaf interval (lo, mid, hi) of its exemplar tree (M1 = [lo,mid),
+     * M2 = [mid,hi), M3 = Lg \ [lo,hi)), together with its frequency (how many
+     * gene-tree nodes realize it).  Entries are bucketed by exemplar tree so the
+     * GPU kernel can build each tree's leaf prefix sums once and score only that
+     * tree's unique tripartitions.
+     *
+     * This recovers cross-tree dedup at O(L) working memory (one tree's prefix
+     * live at a time) — see DOCS/weight-dedup-by-exemplar-tree-design.md.
+     * Scoring is bit-identical to summing QI over every node individually,
+     * because Σ_nodes QI ≡ Σ_unique frequency·QI.
      */
     private static final class NodeCSR {
-        int[] nodeData;       // totalNodes * 3   [lo, mid, hi]
-        int[] nodeOffset;     // numTrees + 1     CSR row pointers
-        int[] partLeafCount;  // numTrees         leaf count L per tree
-        int   maxLeafCount;   // max L over trees (shared-memory sizing)
-        int   totalNodes;     // sum of contributing internal nodes
+        int[] nodeData;       // numUnique * 3   [lo, mid, hi] of the exemplar
+        int[] nodeFreq;       // numUnique       frequency (occurrence count)
+        int[] nodeOffset;     // numTrees + 1    CSR row pointers (bucket by exemplar tree)
+        int[] partLeafCount;  // numTrees        leaf count L per tree
+        int   maxLeafCount;   // max L over trees with ≥1 exemplar (shared-mem sizing)
+        int   totalNodes;     // numUnique
     }
 
-    private static NodeCSR buildNodeCSR(List<Tree> partTrees) {
+    /**
+     * Build the deduplicated node CSR from the already-computed PartitionTable,
+     * bucketing unique tripartitions by their exemplar tree index.
+     */
+    private static NodeCSR buildDedupNodeCSR(PartitionTable partTable,
+                                              List<Tree> partTrees) {
         int numTrees = partTrees.size();
-        int[] nodeOffset    = new int[numTrees + 1];
+
+        // Pass 1: count unique tripartitions per exemplar tree → CSR offsets.
+        int[] nodeOffset = new int[numTrees + 1];
+        for (PartitionTable.Entry e : partTable.entries()) {
+            nodeOffset[e.exemplar.treeIndex + 1]++;
+        }
+        for (int g = 0; g < numTrees; g++) nodeOffset[g + 1] += nodeOffset[g];
+        int total = nodeOffset[numTrees];          // == numUnique == partTable.size()
+        if ((long) total * 3 > Integer.MAX_VALUE) {
+            throw new IllegalStateException("Too many tripartitions for a single int[] CSR: " + total);
+        }
+
+        // Pass 2: scatter each unique tripartition into its exemplar tree's bucket.
+        int[] nodeData = new int[total * 3];
+        int[] nodeFreq = new int[total];
+        int[] cursor   = nodeOffset.clone();       // per-tree write cursor
+        for (PartitionTable.Entry e : partTable.entries()) {
+            Partition p = e.exemplar;
+            int pos = cursor[p.treeIndex]++;
+            int b   = pos * 3;
+            nodeData[b]     = p.leftStart;          // lo
+            nodeData[b + 1] = p.leftEnd;            // mid  (= p.rightStart)
+            nodeData[b + 2] = p.rightEnd;           // hi
+            nodeFreq[pos]   = e.frequency;
+        }
+
+        // Per-tree leaf counts; maxLeaf only over trees that actually need a prefix
+        // (an exemplar-empty tree is skipped by the kernel, so its L never matters).
         int[] partLeafCount = new int[numTrees];
         int   maxLeaf = 0;
-        long  total   = 0;
         for (int g = 0; g < numTrees; g++) {
-            Tree tr = partTrees.get(g);
-            partLeafCount[g] = tr.leafCount;
-            if (tr.leafCount > maxLeaf) maxLeaf = tr.leafCount;
-            int c = countContribNodes(tr.root);
-            nodeOffset[g + 1] = nodeOffset[g] + c;
-            total += c;
-        }
-        if (total > Integer.MAX_VALUE / 3) {
-            throw new IllegalStateException("Too many internal nodes for a single int[] CSR: " + total);
-        }
-        int[] nodeData = new int[(int) total * 3];
-        for (int g = 0; g < numTrees; g++) {
-            int end = fillNodes(partTrees.get(g).root, nodeData, nodeOffset[g]);
-            assert end == nodeOffset[g + 1] : "CSR fill/count mismatch for tree " + g;
+            int L = partTrees.get(g).leafCount;
+            partLeafCount[g] = L;
+            if (nodeOffset[g + 1] > nodeOffset[g] && L > maxLeaf) maxLeaf = L;
         }
 
         NodeCSR csr = new NodeCSR();
         csr.nodeData      = nodeData;
+        csr.nodeFreq      = nodeFreq;
         csr.nodeOffset    = nodeOffset;
         csr.partLeafCount = partLeafCount;
         csr.maxLeafCount  = maxLeaf;
-        csr.totalNodes    = (int) total;
+        csr.totalNodes    = total;
         return csr;
-    }
-
-    /** Count non-root internal nodes (each yields one tripartition). */
-    private static int countContribNodes(TreeNode node) {
-        if (node.isLeaf()) return 0;
-        int c = countContribNodes(node.left) + countContribNodes(node.right);
-        if (!node.isRoot()) c++;
-        return c;
-    }
-
-    /**
-     * Post-order fill of (lo, mid, hi) for every non-root internal node, starting
-     * at node-index {@code pos}; returns the next free node-index.  Order matches
-     * PartitionTable's extraction (left, right, self).
-     */
-    private static int fillNodes(TreeNode node, int[] nodeData, int pos) {
-        if (node.isLeaf()) return pos;
-        pos = fillNodes(node.left,  nodeData, pos);
-        pos = fillNodes(node.right, nodeData, pos);
-        if (!node.isRoot()) {
-            int b = pos * 3;
-            nodeData[b]     = node.rangeStart;     // lo
-            nodeData[b + 1] = node.left.rangeEnd;  // mid  (= node.right.rangeStart)
-            nodeData[b + 2] = node.rangeEnd;       // hi
-            pos++;
-        }
-        return pos;
     }
 
     // -------------------------------------------------------------------------

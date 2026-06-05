@@ -141,6 +141,7 @@ __device__ void scoreSplit(
     int s,
     const int* __restrict__ splits,
     const int* __restrict__ nodeData,
+    const int* __restrict__ nodeFreq,
     const int* __restrict__ nodeOffset,
     const int* __restrict__ partLeafCount,
     const int* __restrict__ orderings,
@@ -173,6 +174,10 @@ __device__ void scoreSplit(
     long long threadAccum = 0LL;
 
     for (int g = 0; g < numPartTrees; g++) {
+        int nbeg = nodeOffset[g];
+        int nend = nodeOffset[g + 1];
+        if (nbeg == nend) continue;   // exemplar-empty tree → no prefix needed (uniform skip)
+
         int    L     = partLeafCount[g];
         size_t gBase = (size_t)(partTreeOffset + g) * numTaxa;
 
@@ -182,8 +187,6 @@ __device__ void scoreSplit(
         int lgA = pA[L];
         int lgB = pB[L];
 
-        int nbeg = nodeOffset[g];
-        int nend = nodeOffset[g + 1];
         for (int ni = nbeg + tid; ni < nend; ni += nthreads) {
             size_t nb = (size_t)ni * 3;
             int lo  = nodeData[nb];
@@ -218,7 +221,7 @@ __device__ void scoreSplit(
                 long long su = ai + bj + ck - 3;
                 if (su > 0) twoQI += ai * bj * ck * su;
             }
-            threadAccum += twoQI;
+            threadAccum += (long long) nodeFreq[ni] * twoQI;   // weight by occurrence count
         }
 
         __syncthreads();   // pA/pB reused next iteration; ensure node loop done
@@ -251,6 +254,7 @@ template<bool GLOBAL>
 __global__ void computeWeightsKernel(
     const int* __restrict__ splits,
     const int* __restrict__ nodeData,
+    const int* __restrict__ nodeFreq,
     const int* __restrict__ nodeOffset,
     const int* __restrict__ partLeafCount,
     const int* __restrict__ orderings,
@@ -273,7 +277,7 @@ __global__ void computeWeightsKernel(
         int* pA   = gPrefix + (size_t)blockIdx.x * 2 * prefixStride;
         int* pB   = pA + prefixStride;
         for (int s = blockIdx.x; s < curBatch; s += gridDim.x) {
-            scoreSplit(s, splits, nodeData, nodeOffset, partLeafCount,
+            scoreSplit(s, splits, nodeData, nodeFreq, nodeOffset, partLeafCount,
                        orderings, invIndex, numPartTrees, partTreeOffset,
                        numTaxa, totalN, pA, pB, scan, tid, nthreads, twoScores);
         }
@@ -283,7 +287,7 @@ __global__ void computeWeightsKernel(
         int* scan = smem + 2 * prefixStride;
         int s = blockIdx.x;
         if (s < curBatch) {
-            scoreSplit(s, splits, nodeData, nodeOffset, partLeafCount,
+            scoreSplit(s, splits, nodeData, nodeFreq, nodeOffset, partLeafCount,
                        orderings, invIndex, numPartTrees, partTreeOffset,
                        numTaxa, totalN, pA, pB, scan, tid, nthreads, twoScores);
         }
@@ -358,7 +362,7 @@ Java_astralx_gpu_GPUWeightCalculator_queryVRAMMiB(JNIEnv* env, jclass cls)
 JNIEXPORT jlongArray JNICALL
 Java_astralx_gpu_GPUWeightCalculator_computeWeightsGPU(
     JNIEnv* env, jclass cls,
-    jintArray jSplits, jintArray jNodeData, jintArray jNodeOffset,
+    jintArray jSplits, jintArray jNodeData, jintArray jNodeFreq, jintArray jNodeOffset,
     jintArray jPartLeafCount, jintArray jOrderings, jintArray jInvIndex,
     jint numSplits, jint numPartTrees, jint partTreeOffset, jint maxLeafCount,
     jint numGpuTrees, jint numTaxa,
@@ -369,6 +373,7 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsGPU(
     // -------------------------------------------------------------------------
     jint* hSplits        = env->GetIntArrayElements(jSplits,        NULL);
     jint* hNodeData      = env->GetIntArrayElements(jNodeData,      NULL);
+    jint* hNodeFreq      = env->GetIntArrayElements(jNodeFreq,      NULL);
     jint* hNodeOffset    = env->GetIntArrayElements(jNodeOffset,    NULL);
     jint* hPartLeafCount = env->GetIntArrayElements(jPartLeafCount, NULL);
     jint* hOrderings     = env->GetIntArrayElements(jOrderings,     NULL);
@@ -406,20 +411,23 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsGPU(
     // -------------------------------------------------------------------------
     // Upload static data ONCE (orderings, invIndex, node CSR stay resident)
     // -------------------------------------------------------------------------
-    int *dNodeData, *dNodeOffset, *dPartLeafCount, *dOrderings, *dInvIndex;
+    int *dNodeData, *dNodeFreq, *dNodeOffset, *dPartLeafCount, *dOrderings, *dInvIndex;
 
     size_t nodeDataSz   = (size_t)nodeDataLen          * sizeof(int);
+    size_t nodeFreqSz   = (size_t)(nodeDataLen / 3)    * sizeof(int);   // numUnique entries
     size_t nodeOffsetSz = (size_t)(numPartTrees + 1)   * sizeof(int);
     size_t partLeafSz   = (size_t)numPartTrees         * sizeof(int);
     size_t orderingSz   = (size_t)numGpuTrees * numTaxa * sizeof(int);
 
     cudaMalloc(&dNodeData,      nodeDataSz);
+    cudaMalloc(&dNodeFreq,      nodeFreqSz);
     cudaMalloc(&dNodeOffset,    nodeOffsetSz);
     cudaMalloc(&dPartLeafCount, partLeafSz);
     cudaMalloc(&dOrderings,     orderingSz);
     cudaMalloc(&dInvIndex,      orderingSz);
 
     cudaMemcpy(dNodeData,      hNodeData,      nodeDataSz,   cudaMemcpyHostToDevice);
+    cudaMemcpy(dNodeFreq,      hNodeFreq,      nodeFreqSz,   cudaMemcpyHostToDevice);
     cudaMemcpy(dNodeOffset,    hNodeOffset,    nodeOffsetSz, cudaMemcpyHostToDevice);
     cudaMemcpy(dPartLeafCount, hPartLeafCount, partLeafSz,   cudaMemcpyHostToDevice);
     cudaMemcpy(dOrderings,     hOrderings,     orderingSz,   cudaMemcpyHostToDevice);
@@ -434,7 +442,7 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsGPU(
             "[ASTRAL-X GPU] weight static data uploaded (prefix-sum tree-DP):\n"
             "  orderings   : %6.1f MB\n"
             "  invIndex    : %6.1f MB\n"
-            "  nodeData    : %6.1f MB  (%d internal nodes × 3 ints)\n"
+            "  nodeData    : %6.1f MB  (%d unique tripartitions × 3 ints + freq)\n"
             "  nodeOffset  : %6.1f MB\n"
             "  prefix mode : %s  (maxLeafCount=%d, shared/block=%.1f KB)\n"
             "  ─────────────────────\n"
@@ -474,10 +482,11 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsGPU(
         }
         if (dPrefix == NULL) {
             fprintf(stderr, "[ASTRAL-X GPU] weight: FATAL — cannot allocate global prefix pool\n");
-            cudaFree(dNodeData); cudaFree(dNodeOffset); cudaFree(dPartLeafCount);
-            cudaFree(dOrderings); cudaFree(dInvIndex);
+            cudaFree(dNodeData); cudaFree(dNodeFreq); cudaFree(dNodeOffset);
+            cudaFree(dPartLeafCount); cudaFree(dOrderings); cudaFree(dInvIndex);
             env->ReleaseIntArrayElements(jSplits,        hSplits,        JNI_ABORT);
             env->ReleaseIntArrayElements(jNodeData,      hNodeData,      JNI_ABORT);
+            env->ReleaseIntArrayElements(jNodeFreq,      hNodeFreq,      JNI_ABORT);
             env->ReleaseIntArrayElements(jNodeOffset,    hNodeOffset,    JNI_ABORT);
             env->ReleaseIntArrayElements(jPartLeafCount, hPartLeafCount, JNI_ABORT);
             env->ReleaseIntArrayElements(jOrderings,     hOrderings,     JNI_ABORT);
@@ -542,10 +551,12 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsGPU(
     }
     if (batchSize <= 0 || dSplits == NULL || dTwoScores == NULL) {
         fprintf(stderr, "[ASTRAL-X GPU] FATAL: cannot allocate GPU batch buffers\n");
-        cudaFree(dNodeData); cudaFree(dNodeOffset); cudaFree(dPartLeafCount);
-        cudaFree(dOrderings); cudaFree(dInvIndex);
+        cudaFree(dNodeData); cudaFree(dNodeFreq); cudaFree(dNodeOffset);
+        cudaFree(dPartLeafCount); cudaFree(dOrderings); cudaFree(dInvIndex);
+        if (dPrefix) cudaFree(dPrefix);
         env->ReleaseIntArrayElements(jSplits,        hSplits,        JNI_ABORT);
         env->ReleaseIntArrayElements(jNodeData,      hNodeData,      JNI_ABORT);
+        env->ReleaseIntArrayElements(jNodeFreq,      hNodeFreq,      JNI_ABORT);
         env->ReleaseIntArrayElements(jNodeOffset,    hNodeOffset,    JNI_ABORT);
         env->ReleaseIntArrayElements(jPartLeafCount, hPartLeafCount, JNI_ABORT);
         env->ReleaseIntArrayElements(jOrderings,     hOrderings,     JNI_ABORT);
@@ -594,7 +605,7 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsGPU(
         if (useShared) {
             // Fast path: one block per split; prefix arrays in shared memory.
             computeWeightsKernel<false><<<curBatch, WB_BLOCK, sharedBytes>>>(
-                dSplits, dNodeData, dNodeOffset, dPartLeafCount, dOrderings, dInvIndex,
+                dSplits, dNodeData, dNodeFreq, dNodeOffset, dPartLeafCount, dOrderings, dInvIndex,
                 curBatch, numPartTrees, partTreeOffset, stride, numTaxa, numTaxa,
                 NULL, dTwoScores);
         } else {
@@ -602,7 +613,7 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsGPU(
             // prefix arrays in the bounded global pool (slot = blockIdx.x).
             int gridDim = (curBatch < maxResident) ? curBatch : maxResident;
             computeWeightsKernel<true><<<gridDim, WB_BLOCK, sharedBytes>>>(
-                dSplits, dNodeData, dNodeOffset, dPartLeafCount, dOrderings, dInvIndex,
+                dSplits, dNodeData, dNodeFreq, dNodeOffset, dPartLeafCount, dOrderings, dInvIndex,
                 curBatch, numPartTrees, partTreeOffset, stride, numTaxa, numTaxa,
                 dPrefix, dTwoScores);
         }
@@ -658,6 +669,7 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsGPU(
     cudaFree(dSplits);
     cudaFree(dTwoScores);
     cudaFree(dNodeData);
+    cudaFree(dNodeFreq);
     cudaFree(dNodeOffset);
     cudaFree(dPartLeafCount);
     cudaFree(dOrderings);
@@ -666,6 +678,7 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsGPU(
 
     env->ReleaseIntArrayElements(jSplits,        hSplits,        JNI_ABORT);
     env->ReleaseIntArrayElements(jNodeData,      hNodeData,      JNI_ABORT);
+    env->ReleaseIntArrayElements(jNodeFreq,      hNodeFreq,      JNI_ABORT);
     env->ReleaseIntArrayElements(jNodeOffset,    hNodeOffset,    JNI_ABORT);
     env->ReleaseIntArrayElements(jPartLeafCount, hPartLeafCount, JNI_ABORT);
     env->ReleaseIntArrayElements(jOrderings,     hOrderings,     JNI_ABORT);
