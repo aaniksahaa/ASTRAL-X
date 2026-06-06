@@ -195,6 +195,8 @@ fi
 if [[ ${#ASTRALX_OPTS_LIST[@]} -eq 0 ]]; then
   ASTRALX_OPTS_LIST+=("${ASTRALX_OPTS}")
 fi
+echo "[DEBUG] opts list (${#ASTRALX_OPTS_LIST[@]} items): ${ASTRALX_OPTS_LIST[*]}"
+echo "[DEBUG] replicates spec: '${REPLICATES_SPEC}' | fresh: ${FRESH}"
 
 REPL_LIST=()
 if [[ -n "$START_REP" || -n "$END_REP" ]]; then
@@ -218,9 +220,14 @@ else
   done < <(find "$SIMPHY_DIR" -maxdepth 1 -type d -name 'R*' -print0 | sort -z -V)
 fi
 
+echo "[DEBUG] replicate list (${#REPL_LIST[@]} items): ${REPL_LIST[*]}"
+
 for REPL in "${REPL_LIST[@]}"; do
   REPL_DIR="${SIMPHY_DIR%/}/${REPL}"
-  [[ -d "$REPL_DIR" ]] || continue
+  if [[ ! -d "$REPL_DIR" ]]; then
+    echo "[DEBUG] SKIP ${REPL}: directory not found: ${REPL_DIR}"
+    continue
+  fi
 
   if [[ "$TREE_TYPE" == "estimated" ]]; then
     GT_FILE="${REPL_DIR}/estimatedgenetrees/estimatedgenetrees.rooted.tre"
@@ -228,7 +235,10 @@ for REPL in "${REPL_LIST[@]}"; do
     GT_FILE="${REPL_DIR}/truegenetrees"
   fi
   TRUE_TREE="${REPL_DIR}/s_tree.trees"
-  [[ -f "$GT_FILE" && -f "$TRUE_TREE" ]] || continue
+  if [[ ! -f "$GT_FILE" || ! -f "$TRUE_TREE" ]]; then
+    echo "[DEBUG] SKIP ${REPL}: missing files (gt=${GT_FILE} exists=$([ -f "$GT_FILE" ] && echo yes || echo no), true_tree=${TRUE_TREE} exists=$([ -f "$TRUE_TREE" ] && echo yes || echo no))"
+    continue
+  fi
 
   for ASTRALX_OPTS_ITEM in "${ASTRALX_OPTS_LIST[@]}"; do
     SETTING_NAME="$(build_setting_name_from_opts "$ASTRALX_OPTS_ITEM")"
@@ -239,6 +249,8 @@ for REPL in "${REPL_LIST[@]}"; do
     if [[ "$FRESH" == false && -f "$STAT_FILE" ]]; then
       echo "SKIPPING: ${STAT_FILE} exists."
       continue
+    elif [[ "$FRESH" == true && -f "$STAT_FILE" ]]; then
+      echo "[DEBUG] --fresh set, overwriting existing: ${STAT_FILE}"
     fi
 
     mkdir -p "$OUT_DIR"
