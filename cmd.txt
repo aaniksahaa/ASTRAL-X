@@ -376,6 +376,9 @@ done
 # Bulk simulated sweeps
 ###############################################################################
 
+./run-bulk-simulated.sh --method astralx --num-replicates 5 --opts-list "--search-mode local --weight-intersection-method smaller-side-traversal;--search-mode full --weight-intersection-method smaller-side-traversal"
+
+
 # One setting only
 ./run-bulk-simulated.sh --method astralx --num-replicates 1 --opts "--search-mode full"
 
