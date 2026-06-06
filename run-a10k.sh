@@ -230,10 +230,18 @@ for REPL in "${REPL_LIST[@]}"; do
   fi
 
   if [[ "$TREE_TYPE" == "estimated" ]]; then
-    GT_FILE="${REPL_DIR}/estimatedgenetrees/estimatedgenetrees.rooted.tre"
-    if [[ ! -f "$GT_FILE" ]]; then
-      GT_FILE="${REPL_DIR}/estimatedgenetrees/estimatedgenetrees.tre"
+    GT_DIR="${REPL_DIR}/estimatedgenetrees"
+    GT_FILE="${GT_DIR}/estimatedgenetrees.tre"
+    ROOTED_GT="${GT_DIR}/estimatedgenetrees.rooted.tre"
+    if [[ "$FRESH" == true || ! -f "$ROOTED_GT" ]]; then
+      if [[ ! -x "${ASTRALX_ROOT%/}/process_unrooted.sh" ]]; then
+        echo "Error: process_unrooted.sh not found or not executable at ${ASTRALX_ROOT%/}/process_unrooted.sh"
+        exit 7
+      fi
+      echo "Rooting estimated gene trees for ${REPL} with outgroup 0..."
+      "${ASTRALX_ROOT%/}/process_unrooted.sh" -i "$GT_FILE" -o "$ROOTED_GT" -og "0"
     fi
+    GT_FILE="$ROOTED_GT"
   else
     GT_FILE="${REPL_DIR}/truegenetrees"
   fi
