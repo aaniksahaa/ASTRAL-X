@@ -233,7 +233,7 @@ for REPL in "${REPL_LIST[@]}"; do
     GT_DIR="${REPL_DIR}/estimatedgenetrees"
     GT_FILE="${GT_DIR}/estimatedgenetrees.tre"
     ROOTED_GT="${GT_DIR}/estimatedgenetrees.rooted.tre"
-    if [[ "$FRESH" == true || ! -f "$ROOTED_GT" ]]; then
+    if [[ ! -f "$ROOTED_GT" ]]; then
       if [[ ! -x "${ASTRALX_ROOT%/}/process_unrooted.sh" ]]; then
         echo "Error: process_unrooted.sh not found or not executable at ${ASTRALX_ROOT%/}/process_unrooted.sh"
         exit 7
