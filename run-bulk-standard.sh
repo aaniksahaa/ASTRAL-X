@@ -87,13 +87,13 @@ NTFY_CHANNEL_NAME="anik-phylo"
 # Dataset configuration (kept exactly as you provided)
 # =============================================================================
 # folders=("200-taxon")
-folders=("37-taxon" "100-taxon" "200-taxon" "500-taxon")
+folders=("37-taxon" "100-taxon" "200-taxon" "500-taxon" "1000-taxon")
 folders=("37-taxon")
 # folders=("48-taxon")
 # folders=("100-taxon")
 # folders=("200-taxon")
 
-folders=("500-taxon" "1000-taxon")
+# folders=("500-taxon" "1000-taxon")
 
 
 declare -A innerFolderNames
