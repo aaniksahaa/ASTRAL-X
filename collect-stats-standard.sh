@@ -10,7 +10,11 @@ set -euo pipefail
 # =============================================================================
 # DEFAULTS (edit these if you want different defaults)
 # =============================================================================
-BASE_DIR="/home/aaniksahaa/research"  # default; can be overridden with --base-dir or -b
+
+# BASE_DIR="/home/aaniksahaa/research"  # default; can be overridden with --base-dir or -b
+
+BASE_DIR="${HOME}/phylogeny"
+
 DATASET_DIR=""                        # dataset directory; will be set to BASE_DIR/phylo-datasets if not specified
 OUTPUT_FILE="stat-standard.csv"       # output merged CSV file
 
