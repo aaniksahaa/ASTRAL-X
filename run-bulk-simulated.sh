@@ -130,6 +130,18 @@ SB_LIST=(0.000001)
 SPMIN_LIST=(100000)
 SPMAX_LIST=(200000)
 
+T_LIST=(50000)
+G_LIST=(1000)
+SB_LIST=(0.000001)
+SPMIN_LIST=(100000)
+SPMAX_LIST=(200000)
+
+# T_LIST=(1000)
+# G_LIST=(150000)
+# SB_LIST=(0.000001)
+# SPMIN_LIST=(100000)
+# SPMAX_LIST=(200000)
+
 
 # T_LIST=(30000 40000)
 # G_LIST=(1000)
@@ -193,7 +205,7 @@ for t in "${T_LIST[@]}"; do
 
           echo ">>> Running: t=$t g=$g sb=$sb spmin=$spmin spmax=$spmax (method=$METHOD)"
           
-          ./sim.sh -rs $NUM_REPLICATES $BASE_DIR_ARG -t "$t" -g "$g" --sb "$sb" --spmin "$spmin" --spmax "$spmax" --fresh
+          # ./sim.sh -rs $NUM_REPLICATES $BASE_DIR_ARG -t "$t" -g "$g" --sb "$sb" --spmin "$spmin" --spmax "$spmax" --fresh
           
           # Run replicates
           for ((i=1; i<=NUM_REPLICATES; i++)); do
