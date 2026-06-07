@@ -475,7 +475,6 @@ run_algorithm_and_write_stats() {
 
     START_NS=$(date +%s%N)
 
-    local WRAPPER_STATS_FILE="${OUT_FILE%.tre}_stats.csv"
     local TEMP_STP_OUTPUT=""
     local TEMP_WRAPPER_STATS_TO_DELETE=""
     local METHOD_OPTS_RAW
@@ -492,6 +491,7 @@ run_algorithm_and_write_stats() {
 
     local OUT_FILE="${OUT_DIR%/}/output-${ALGORITHM}.tre"
     local STAT_FILE="${OUT_DIR%/}/stat-${ALGORITHM}.csv"
+    local WRAPPER_STATS_FILE="${OUT_FILE%.tre}_stats.csv"
 
     if [[ "$FRESH" = false && -f "$STAT_FILE" ]]; then
         echo "      SKIPPING: ${STAT_FILE} already exists. Use --fresh to force rerun."
