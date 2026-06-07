@@ -71,7 +71,13 @@ public class GPUWeightCalculator {
      * @param numTaxa        total taxon count (registry size)
      * @param batchSizeHint  0=auto, -1=no batching, >0=exact batch size
      * @param vramFraction   fraction of free VRAM to use when batchSizeHint==0
-     * @return long[numSplits] where result[i] = 2 * score(split i),
+     * @param useDouble      when true, accumulate scores as 64-bit floating point
+     *                       (large-n overflow-safe) and return each 2·score as the
+     *                       IEEE-754 bit pattern stored in the long slot
+     *                       (decode with {@link Double#longBitsToDouble}); when
+     *                       false, return the exact integer 2·score.
+     * @return long[numSplits] where result[i] = 2 * score(split i) (exact integer,
+     *         or double bit-pattern when useDouble),
      *         or null if the GPU path is infeasible (caller falls back to CPU)
      */
     public static native long[] computeWeightsGPU(
@@ -89,7 +95,8 @@ public class GPUWeightCalculator {
         int numGpuTrees,
         int numTaxa,
         int batchSizeHint,
-        double vramFraction
+        double vramFraction,
+        boolean useDouble
     );
 
     /**
@@ -118,6 +125,10 @@ public class GPUWeightCalculator {
      * @param totalN     total taxon count (same as numTaxa, used for sizeC)
      * @param batchSizeHint 0=auto, -1=no batching, >0=exact batch size
      * @param vramFraction  fraction of free VRAM to use when batchSizeHint==0
+     * @param useDouble     when true, accumulate as 64-bit floating point and return
+     *                      each 2·score as its IEEE-754 bit pattern in the long slot
+     *                      (decode with {@link Double#longBitsToDouble}); when false,
+     *                      return the exact integer 2·score.
      * @return long[numSplits] where result[i] = 2 * score(split i), or null on failure
      */
     public static native long[] computeWeightsSmallerSideGPU(
@@ -131,7 +142,8 @@ public class GPUWeightCalculator {
         int numTaxa,
         int totalN,
         int batchSizeHint,
-        double vramFraction
+        double vramFraction,
+        boolean useDouble
     );
 
     /**

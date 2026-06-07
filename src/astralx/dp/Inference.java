@@ -23,7 +23,8 @@ import java.util.*;
  */
 public class Inference {
 
-    private final Map<ClusterHash, Long>             dpMemo     = new HashMap<>();
+    private final Map<ClusterHash, Long>             dpMemo     = new HashMap<>();   // LONG score path
+    private final Map<ClusterHash, Double>           dpMemoD    = new HashMap<>();   // DOUBLE score path
     private final Map<ClusterHash, BipartitionSplit> bestSplits = new HashMap<>();
 
     // -------------------------------------------------------------------------
@@ -44,10 +45,20 @@ public class Inference {
         long t0 = System.nanoTime();
 
         ClusterHash root = dpTable.getRootHash();
-        long totalScore = solve(root, dpTable, weightTable);
 
-        long ms = (System.nanoTime() - t0) / 1_000_000;
-        Logging.info("Inference DP: optimal quartet score = %d  (%d ms)", totalScore, ms);
+        // The score type mirrors the WeightTable's accumulation decision: exact
+        // LONG for normal sizes, DOUBLE when the integer score would overflow.
+        if (weightTable.isDouble()) {
+            double totalScore = solveD(root, dpTable, weightTable);
+            long ms = (System.nanoTime() - t0) / 1_000_000;
+            // %.0f keeps it a plain (huge) number for log parsers; the [double]
+            // tag makes the active numeric type explicit in the logs.
+            Logging.info("Inference DP: optimal quartet score = %.0f  [double]  (%d ms)", totalScore, ms);
+        } else {
+            long totalScore = solve(root, dpTable, weightTable);
+            long ms = (System.nanoTime() - t0) / 1_000_000;
+            Logging.info("Inference DP: optimal quartet score = %d  [long]  (%d ms)", totalScore, ms);
+        }
 
         String newick = buildNewick(root, dpTable, clusterTable, trees, registry) + ";";
         return newick;
@@ -91,6 +102,45 @@ public class Inference {
         }
 
         dpMemo.put(ch, best);
+        if (bestSp != null) bestSplits.put(ch, bestSp);
+        return best;
+    }
+
+    /**
+     * Floating-point mirror of {@link #solve} used when the WeightTable scores in
+     * {@code double} (very large taxon sets).  Identical structure; only the
+     * accumulator/comparison type differs.  Populates the shared {@code bestSplits}
+     * map, so Newick reconstruction is unchanged.
+     */
+    private double solveD(ClusterHash ch, DPTable dpTable, WeightTable weightTable) {
+        Double memo = dpMemoD.get(ch);
+        if (memo != null) return memo;
+
+        if (ch.size == 1) {
+            dpMemoD.put(ch, 0.0);
+            return 0.0;
+        }
+
+        Set<BipartitionSplit> splits = dpTable.getSplits(ch);
+        if (splits.isEmpty()) {
+            dpMemoD.put(ch, 0.0);
+            return 0.0;
+        }
+
+        double best = Double.NEGATIVE_INFINITY;
+        BipartitionSplit bestSp = null;
+
+        for (BipartitionSplit split : splits) {
+            double score = weightTable.getScoreD(split)
+                         + solveD(split.lo, dpTable, weightTable)
+                         + solveD(split.hi, dpTable, weightTable);
+            if (score > best) {
+                best  = score;
+                bestSp = split;
+            }
+        }
+
+        dpMemoD.put(ch, best);
         if (bestSp != null) bestSplits.put(ch, bestSp);
         return best;
     }

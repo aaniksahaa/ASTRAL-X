@@ -68,6 +68,21 @@
 #define WB_BLOCK 256
 
 // ---------------------------------------------------------------------------
+// Adaptive accumulator transport.
+//
+// Scores are accumulated either as exact 64-bit integers (long long) or, for
+// very large taxon sets where the exact value overflows, as 64-bit floating
+// point (double).  Both are returned through the same long long[] transport:
+//   - long long: stored verbatim (exact 2·score).
+//   - double:    stored as its IEEE-754 bit pattern via __double_as_longlong;
+//                the Java side recovers it with Double.longBitsToDouble.
+// The template accumulator type (ACC) selects the path at compile time; the
+// host launches the matching instantiation based on the useDouble flag.
+// ---------------------------------------------------------------------------
+__device__ inline void storeTwoScore(long long* out, int idx, long long v) { out[idx] = v; }
+__device__ inline void storeTwoScore(long long* out, int idx, double    v) { out[idx] = __double_as_longlong(v); }
+
+// ---------------------------------------------------------------------------
 // Device helper: cooperative prefix-sum of cluster membership over a tree's
 // leaves, written into pX[0..L].  Uses scan[] (WB_BLOCK ints) as scratch.
 //
@@ -137,6 +152,7 @@ __device__ void buildPrefix(
 // Called once per block (shared mode) or repeatedly via a grid-stride loop
 // (global mode).  Issues __syncthreads, so all threads must call it uniformly.
 // ---------------------------------------------------------------------------
+template<typename ACC>
 __device__ void scoreSplit(
     int s,
     const int* __restrict__ splits,
@@ -151,13 +167,14 @@ __device__ void scoreSplit(
     int tid, int nthreads,
     long long* __restrict__ twoScores)
 {
-    __shared__ long long red[WB_BLOCK];
+    __shared__ ACC red[WB_BLOCK];
 
     const int* sp = splits + (size_t)s * 10;
     int aTree = sp[0], aLo = sp[1], aHi = sp[2], aComp = sp[3], aSize = sp[4];
     int bTree = sp[5], bLo = sp[6], bHi = sp[7], bComp = sp[8], bSize = sp[9];
 
     // Invalid / overlapping split → zero (defensive; real DP splits are disjoint).
+    // (0LL is also the bit pattern of +0.0, so it decodes correctly in both modes.)
     if (aSize + bSize > totalN) {
         if (tid == 0) twoScores[s] = 0LL;
         return;   // uniform across the block (same aSize/bSize for all threads)
@@ -171,7 +188,7 @@ __device__ void scoreSplit(
     const int PJ[6] = {1, 2, 0, 2, 0, 1};
     const int PK[6] = {2, 1, 2, 0, 1, 0};
 
-    long long threadAccum = 0LL;
+    ACC threadAccum = (ACC) 0;
 
     for (int g = 0; g < numPartTrees; g++) {
         int nbeg = nodeOffset[g];
@@ -210,18 +227,19 @@ __device__ void scoreSplit(
 
             if (a2 < 0 || b2 < 0 || c0 < 0 || c1 < 0 || c2 < 0) continue;
 
-            long long a[3] = {a0, a1, a2};
-            long long b[3] = {b0, b1, b2};
-            long long c[3] = {c0, c1, c2};
+            // Products accumulated in ACC (long long = exact; double = overflow-safe).
+            ACC a[3] = {(ACC)a0, (ACC)a1, (ACC)a2};
+            ACC b[3] = {(ACC)b0, (ACC)b1, (ACC)b2};
+            ACC c[3] = {(ACC)c0, (ACC)c1, (ACC)c2};
 
-            long long twoQI = 0LL;
+            ACC twoQI = (ACC) 0;
             #pragma unroll
             for (int p = 0; p < 6; p++) {
-                long long ai = a[PI[p]], bj = b[PJ[p]], ck = c[PK[p]];
-                long long su = ai + bj + ck - 3;
+                ACC ai = a[PI[p]], bj = b[PJ[p]], ck = c[PK[p]];
+                ACC su = ai + bj + ck - 3;
                 if (su > 0) twoQI += ai * bj * ck * su;
             }
-            threadAccum += (long long) nodeFreq[ni] * twoQI;   // weight by occurrence count
+            threadAccum += (ACC) nodeFreq[ni] * twoQI;   // weight by occurrence count
         }
 
         __syncthreads();   // pA/pB reused next iteration; ensure node loop done
@@ -234,7 +252,7 @@ __device__ void scoreSplit(
         if (tid < off) red[tid] += red[tid + off];
         __syncthreads();
     }
-    if (tid == 0) twoScores[s] = red[0];
+    if (tid == 0) storeTwoScore(twoScores, s, red[0]);
     __syncthreads();   // red fully consumed before a global-mode reuse
 }
 
@@ -250,7 +268,7 @@ __device__ void scoreSplit(
 //   GLOBAL=false : pA[stride], pB[stride], scan[WB_BLOCK]
 //   GLOBAL=true  : scan[WB_BLOCK]                       (pA/pB in gPrefix)
 // ---------------------------------------------------------------------------
-template<bool GLOBAL>
+template<bool GLOBAL, typename ACC>
 __global__ void computeWeightsKernel(
     const int* __restrict__ splits,
     const int* __restrict__ nodeData,
@@ -277,7 +295,7 @@ __global__ void computeWeightsKernel(
         int* pA   = gPrefix + (size_t)blockIdx.x * 2 * prefixStride;
         int* pB   = pA + prefixStride;
         for (int s = blockIdx.x; s < curBatch; s += gridDim.x) {
-            scoreSplit(s, splits, nodeData, nodeFreq, nodeOffset, partLeafCount,
+            scoreSplit<ACC>(s, splits, nodeData, nodeFreq, nodeOffset, partLeafCount,
                        orderings, invIndex, numPartTrees, partTreeOffset,
                        numTaxa, totalN, pA, pB, scan, tid, nthreads, twoScores);
         }
@@ -287,7 +305,7 @@ __global__ void computeWeightsKernel(
         int* scan = smem + 2 * prefixStride;
         int s = blockIdx.x;
         if (s < curBatch) {
-            scoreSplit(s, splits, nodeData, nodeFreq, nodeOffset, partLeafCount,
+            scoreSplit<ACC>(s, splits, nodeData, nodeFreq, nodeOffset, partLeafCount,
                        orderings, invIndex, numPartTrees, partTreeOffset,
                        numTaxa, totalN, pA, pB, scan, tid, nthreads, twoScores);
         }
@@ -342,6 +360,7 @@ __device__ int ssIntersect(
 }
 
 // One thread per split; loop all deduplicated tripartitions (parts, 9 ints each).
+template<typename ACC>
 __global__ void computeWeightsSmallerSideKernel(
     const int* __restrict__ splits,    // curBatch * 10
     const int* __restrict__ parts,     // numParts  * 9
@@ -361,13 +380,13 @@ __global__ void computeWeightsSmallerSideKernel(
     int hiTree = sp[5], hiLeft = sp[6], hiRight = sp[7], hiComp = sp[8], sizeB = sp[9];
 
     int sizeC = totalN - sizeA - sizeB;
-    if (sizeC < 0) { twoScores[idx] = 0LL; return; }
+    if (sizeC < 0) { twoScores[idx] = 0LL; return; }   // 0LL == bits of +0.0 in both modes
 
     const int PI[6] = {0, 0, 1, 1, 2, 2};
     const int PJ[6] = {1, 2, 0, 2, 0, 1};
     const int PK[6] = {2, 1, 2, 0, 1, 0};
 
-    long long twoScore = 0LL;
+    ACC twoScore = (ACC) 0;
 
     for (int j = 0; j < numParts; j++) {
         const int* pt = parts + (size_t)j * 9;
@@ -402,21 +421,21 @@ __global__ void computeWeightsSmallerSideKernel(
 
         if (a2 < 0 || b2 < 0 || c0 < 0 || c1 < 0 || c2 < 0) continue;
 
-        long long a[3] = {a0, a1, a2};
-        long long b[3] = {b0, b1, b2};
-        long long c[3] = {c0, c1, c2};
+        ACC a[3] = {(ACC)a0, (ACC)a1, (ACC)a2};
+        ACC b[3] = {(ACC)b0, (ACC)b1, (ACC)b2};
+        ACC c[3] = {(ACC)c0, (ACC)c1, (ACC)c2};
 
-        long long twoQI = 0LL;
+        ACC twoQI = (ACC) 0;
         #pragma unroll
         for (int p = 0; p < 6; p++) {
-            long long ai = a[PI[p]], bj = b[PJ[p]], ck = c[PK[p]];
-            long long su = ai + bj + ck - 3;
+            ACC ai = a[PI[p]], bj = b[PJ[p]], ck = c[PK[p]];
+            ACC su = ai + bj + ck - 3;
             if (su > 0) twoQI += ai * bj * ck * su;
         }
-        twoScore += (long long) freq * twoQI;
+        twoScore += (ACC) freq * twoQI;
     }
 
-    twoScores[idx] = twoScore;
+    storeTwoScore(twoScores, idx, twoScore);
 }
 
 // ---------------------------------------------------------------------------
@@ -491,8 +510,11 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsGPU(
     jintArray jPartLeafCount, jintArray jOrderings, jintArray jInvIndex,
     jint numSplits, jint numPartTrees, jint partTreeOffset, jint maxLeafCount,
     jint numGpuTrees, jint numTaxa,
-    jint batchSizeHint, jdouble vramFraction)
+    jint batchSizeHint, jdouble vramFraction, jboolean jUseDouble)
 {
+    bool useDouble = (jUseDouble == JNI_TRUE);
+    fprintf(stderr, "[ASTRAL-X GPU] weight accumulator: %s\n",
+            useDouble ? "DOUBLE (64-bit float, overflow-safe)" : "LONG (exact 64-bit integer)");
     // -------------------------------------------------------------------------
     // Pin host arrays
     // -------------------------------------------------------------------------
@@ -528,9 +550,15 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsGPU(
 
     if (useShared && sharedBytesShared > 49152) {
         // Opt in to larger dynamic shared memory (default cap is 48 KB).
-        cudaFuncSetAttribute(computeWeightsKernel<false>,
-                             cudaFuncAttributeMaxDynamicSharedMemorySize,
-                             (int)sharedBytesShared);
+        // Set on whichever accumulator instantiation will actually launch.
+        if (useDouble)
+            cudaFuncSetAttribute(computeWeightsKernel<false, double>,
+                                 cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                 (int)sharedBytesShared);
+        else
+            cudaFuncSetAttribute(computeWeightsKernel<false, long long>,
+                                 cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                 (int)sharedBytesShared);
     }
 
     // -------------------------------------------------------------------------
@@ -591,8 +619,12 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsGPU(
     if (!useShared) {
         int numSM = 0, blocksPerSM = 0;
         cudaDeviceGetAttribute(&numSM, cudaDevAttrMultiProcessorCount, 0);
-        cudaOccupancyMaxActiveBlocksPerMultiprocessor(
-            &blocksPerSM, computeWeightsKernel<true>, WB_BLOCK, sharedBytesGlobal);
+        if (useDouble)
+            cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+                &blocksPerSM, computeWeightsKernel<true, double>, WB_BLOCK, sharedBytesGlobal);
+        else
+            cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+                &blocksPerSM, computeWeightsKernel<true, long long>, WB_BLOCK, sharedBytesGlobal);
         if (blocksPerSM < 1) blocksPerSM = 1;
         maxResident = numSM * blocksPerSM;
         if (maxResident < 1)         maxResident = 1;
@@ -729,18 +761,30 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsGPU(
 
         if (useShared) {
             // Fast path: one block per split; prefix arrays in shared memory.
-            computeWeightsKernel<false><<<curBatch, WB_BLOCK, sharedBytes>>>(
-                dSplits, dNodeData, dNodeFreq, dNodeOffset, dPartLeafCount, dOrderings, dInvIndex,
-                curBatch, numPartTrees, partTreeOffset, stride, numTaxa, numTaxa,
-                NULL, dTwoScores);
+            if (useDouble)
+                computeWeightsKernel<false, double><<<curBatch, WB_BLOCK, sharedBytes>>>(
+                    dSplits, dNodeData, dNodeFreq, dNodeOffset, dPartLeafCount, dOrderings, dInvIndex,
+                    curBatch, numPartTrees, partTreeOffset, stride, numTaxa, numTaxa,
+                    NULL, dTwoScores);
+            else
+                computeWeightsKernel<false, long long><<<curBatch, WB_BLOCK, sharedBytes>>>(
+                    dSplits, dNodeData, dNodeFreq, dNodeOffset, dPartLeafCount, dOrderings, dInvIndex,
+                    curBatch, numPartTrees, partTreeOffset, stride, numTaxa, numTaxa,
+                    NULL, dTwoScores);
         } else {
             // Large-L path: resident-capped grid grid-strides over splits;
             // prefix arrays in the bounded global pool (slot = blockIdx.x).
             int gridDim = (curBatch < maxResident) ? curBatch : maxResident;
-            computeWeightsKernel<true><<<gridDim, WB_BLOCK, sharedBytes>>>(
-                dSplits, dNodeData, dNodeFreq, dNodeOffset, dPartLeafCount, dOrderings, dInvIndex,
-                curBatch, numPartTrees, partTreeOffset, stride, numTaxa, numTaxa,
-                dPrefix, dTwoScores);
+            if (useDouble)
+                computeWeightsKernel<true, double><<<gridDim, WB_BLOCK, sharedBytes>>>(
+                    dSplits, dNodeData, dNodeFreq, dNodeOffset, dPartLeafCount, dOrderings, dInvIndex,
+                    curBatch, numPartTrees, partTreeOffset, stride, numTaxa, numTaxa,
+                    dPrefix, dTwoScores);
+            else
+                computeWeightsKernel<true, long long><<<gridDim, WB_BLOCK, sharedBytes>>>(
+                    dSplits, dNodeData, dNodeFreq, dNodeOffset, dPartLeafCount, dOrderings, dInvIndex,
+                    curBatch, numPartTrees, partTreeOffset, stride, numTaxa, numTaxa,
+                    dPrefix, dTwoScores);
         }
 
         cudaError_t err = cudaDeviceSynchronize();
@@ -820,8 +864,11 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsSmallerSideGPU(
     JNIEnv* env, jclass cls,
     jintArray jSplits, jintArray jParts, jintArray jOrderings, jintArray jInvIndex,
     jint numSplits, jint numParts, jint numGpuTrees, jint numTaxa, jint totalN,
-    jint batchSizeHint, jdouble vramFraction)
+    jint batchSizeHint, jdouble vramFraction, jboolean jUseDouble)
 {
+    bool useDouble = (jUseDouble == JNI_TRUE);
+    fprintf(stderr, "[ASTRAL-X GPU] weight accumulator: %s\n",
+            useDouble ? "DOUBLE (64-bit float, overflow-safe)" : "LONG (exact 64-bit integer)");
     jint* hSplits    = env->GetIntArrayElements(jSplits,    NULL);
     jint* hParts     = env->GetIntArrayElements(jParts,     NULL);
     jint* hOrderings = env->GetIntArrayElements(jOrderings, NULL);
@@ -919,9 +966,14 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsSmallerSideGPU(
                    (size_t)curBatch * 10 * sizeof(int), cudaMemcpyHostToDevice);
 
         int gridSize = (curBatch + blockSize - 1) / blockSize;
-        computeWeightsSmallerSideKernel<<<gridSize, blockSize>>>(
-            dSplits, dParts, dOrderings, dInvIndex,
-            curBatch, numParts, numTaxa, totalN, dTwoScores);
+        if (useDouble)
+            computeWeightsSmallerSideKernel<double><<<gridSize, blockSize>>>(
+                dSplits, dParts, dOrderings, dInvIndex,
+                curBatch, numParts, numTaxa, totalN, dTwoScores);
+        else
+            computeWeightsSmallerSideKernel<long long><<<gridSize, blockSize>>>(
+                dSplits, dParts, dOrderings, dInvIndex,
+                curBatch, numParts, numTaxa, totalN, dTwoScores);
 
         cudaError_t err = cudaDeviceSynchronize();
         if (err != cudaSuccess) {

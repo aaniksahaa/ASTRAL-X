@@ -34,6 +34,7 @@ public class Phase6Verifier {
         int n = registry.size();
 
         out.printf("=== Phase 6 Weight Calculation Verification ===%n");
+        out.printf("Score type: %s%n", weightTable.isDouble() ? "DOUBLE (floating point)" : "LONG (exact integer)");
         out.printf("Taxa: %d  Scored splits: %d%n", n, weightTable.size());
         out.printf("Max score:   %d%n", weightTable.getMaxScore());
         out.printf("Total score: %d%n%n", weightTable.getTotalScore());
@@ -41,12 +42,19 @@ public class Phase6Verifier {
         int fails = 0;
 
         // ── Check 1: non-negative scores ─────────────────────────────────────
-        int negCount = 0;
-        for (var entry : weightTable.entries()) {
-            if (entry.getValue() < 0) { negCount++; fails++; }
+        // entries() exposes only the exact-LONG map; in DOUBLE mode it is empty,
+        // so the per-split scan below is a no-op (scores are validated via the
+        // root-split dump using getScoreD instead).
+        if (weightTable.isDouble()) {
+            out.println("Check 1 (non-negative): SKIPPED (double-mode scores; see root splits below)");
+        } else {
+            int negCount = 0;
+            for (var entry : weightTable.entries()) {
+                if (entry.getValue() < 0) { negCount++; fails++; }
+            }
+            if (negCount == 0) out.println("Check 1 (non-negative): PASSED");
+            else out.printf("Check 1 (non-negative): %d NEGATIVE scores%n", negCount);
         }
-        if (negCount == 0) out.println("Check 1 (non-negative): PASSED");
-        else out.printf("Check 1 (non-negative): %d NEGATIVE scores%n", negCount);
 
         // ── Check 2: root splits ─────────────────────────────────────────────
         out.printf("%nRoot splits and their scores:%n");
