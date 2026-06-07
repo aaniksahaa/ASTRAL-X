@@ -340,6 +340,21 @@ public class Main {
                         }
                     }
                 }
+                case "--large-n-score-type", "--large-score-type" -> {
+                    if (++i >= args.length) return false;
+                    String t = args[i].toLowerCase().replace('_', '-');
+                    switch (t) {
+                        case "int128", "i128", "exact" ->
+                            cfg.setLargeScoreType(Config.LargeScoreType.INT128);
+                        case "double", "fp64", "float" ->
+                            cfg.setLargeScoreType(Config.LargeScoreType.DOUBLE);
+                        default -> {
+                            System.err.println("Unknown --large-n-score-type: " + args[i]
+                                + "  (expected: int128 | double)");
+                            return false;
+                        }
+                    }
+                }
                 case "-v"              -> cfg.setVerbosity(Logging.INFO);
                 case "-vv"             -> cfg.setVerbosity(Logging.DEBUG);
                 case "-vvv"            -> cfg.setVerbosity(Logging.TRACE);

@@ -11,6 +11,7 @@ import astralx.gpu.GPUWeightCalculator;
 import astralx.partition.Partition;
 import astralx.partition.PartitionTable;
 import astralx.tree.Tree;
+import astralx.util.Int128;
 import astralx.util.ProgressBar;
 import astralx.util.Threading;
 
@@ -45,17 +46,21 @@ import java.util.*;
  */
 public class WeightTable {
 
-    private final Map<BipartitionSplit, Long>   scores  = new HashMap<>();   // exact LONG path
-    private final Map<BipartitionSplit, Double> scoresD = new HashMap<>();   // DOUBLE path (large n)
+    /**
+     * Numeric type used for scores. Decided once per run from the problem size:
+     * LONG below the overflow threshold; above it, INT128 (exact, default) or
+     * DOUBLE (approximate) per {@link Config#getLargeScoreType()}.
+     */
+    public enum Mode { LONG, DOUBLE, INT128 }
+
+    private final Map<BipartitionSplit, Long>    scores  = new HashMap<>();   // LONG path
+    private final Map<BipartitionSplit, Double>  scoresD = new HashMap<>();   // DOUBLE path
+    private final Map<BipartitionSplit, Int128>  scoresI = new HashMap<>();   // INT128 path
     private final int n;   // total taxa
 
-    /**
-     * Whether scores are accumulated/stored as 64-bit floating point (double)
-     * instead of exact 64-bit integers (long).  Decided once per run from the
-     * problem size (see {@link #needsDoubleAccumulation}); true only when the
-     * exact integer score would overflow {@code long}.
-     */
-    private final boolean useDouble;
+    private final Mode mode;
+    private final boolean useDouble;   // mode == DOUBLE
+    private final boolean useInt128;   // mode == INT128
 
     // stats (LONG path)
     private long maxScore;
@@ -63,6 +68,9 @@ public class WeightTable {
     // stats (DOUBLE path)
     private double maxScoreD = Double.NEGATIVE_INFINITY;
     private double totalScoreD;
+    // stats (INT128 path)
+    private Int128 maxScoreI   = null;          // null = -inf sentinel
+    private Int128 totalScoreI = Int128.ZERO;
 
     // -------------------------------------------------------------------------
 
@@ -80,23 +88,31 @@ public class WeightTable {
         long t0 = System.nanoTime();
         this.n = clusterTable.getAllTaxaHash().size;
 
-        // ── Numeric-precision decision (LONG vs DOUBLE accumulation) ──────────
+        // ── Numeric-precision decision (LONG vs DOUBLE/INT128 accumulation) ───
         // The exact quartet score grows as O(genes · n^4) and overflows a signed
-        // 64-bit integer for very large taxon sets.  When the estimated maximum
-        // per-split score would exceed the long-safe range we switch the whole
-        // scoring + DP pipeline to double; otherwise we keep exact integers.
-        int numGenes   = partTrees.size();
-        this.useDouble = needsDoubleAccumulation(n, numGenes);
-        logAccumulationDecision(n, numGenes, useDouble);
+        // 64-bit integer for very large taxon sets.  Below the overflow threshold
+        // we keep exact LONG.  Above it we use INT128 (exact, default) or DOUBLE
+        // (approximate) per the configured large-score type.
+        int numGenes = partTrees.size();
+        if (needsDoubleAccumulation(n, numGenes)) {
+            this.mode = (Config.getInstance().getLargeScoreType() == Config.LargeScoreType.DOUBLE)
+                        ? Mode.DOUBLE : Mode.INT128;
+        } else {
+            this.mode = Mode.LONG;
+        }
+        this.useDouble = (mode == Mode.DOUBLE);
+        this.useInt128 = (mode == Mode.INT128);
+        logAccumulationDecision(n, numGenes, mode);
 
         // Collect all unique splits from DPTable into an indexed list
         List<BipartitionSplit> splitList = new ArrayList<>();
         for (var entry : dpTable.entries()) splitList.addAll(entry.getValue());
         int numSplits = splitList.size();
 
-        List<PartitionTable.Entry> partList = new ArrayList<>(partTable.entries());
-        long[]   scoreArray  = useDouble ? null : new long[numSplits];     // exact integer scores
-        double[] scoreArrayD = useDouble ? new double[numSplits] : null;   // floating-point scores
+        // Per-split score buffers — exactly one is non-null, matching the mode.
+        long[]   scoreArray  = (mode == Mode.LONG)   ? new long[numSplits]    : null;  // exact integer
+        double[] scoreArrayD = (mode == Mode.DOUBLE) ? new double[numSplits]  : null;  // floating point
+        Int128[] scoreArrayI = (mode == Mode.INT128) ? new Int128[numSplits]  : null;  // exact 128-bit
 
         // When clusterTrees != partTrees (autocomplete active), the GPU path packs both
         // sets of orderings/invIndex into a combined array (slots 0..k-1 = completed,
@@ -175,35 +191,48 @@ public class WeightTable {
                 Logging.info("Weight table: GPU path (smaller-side traversal)  splits=%d  uniqueParts=%d  trees=%d  batching=%s",
                     numSplits, partTable.size(), partTrees.size(), batchDesc);
                 ok = computeScoresGPUSmallerSide(splitList, partTable, clusterTable,
-                                                 clusterTrees, partTrees, numGpuTrees, scoreArray, scoreArrayD,
+                                                 clusterTrees, partTrees, numGpuTrees,
+                                                 scoreArray, scoreArrayD, scoreArrayI,
                                                  batchSizeHint, cfg.getGpuVramFraction());
             } else {
                 Logging.info("Weight table: GPU path (prefix-sum tree-DP)  splits=%d  uniqueParts=%d  trees=%d  maxLeaf=%d  batching=%s",
                     numSplits, csr.totalNodes, partTrees.size(), csr.maxLeafCount, batchDesc);
                 ok = computeScoresGPUPrefixSum(splitList, csr, clusterTable, clusterTrees, partTrees,
-                                               numGpuTrees, scoreArray, scoreArrayD, batchSizeHint, cfg.getGpuVramFraction());
+                                               numGpuTrees, scoreArray, scoreArrayD, scoreArrayI,
+                                               batchSizeHint, cfg.getGpuVramFraction());
             }
             if (!ok) {
                 Logging.info("GPU weight path infeasible (e.g. shared-memory limit), falling back to CPU");
                 computeScoresCPU(splitList, partTable.entries(), clusterTable,
-                                 clusterTrees, partTrees, scoreArray, scoreArrayD);
+                                 clusterTrees, partTrees, scoreArray, scoreArrayD, scoreArrayI);
             }
         } else {
             if (Config.getInstance().getComputeMode() == Config.ComputeMode.GPU) {
                 Logging.info("GPU library not available, falling back to CPU");
             }
             computeScoresCPU(splitList, partTable.entries(), clusterTable,
-                             clusterTrees, partTrees, scoreArray, scoreArrayD);
+                             clusterTrees, partTrees, scoreArray, scoreArrayD, scoreArrayI);
         }
 
-        if (useDouble) {
+        long ms;
+        if (mode == Mode.INT128) {
+            for (int i = 0; i < numSplits; i++) {
+                Int128 s = scoreArrayI[i];
+                scoresI.put(splitList.get(i), s);
+                if (maxScoreI == null || s.compareTo(maxScoreI) > 0) maxScoreI = s;
+                totalScoreI = totalScoreI.add(s);
+            }
+            ms = (System.nanoTime() - t0) / 1_000_000;
+            Logging.info("Weight table: %d splits scored [INT128], maxScore=%s, totalScore=%s in %d ms",
+                scoresI.size(), maxScoreI, totalScoreI, ms);
+        } else if (mode == Mode.DOUBLE) {
             for (int i = 0; i < numSplits; i++) {
                 double s = scoreArrayD[i];
                 scoresD.put(splitList.get(i), s);
                 if (s > maxScoreD) maxScoreD = s;
                 totalScoreD += s;
             }
-            long ms = (System.nanoTime() - t0) / 1_000_000;
+            ms = (System.nanoTime() - t0) / 1_000_000;
             Logging.info("Weight table: %d splits scored [DOUBLE], maxScore=%.6e, totalScore=%.6e in %d ms",
                 scoresD.size(), maxScoreD, totalScoreD, ms);
         } else {
@@ -212,7 +241,7 @@ public class WeightTable {
                 if (scoreArray[i] > maxScore) maxScore = scoreArray[i];
                 totalScore += scoreArray[i];
             }
-            long ms = (System.nanoTime() - t0) / 1_000_000;
+            ms = (System.nanoTime() - t0) / 1_000_000;
             Logging.info("Weight table: %d splits scored [LONG], maxScore=%d, totalScore=%d in %d ms",
                 scores.size(), maxScore, totalScore, ms);
         }
@@ -255,17 +284,33 @@ public class WeightTable {
         return (double) Long.MAX_VALUE / 8.0;   // ≈ 1.153e18
     }
 
+    /** scoreMode int passed to the native kernel: 0=LONG, 1=DOUBLE, 2=INT128. */
+    private int nativeScoreMode() {
+        switch (mode) {
+            case DOUBLE: return 1;
+            case INT128: return 2;
+            default:     return 0;
+        }
+    }
+
     /** Emit a prominent, human-readable log line stating the chosen score type and why. */
-    private static void logAccumulationDecision(int n, int numGenes, boolean useDouble) {
+    private static void logAccumulationDecision(int n, int numGenes, Mode mode) {
         double est  = estimatedMaxTwoScore(n, numGenes);
         double safe = longSafeBound();
-        if (useDouble) {
-            Logging.info("Weight accumulation: DOUBLE (64-bit floating point, ~15-16 significant digits)  "
+        switch (mode) {
+            case INT128 -> Logging.info(
+                "Weight accumulation: INT128 (exact 128-bit integer)  "
+                + "[taxa=%d, genes=%d, est. max 2·score ≈ %.2e exceeds long-safe %.2e]  "
+                + "— switched to avoid 64-bit integer overflow; scores remain exact "
+                + "(full-rate integer math, no FP64 penalty).  Override with "
+                + "--large-n-score-type double.", n, numGenes, est, safe);
+            case DOUBLE -> Logging.info(
+                "Weight accumulation: DOUBLE (64-bit floating point, ~15-16 significant digits)  "
                 + "[taxa=%d, genes=%d, est. max 2·score ≈ %.2e exceeds long-safe %.2e]  "
                 + "— switched to avoid 64-bit integer overflow; scores are approximate but "
                 + "topologically equivalent.", n, numGenes, est, safe);
-        } else {
-            Logging.info("Weight accumulation: LONG (exact 64-bit integer)  "
+            default -> Logging.info(
+                "Weight accumulation: LONG (exact 64-bit integer)  "
                 + "[taxa=%d, genes=%d, est. max 2·score ≈ %.2e within long-safe %.2e].",
                 n, numGenes, est, safe);
         }
@@ -299,6 +344,7 @@ public class WeightTable {
                                                int numGpuTrees,
                                                long[] scoreArray,
                                                double[] scoreArrayD,
+                                               Int128[] scoreArrayI,
                                                int batchSizeHint,
                                                double vramFraction) {
         int numSplits      = splitList.size();
@@ -316,7 +362,7 @@ public class WeightTable {
             orderings, invIndex,
             numSplits, numPartTrees, partTreeOffset, csr.maxLeafCount,
             numGpuTrees, n,
-            batchSizeHint, vramFraction, useDouble);
+            batchSizeHint, vramFraction, nativeScoreMode());
         long gpuMs = (System.nanoTime() - t1) / 1_000_000;
 
         splitsData = null; orderings = null; invIndex = null;   // let GC reclaim
@@ -325,7 +371,7 @@ public class WeightTable {
             return false;
         }
         Logging.info("  GPU kernel returned in %d ms", gpuMs);
-        unpackTwoScores(twoScores, scoreArray, scoreArrayD, numSplits);
+        unpackTwoScores(twoScores, scoreArray, scoreArrayD, scoreArrayI, numSplits);
         return true;
     }
 
@@ -333,14 +379,24 @@ public class WeightTable {
      * Convert the raw per-split doubled-score transport array from the GPU into
      * final per-split scores (score = 2·score / 2).
      *
-     * <p>In LONG mode each {@code twoScores[i]} is the exact integer 2·score.
-     * In DOUBLE mode the kernel stores the IEEE-754 bit pattern of the
-     * floating-point 2·score in the long slot (see {@code __double_as_longlong}
-     * in the kernel), which we recover with {@link Double#longBitsToDouble}.
+     * <ul>
+     *   <li>LONG  — each {@code twoScores[i]} is the exact integer 2·score.</li>
+     *   <li>DOUBLE— the kernel stored the IEEE-754 bit pattern of the 2·score in
+     *       the long slot ({@code __double_as_longlong}); recover with
+     *       {@link Double#longBitsToDouble}.</li>
+     *   <li>INT128— two longs per split: {@code [2i]} = low (unsigned),
+     *       {@code [2i+1]} = high (signed).</li>
+     * </ul>
      */
     private void unpackTwoScores(long[] twoScores, long[] scoreArray,
-                                 double[] scoreArrayD, int numSplits) {
-        if (useDouble) {
+                                 double[] scoreArrayD, Int128[] scoreArrayI, int numSplits) {
+        if (useInt128) {
+            for (int i = 0; i < numSplits; i++) {
+                long lo = twoScores[2 * i];
+                long hi = twoScores[2 * i + 1];
+                scoreArrayI[i] = new Int128(hi, lo).halve();   // 2·score → score
+            }
+        } else if (useDouble) {
             for (int i = 0; i < numSplits; i++)
                 scoreArrayD[i] = Double.longBitsToDouble(twoScores[i]) / 2.0;
         } else {
@@ -365,6 +421,7 @@ public class WeightTable {
                                                  int numGpuTrees,
                                                  long[] scoreArray,
                                                  double[] scoreArrayD,
+                                                 Int128[] scoreArrayI,
                                                  int batchSizeHint,
                                                  double vramFraction) {
         int numSplits      = splitList.size();
@@ -402,7 +459,7 @@ public class WeightTable {
         long[] twoScores = GPUWeightCalculator.computeWeightsSmallerSideGPU(
             splitsData, partsData, orderings, invIndex,
             numSplits, numParts, numGpuTrees, n, n,
-            batchSizeHint, vramFraction, useDouble);
+            batchSizeHint, vramFraction, nativeScoreMode());
         long gpuMs = (System.nanoTime() - t1) / 1_000_000;
 
         splitsData = null; partsData = null; orderings = null; invIndex = null;   // let GC reclaim
@@ -411,7 +468,7 @@ public class WeightTable {
             return false;
         }
         Logging.info("  GPU kernel returned in %d ms", gpuMs);
-        unpackTwoScores(twoScores, scoreArray, scoreArrayD, numSplits);
+        unpackTwoScores(twoScores, scoreArray, scoreArrayD, scoreArrayI, numSplits);
         return true;
     }
 
@@ -573,7 +630,7 @@ public class WeightTable {
                                    Collection<PartitionTable.Entry> partitions,
                                    ClusterTable clusterTable,
                                    List<Tree> clusterTrees, List<Tree> partTrees,
-                                   long[] scoreArray, double[] scoreArrayD) {
+                                   long[] scoreArray, double[] scoreArrayD, Int128[] scoreArrayI) {
         int numSplits = splitList.size();
         // CPU: parallel over splits (TRACE: single-threaded for deterministic output)
         if (Logging.isTrace()) {
@@ -581,7 +638,10 @@ public class WeightTable {
                 BipartitionSplit sp = splitList.get(idx);
                 Logging.trace("SPLIT sz=%d|%d  lo=%s  hi=%s",
                     sp.lo.size, sp.hi.size, sp.lo, sp.hi);
-                if (useDouble) {
+                if (useInt128) {
+                    scoreArrayI[idx] = computeScoreI(sp, partitions, clusterTable, clusterTrees, partTrees);
+                    Logging.trace("  => score=%s", scoreArrayI[idx]);
+                } else if (useDouble) {
                     scoreArrayD[idx] = computeScoreD(sp, partitions, clusterTable, clusterTrees, partTrees);
                     Logging.trace("  => score=%.6e", scoreArrayD[idx]);
                 } else {
@@ -593,7 +653,10 @@ public class WeightTable {
             java.util.concurrent.atomic.AtomicInteger wDone = new java.util.concurrent.atomic.AtomicInteger(0);
             ProgressBar wBar = new ProgressBar("Scoring splits (CPU)", numSplits);
             Threading.processRangeParallel(numSplits, idx -> {
-                if (useDouble) {
+                if (useInt128) {
+                    scoreArrayI[idx] = computeScoreI(splitList.get(idx), partitions, clusterTable,
+                                                     clusterTrees, partTrees);
+                } else if (useDouble) {
                     scoreArrayD[idx] = computeScoreD(splitList.get(idx), partitions, clusterTable,
                                                      clusterTrees, partTrees);
                 } else {
@@ -785,34 +848,129 @@ public class WeightTable {
     }
 
     // -------------------------------------------------------------------------
+    // CPU path — INT128 variant (exact, overflow-free; used when the configured
+    // large-score type is INT128).  Same intersection matrix as computeScore();
+    // only the QI products and the running total are 128-bit.
+    // -------------------------------------------------------------------------
+
+    private Int128 computeScoreI(BipartitionSplit split,
+                                  Collection<PartitionTable.Entry> partitions,
+                                  ClusterTable clusterTable,
+                                  List<Tree> clusterTrees, List<Tree> partTrees) {
+        ClusterTable.Entry eA = clusterTable.get(split.lo);
+        ClusterTable.Entry eB = clusterTable.get(split.hi);
+        if (eA == null || eB == null) return Int128.ZERO;
+
+        Cluster cA = eA.exemplar;
+        Cluster cB = eB.exemplar;
+        Tree tA = clusterTrees.get(cA.treeIndex);
+        Tree tB = clusterTrees.get(cB.treeIndex);
+        int sizeA = cA.size;
+        int sizeB = cB.size;
+        int sizeC = n - sizeA - sizeB;
+        if (sizeC < 0) return Int128.ZERO;
+
+        Int128 twoScore = Int128.ZERO;
+
+        for (PartitionTable.Entry pe : partitions) {
+            Partition p = pe.exemplar;
+            Tree tGT = partTrees.get(p.treeIndex);
+
+            int lo1 = p.leftStart,  hi1 = p.leftEnd;
+            int lo2 = p.rightStart, hi2 = p.rightEnd;
+            int sz1 = p.size1, sz2 = p.size2, sz3 = p.size3;
+
+            int a0 = IntersectionCounter.intersect(tGT, lo1, hi1, tA, cA.left, cA.right, cA.complement, sz1);
+            int a1 = IntersectionCounter.intersect(tGT, lo2, hi2, tA, cA.left, cA.right, cA.complement, sz2);
+            int b0 = IntersectionCounter.intersect(tGT, lo1, hi1, tB, cB.left, cB.right, cB.complement, sz1);
+            int b1 = IntersectionCounter.intersect(tGT, lo2, hi2, tB, cB.left, cB.right, cB.complement, sz2);
+
+            int lgA = tGT.isComplete ? sizeA
+                    : IntersectionCounter.intersectWithFullTree(tGT, tA, cA.left, cA.right, cA.complement);
+            int lgB = tGT.isComplete ? sizeB
+                    : IntersectionCounter.intersectWithFullTree(tGT, tB, cB.left, cB.right, cB.complement);
+
+            int a2 = lgA - a0 - a1;
+            int b2 = lgB - b0 - b1;
+            int c0 = sz1 - a0 - b0;
+            int c1 = sz2 - a1 - b1;
+            int c2 = sz3 - a2 - b2;
+
+            if (a2 < 0 || b2 < 0 || c0 < 0 || c1 < 0 || c2 < 0) continue;
+
+            Int128 twoQI = computeTwoQIInt128(a0, a1, a2, b0, b1, b2, c0, c1, c2);
+            twoScore = twoScore.add(twoQI.mulScalar(pe.frequency));
+        }
+
+        return twoScore.halve();
+    }
+
+    /** Exact 128-bit mirror of {@link #computeTwoQI}; per-term ai·bj·ck·su promoted to 128-bit. */
+    private static Int128 computeTwoQIInt128(int a0, int a1, int a2,
+                                              int b0, int b1, int b2,
+                                              int c0, int c1, int c2) {
+        long[] a = {a0, a1, a2};
+        long[] b = {b0, b1, b2};
+        long[] c = {c0, c1, c2};
+
+        Int128 sum = Int128.ZERO;
+        int[][] perms = {{0,1,2},{0,2,1},{1,0,2},{1,2,0},{2,0,1},{2,1,0}};
+        for (int[] perm : perms) {
+            long ai = a[perm[0]], bj = b[perm[1]], ck = c[perm[2]];
+            long s = ai + bj + ck - 3;
+            if (s > 0) {
+                long abc = ai * bj * ck;                 // ≤ ~2^51, fits long
+                sum = sum.add(Int128.mulLong(abc, s));   // (≤2^70) exact 128-bit
+            }
+        }
+        return sum;
+    }
+
+    // -------------------------------------------------------------------------
     // Queries
     // -------------------------------------------------------------------------
 
-    /** Whether scores are floating-point (true) or exact integers (false). */
-    public boolean isDouble() { return useDouble; }
+    /** The active score numeric type. */
+    public Mode getMode()      { return mode; }
+    public boolean isDouble()  { return useDouble; }
+    public boolean isInt128()  { return useInt128; }
 
     /**
-     * Score of a split as a long.  In DOUBLE mode this returns the value rounded
-     * to the nearest long (used only by debug/verifier tooling); the DP must use
-     * {@link #getScoreD} when {@link #isDouble()} is true.
+     * Score of a split as a long.  In DOUBLE/INT128 mode this returns the value
+     * rounded/clamped to long (debug/verifier tooling only); the DP must use the
+     * mode-matching accessor ({@link #getScoreD} / {@link #getScoreI}).
      */
     public long getScore(BipartitionSplit split) {
-        return useDouble ? Math.round(scoresD.getOrDefault(split, 0.0))
-                         : scores.getOrDefault(split, 0L);
+        if (useInt128) { Int128 v = scoresI.get(split); return v == null ? 0L : Math.round(v.toDouble()); }
+        if (useDouble) return Math.round(scoresD.getOrDefault(split, 0.0));
+        return scores.getOrDefault(split, 0L);
     }
 
-    /** Score of a split as a double (valid in both modes). */
+    /** Score of a split as a double (valid in all modes; approximate for INT128). */
     public double getScoreD(BipartitionSplit split) {
-        return useDouble ? scoresD.getOrDefault(split, 0.0)
-                         : (double) scores.getOrDefault(split, 0L);
+        if (useInt128) { Int128 v = scoresI.get(split); return v == null ? 0.0 : v.toDouble(); }
+        if (useDouble) return scoresD.getOrDefault(split, 0.0);
+        return (double) scores.getOrDefault(split, 0L);
     }
 
-    public long   getMaxScore()    { return useDouble ? Math.round(maxScoreD)   : maxScore; }
-    public long   getTotalScore()  { return useDouble ? Math.round(totalScoreD) : totalScore; }
-    public double getMaxScoreD()   { return useDouble ? maxScoreD   : (double) maxScore; }
-    public double getTotalScoreD() { return useDouble ? totalScoreD : (double) totalScore; }
-    public int    size()           { return useDouble ? scoresD.size() : scores.size(); }
+    /** Score of a split as an exact Int128 (valid in all modes). */
+    public Int128 getScoreI(BipartitionSplit split) {
+        if (useInt128) return scoresI.getOrDefault(split, Int128.ZERO);
+        if (useDouble) return Int128.ofLong(Math.round(scoresD.getOrDefault(split, 0.0)));
+        return Int128.ofLong(scores.getOrDefault(split, 0L));
+    }
 
-    /** Iterate all (split, score) pairs (LONG mode only; empty in DOUBLE mode). */
+    public long   getMaxScore()    { return useInt128 ? Math.round(getMaxScoreD())
+                                          : useDouble ? Math.round(maxScoreD)   : maxScore; }
+    public long   getTotalScore()  { return useInt128 ? Math.round(getTotalScoreD())
+                                          : useDouble ? Math.round(totalScoreD) : totalScore; }
+    public double getMaxScoreD()   { return useInt128 ? (maxScoreI == null ? 0.0 : maxScoreI.toDouble())
+                                          : useDouble ? maxScoreD   : (double) maxScore; }
+    public double getTotalScoreD() { return useInt128 ? totalScoreI.toDouble()
+                                          : useDouble ? totalScoreD : (double) totalScore; }
+    public int    size()           { return useInt128 ? scoresI.size()
+                                          : useDouble ? scoresD.size() : scores.size(); }
+
+    /** Iterate all (split, score) pairs (LONG mode only; empty in DOUBLE/INT128 mode). */
     public Set<Map.Entry<BipartitionSplit, Long>> entries() { return scores.entrySet(); }
 }

@@ -83,6 +83,54 @@ __device__ inline void storeTwoScore(long long* out, int idx, long long v) { out
 __device__ inline void storeTwoScore(long long* out, int idx, double    v) { out[idx] = __double_as_longlong(v); }
 
 // ---------------------------------------------------------------------------
+// Emulated 128-bit signed integer for exact, overflow-free accumulation at very
+// large taxon counts.  CUDA device code has no native __int128, so we carry a
+// {low (unsigned), high (signed)} pair and implement only the few operations the
+// score loop needs — all from full-rate integer instructions (no throttled FP64).
+//
+// All score operands are non-negative (intersection counts, frequencies), so the
+// multiplies use unsigned 64×64→128 (__umul64hi); the signed high word only
+// matters for the DP's sentinel on the Java side.
+//
+// Magnitude budget (n ≤ ~1e5, genes ≤ ~1e4):
+//   ai·bj·ck      ≤ ~2^51   (fits signed 64-bit)
+//   (ai·bj·ck)·su  → up to ~2^70   (needs 128-bit; one __umul64hi)
+//   2·QI = Σ6 terms, freq·2·QI, and the per-split block sum all fit in 128 bits.
+// ---------------------------------------------------------------------------
+struct I128 { unsigned long long lo; long long hi; };
+
+__device__ inline I128 i128_zero() { I128 r; r.lo = 0ULL; r.hi = 0LL; return r; }
+
+__device__ inline I128 i128_add(I128 a, I128 b) {
+    I128 r;
+    r.lo = a.lo + b.lo;
+    long long carry = (r.lo < a.lo) ? 1LL : 0LL;   // unsigned wrap ⇒ carry
+    r.hi = a.hi + b.hi + carry;
+    return r;
+}
+
+// Exact 64×64→128 product of two non-negative values.
+__device__ inline I128 i128_mul_u64(unsigned long long a, unsigned long long b) {
+    I128 r;
+    r.lo = a * b;
+    r.hi = (long long) __umul64hi(a, b);
+    return r;
+}
+
+// this · small non-negative scalar (true product fits in 128 bits for our budget).
+__device__ inline I128 i128_mul_scalar(I128 a, unsigned long long f) {
+    I128 lop = i128_mul_u64(a.lo, f);          // 128-bit product of the low word
+    long long hiAdd = a.hi * (long long) f;    // high-word contribution (fits 64-bit here)
+    I128 r; r.lo = lop.lo; r.hi = lop.hi + hiAdd; return r;
+}
+
+// INT128 transport: two longs per split — [2*idx] = low (unsigned bits), [2*idx+1] = high.
+__device__ inline void storeTwoScoreI128(long long* out, int idx, I128 v) {
+    out[(size_t)idx * 2]     = (long long) v.lo;
+    out[(size_t)idx * 2 + 1] = v.hi;
+}
+
+// ---------------------------------------------------------------------------
 // Device helper: cooperative prefix-sum of cluster membership over a tree's
 // leaves, written into pX[0..L].  Uses scan[] (WB_BLOCK ints) as scratch.
 //
@@ -312,6 +360,160 @@ __global__ void computeWeightsKernel(
     }
 }
 
+// ---------------------------------------------------------------------------
+// INT128 variant of scoreSplit — exact 128-bit accumulation (overflow-free at
+// very large n) using only full-rate integer instructions.  Structurally
+// identical to scoreSplit<ACC>; only the QI products and accumulators are 128-bit.
+// twoScores is the 2-wide INT128 transport (two longs per split).
+// ---------------------------------------------------------------------------
+__device__ void scoreSplitI128(
+    int s,
+    const int* __restrict__ splits,
+    const int* __restrict__ nodeData,
+    const int* __restrict__ nodeFreq,
+    const int* __restrict__ nodeOffset,
+    const int* __restrict__ partLeafCount,
+    const int* __restrict__ orderings,
+    const int* __restrict__ invIndex,
+    int numPartTrees, int partTreeOffset, int numTaxa, int totalN,
+    int* __restrict__ pA, int* __restrict__ pB, int* __restrict__ scan,
+    int tid, int nthreads,
+    long long* __restrict__ twoScores)
+{
+    __shared__ I128 red[WB_BLOCK];
+
+    const int* sp = splits + (size_t)s * 10;
+    int aTree = sp[0], aLo = sp[1], aHi = sp[2], aComp = sp[3], aSize = sp[4];
+    int bTree = sp[5], bLo = sp[6], bHi = sp[7], bComp = sp[8], bSize = sp[9];
+
+    if (aSize + bSize > totalN) {
+        if (tid == 0) storeTwoScoreI128(twoScores, s, i128_zero());
+        return;
+    }
+
+    size_t aBase = (size_t)aTree * numTaxa;
+    size_t bBase = (size_t)bTree * numTaxa;
+
+    const int PI[6] = {0, 0, 1, 1, 2, 2};
+    const int PJ[6] = {1, 2, 0, 2, 0, 1};
+    const int PK[6] = {2, 1, 2, 0, 1, 0};
+
+    I128 threadAccum = i128_zero();
+
+    for (int g = 0; g < numPartTrees; g++) {
+        int nbeg = nodeOffset[g];
+        int nend = nodeOffset[g + 1];
+        if (nbeg == nend) continue;
+
+        int    L     = partLeafCount[g];
+        size_t gBase = (size_t)(partTreeOffset + g) * numTaxa;
+
+        buildPrefix(pA, scan, L, gBase, aBase, aLo, aHi, aComp, orderings, invIndex, tid, nthreads);
+        buildPrefix(pB, scan, L, gBase, bBase, bLo, bHi, bComp, orderings, invIndex, tid, nthreads);
+
+        int lgA = pA[L];
+        int lgB = pB[L];
+
+        for (int ni = nbeg + tid; ni < nend; ni += nthreads) {
+            size_t nb = (size_t)ni * 3;
+            int lo  = nodeData[nb];
+            int mid = nodeData[nb + 1];
+            int hi  = nodeData[nb + 2];
+
+            int a0 = pA[mid] - pA[lo];
+            int a1 = pA[hi]  - pA[mid];
+            int b0 = pB[mid] - pB[lo];
+            int b1 = pB[hi]  - pB[mid];
+
+            int sz1 = mid - lo;
+            int sz2 = hi  - mid;
+            int sz3 = L   - (hi - lo);
+
+            int a2 = lgA - a0 - a1;
+            int b2 = lgB - b0 - b1;
+            int c0 = sz1 - a0 - b0;
+            int c1 = sz2 - a1 - b1;
+            int c2 = sz3 - a2 - b2;
+
+            if (a2 < 0 || b2 < 0 || c0 < 0 || c1 < 0 || c2 < 0) continue;
+
+            long long a[3] = {a0, a1, a2};
+            long long b[3] = {b0, b1, b2};
+            long long c[3] = {c0, c1, c2};
+
+            I128 twoQI = i128_zero();
+            #pragma unroll
+            for (int p = 0; p < 6; p++) {
+                long long ai = a[PI[p]], bj = b[PJ[p]], ck = c[PK[p]];
+                long long su = ai + bj + ck - 3;
+                if (su > 0) {
+                    long long abc = ai * bj * ck;   // ≤ ~2^51, fits 64-bit
+                    twoQI = i128_add(twoQI, i128_mul_u64((unsigned long long)abc,
+                                                         (unsigned long long)su));
+                }
+            }
+            threadAccum = i128_add(threadAccum,
+                                   i128_mul_scalar(twoQI, (unsigned long long) nodeFreq[ni]));
+        }
+
+        __syncthreads();
+    }
+
+    red[tid] = threadAccum;
+    __syncthreads();
+    for (int off = nthreads / 2; off > 0; off >>= 1) {
+        if (tid < off) red[tid] = i128_add(red[tid], red[tid + off]);
+        __syncthreads();
+    }
+    if (tid == 0) storeTwoScoreI128(twoScores, s, red[0]);
+    __syncthreads();
+}
+
+// INT128 kernel wrapper (mirrors computeWeightsKernel<GLOBAL, ACC>).
+template<bool GLOBAL>
+__global__ void computeWeightsKernelI128(
+    const int* __restrict__ splits,
+    const int* __restrict__ nodeData,
+    const int* __restrict__ nodeFreq,
+    const int* __restrict__ nodeOffset,
+    const int* __restrict__ partLeafCount,
+    const int* __restrict__ orderings,
+    const int* __restrict__ invIndex,
+    int curBatch,
+    int numPartTrees,
+    int partTreeOffset,
+    int prefixStride,
+    int numTaxa,
+    int totalN,
+    int* __restrict__ gPrefix,
+    long long* __restrict__ twoScores)
+{
+    extern __shared__ int smem[];
+    int tid      = threadIdx.x;
+    int nthreads = blockDim.x;
+
+    if (GLOBAL) {
+        int* scan = smem;
+        int* pA   = gPrefix + (size_t)blockIdx.x * 2 * prefixStride;
+        int* pB   = pA + prefixStride;
+        for (int s = blockIdx.x; s < curBatch; s += gridDim.x) {
+            scoreSplitI128(s, splits, nodeData, nodeFreq, nodeOffset, partLeafCount,
+                           orderings, invIndex, numPartTrees, partTreeOffset,
+                           numTaxa, totalN, pA, pB, scan, tid, nthreads, twoScores);
+        }
+    } else {
+        int* pA   = smem;
+        int* pB   = smem + prefixStride;
+        int* scan = smem + 2 * prefixStride;
+        int s = blockIdx.x;
+        if (s < curBatch) {
+            scoreSplitI128(s, splits, nodeData, nodeFreq, nodeOffset, partLeafCount,
+                           orderings, invIndex, numPartTrees, partTreeOffset,
+                           numTaxa, totalN, pA, pB, scan, tid, nthreads, twoScores);
+        }
+    }
+}
+
 // ===========================================================================
 // LEGACY "smaller-side traversal" path (activated by --weight-intersection-method
 // smaller-side-traversal).  One thread per split, ZERO per-thread state, NO prefix sums:
@@ -438,6 +640,88 @@ __global__ void computeWeightsSmallerSideKernel(
     storeTwoScore(twoScores, idx, twoScore);
 }
 
+// INT128 variant of the smaller-side kernel (one thread per split, exact 128-bit).
+__global__ void computeWeightsSmallerSideKernelI128(
+    const int* __restrict__ splits,
+    const int* __restrict__ parts,
+    const int* __restrict__ orderings,
+    const int* __restrict__ invIndex,
+    int curBatch,
+    int numParts,
+    int numTaxa,
+    int totalN,
+    long long* __restrict__ twoScores)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= curBatch) return;
+
+    const int* sp = splits + (size_t)idx * 10;
+    int loTree = sp[0], loLeft = sp[1], loRight = sp[2], loComp = sp[3], sizeA = sp[4];
+    int hiTree = sp[5], hiLeft = sp[6], hiRight = sp[7], hiComp = sp[8], sizeB = sp[9];
+
+    int sizeC = totalN - sizeA - sizeB;
+    if (sizeC < 0) { storeTwoScoreI128(twoScores, idx, i128_zero()); return; }
+
+    const int PI[6] = {0, 0, 1, 1, 2, 2};
+    const int PJ[6] = {1, 2, 0, 2, 0, 1};
+    const int PK[6] = {2, 1, 2, 0, 1, 0};
+
+    I128 twoScore = i128_zero();
+
+    for (int j = 0; j < numParts; j++) {
+        const int* pt = parts + (size_t)j * 9;
+        int tGT = pt[0];
+        int lo1 = pt[1], hi1 = pt[2];
+        int lo2 = pt[3], hi2 = pt[4];
+        int sz1 = pt[5], sz2 = pt[6], sz3 = pt[7];
+        int freq = pt[8];
+
+        int a0 = ssIntersect(tGT, lo1, hi1, loTree, loLeft, loRight, loComp, sz1, orderings, invIndex, numTaxa);
+        int a1 = ssIntersect(tGT, lo2, hi2, loTree, loLeft, loRight, loComp, sz2, orderings, invIndex, numTaxa);
+        int b0 = ssIntersect(tGT, lo1, hi1, hiTree, hiLeft, hiRight, hiComp, sz1, orderings, invIndex, numTaxa);
+        int b1 = ssIntersect(tGT, lo2, hi2, hiTree, hiLeft, hiRight, hiComp, sz2, orderings, invIndex, numTaxa);
+
+        int L_GT = sz1 + sz2 + sz3;
+        int lgA, lgB;
+        if (L_GT == totalN) {
+            lgA = sizeA;
+            lgB = sizeB;
+        } else {
+            int coreA = ssCoreIntersect(tGT, 0, L_GT, loTree, loLeft, loRight, orderings, invIndex, numTaxa);
+            lgA = loComp ? (L_GT - coreA) : coreA;
+            int coreB = ssCoreIntersect(tGT, 0, L_GT, hiTree, hiLeft, hiRight, orderings, invIndex, numTaxa);
+            lgB = hiComp ? (L_GT - coreB) : coreB;
+        }
+
+        int a2 = lgA - a0 - a1;
+        int b2 = lgB - b0 - b1;
+        int c0 = sz1 - a0 - b0;
+        int c1 = sz2 - a1 - b1;
+        int c2 = sz3 - a2 - b2;
+
+        if (a2 < 0 || b2 < 0 || c0 < 0 || c1 < 0 || c2 < 0) continue;
+
+        long long a[3] = {a0, a1, a2};
+        long long b[3] = {b0, b1, b2};
+        long long c[3] = {c0, c1, c2};
+
+        I128 twoQI = i128_zero();
+        #pragma unroll
+        for (int p = 0; p < 6; p++) {
+            long long ai = a[PI[p]], bj = b[PJ[p]], ck = c[PK[p]];
+            long long su = ai + bj + ck - 3;
+            if (su > 0) {
+                long long abc = ai * bj * ck;
+                twoQI = i128_add(twoQI, i128_mul_u64((unsigned long long)abc,
+                                                     (unsigned long long)su));
+            }
+        }
+        twoScore = i128_add(twoScore, i128_mul_scalar(twoQI, (unsigned long long) freq));
+    }
+
+    storeTwoScoreI128(twoScores, idx, twoScore);
+}
+
 // ---------------------------------------------------------------------------
 // Progress-bar helpers (host-side, used in the batch loop)
 // ---------------------------------------------------------------------------
@@ -510,11 +794,16 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsGPU(
     jintArray jPartLeafCount, jintArray jOrderings, jintArray jInvIndex,
     jint numSplits, jint numPartTrees, jint partTreeOffset, jint maxLeafCount,
     jint numGpuTrees, jint numTaxa,
-    jint batchSizeHint, jdouble vramFraction, jboolean jUseDouble)
+    jint batchSizeHint, jdouble vramFraction, jint scoreMode)
 {
-    bool useDouble = (jUseDouble == JNI_TRUE);
+    // scoreMode: 0 = LONG (exact int64), 1 = DOUBLE (bit-packed), 2 = INT128 (2 longs/split)
+    bool useDouble = (scoreMode == 1);
+    bool useI128   = (scoreMode == 2);
+    int  scoresPerSplit = useI128 ? 2 : 1;   // INT128 transports two longs per split
     fprintf(stderr, "[ASTRAL-X GPU] weight accumulator: %s\n",
-            useDouble ? "DOUBLE (64-bit float, overflow-safe)" : "LONG (exact 64-bit integer)");
+            useI128   ? "INT128 (exact 128-bit integer)"
+          : useDouble ? "DOUBLE (64-bit float, overflow-safe)"
+                      : "LONG (exact 64-bit integer)");
     // -------------------------------------------------------------------------
     // Pin host arrays
     // -------------------------------------------------------------------------
@@ -551,7 +840,11 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsGPU(
     if (useShared && sharedBytesShared > 49152) {
         // Opt in to larger dynamic shared memory (default cap is 48 KB).
         // Set on whichever accumulator instantiation will actually launch.
-        if (useDouble)
+        if (useI128)
+            cudaFuncSetAttribute(computeWeightsKernelI128<false>,
+                                 cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                 (int)sharedBytesShared);
+        else if (useDouble)
             cudaFuncSetAttribute(computeWeightsKernel<false, double>,
                                  cudaFuncAttributeMaxDynamicSharedMemorySize,
                                  (int)sharedBytesShared);
@@ -619,7 +912,10 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsGPU(
     if (!useShared) {
         int numSM = 0, blocksPerSM = 0;
         cudaDeviceGetAttribute(&numSM, cudaDevAttrMultiProcessorCount, 0);
-        if (useDouble)
+        if (useI128)
+            cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+                &blocksPerSM, computeWeightsKernelI128<true>, WB_BLOCK, sharedBytesGlobal);
+        else if (useDouble)
             cudaOccupancyMaxActiveBlocksPerMultiprocessor(
                 &blocksPerSM, computeWeightsKernel<true, double>, WB_BLOCK, sharedBytesGlobal);
         else
@@ -675,7 +971,7 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsGPU(
         size_t freeVRAM = 0, totalVRAM = 0;
         cudaMemGetInfo(&freeVRAM, &totalVRAM);
         size_t usable = (size_t)((double)freeVRAM * (double)vramFraction);
-        size_t perSplitBytes = 10 * sizeof(int) + sizeof(long long);
+        size_t perSplitBytes = 10 * sizeof(int) + scoresPerSplit * sizeof(long long);
         long long autoSize = (long long)(usable / perSplitBytes);
         if (autoSize < 1) autoSize = 1;
         if (autoSize > (long long)numSplits) autoSize = (long long)numSplits;
@@ -696,7 +992,7 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsGPU(
 
     while (batchSize > 0) {
         size_t splitBufSz = (size_t)batchSize * 10 * sizeof(int);
-        size_t scoreBufSz = (size_t)batchSize * sizeof(long long);
+        size_t scoreBufSz = (size_t)batchSize * scoresPerSplit * sizeof(long long);
         cudaError_t e1 = cudaMalloc(&dSplits,    splitBufSz);
         cudaError_t e2 = cudaMalloc(&dTwoScores, scoreBufSz);
         if (e1 == cudaSuccess && e2 == cudaSuccess) break;
@@ -739,7 +1035,7 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsGPU(
     // -------------------------------------------------------------------------
     // Host result buffer — accumulates scores across all batches
     // -------------------------------------------------------------------------
-    long long* hTwoScores = new long long[numSplits]();   // zero-initialised
+    long long* hTwoScores = new long long[(size_t)numSplits * scoresPerSplit]();   // zero-initialised
 
     // -------------------------------------------------------------------------
     // Batch loop: stream splits in, stream scores out
@@ -761,7 +1057,12 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsGPU(
 
         if (useShared) {
             // Fast path: one block per split; prefix arrays in shared memory.
-            if (useDouble)
+            if (useI128)
+                computeWeightsKernelI128<false><<<curBatch, WB_BLOCK, sharedBytes>>>(
+                    dSplits, dNodeData, dNodeFreq, dNodeOffset, dPartLeafCount, dOrderings, dInvIndex,
+                    curBatch, numPartTrees, partTreeOffset, stride, numTaxa, numTaxa,
+                    NULL, dTwoScores);
+            else if (useDouble)
                 computeWeightsKernel<false, double><<<curBatch, WB_BLOCK, sharedBytes>>>(
                     dSplits, dNodeData, dNodeFreq, dNodeOffset, dPartLeafCount, dOrderings, dInvIndex,
                     curBatch, numPartTrees, partTreeOffset, stride, numTaxa, numTaxa,
@@ -775,7 +1076,12 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsGPU(
             // Large-L path: resident-capped grid grid-strides over splits;
             // prefix arrays in the bounded global pool (slot = blockIdx.x).
             int gridDim = (curBatch < maxResident) ? curBatch : maxResident;
-            if (useDouble)
+            if (useI128)
+                computeWeightsKernelI128<true><<<gridDim, WB_BLOCK, sharedBytes>>>(
+                    dSplits, dNodeData, dNodeFreq, dNodeOffset, dPartLeafCount, dOrderings, dInvIndex,
+                    curBatch, numPartTrees, partTreeOffset, stride, numTaxa, numTaxa,
+                    dPrefix, dTwoScores);
+            else if (useDouble)
                 computeWeightsKernel<true, double><<<gridDim, WB_BLOCK, sharedBytes>>>(
                     dSplits, dNodeData, dNodeFreq, dNodeOffset, dPartLeafCount, dOrderings, dInvIndex,
                     curBatch, numPartTrees, partTreeOffset, stride, numTaxa, numTaxa,
@@ -793,9 +1099,9 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsGPU(
                     b + 1, numBatches, cudaGetErrorString(err));
         }
 
-        cudaMemcpy(hTwoScores + offset,
+        cudaMemcpy(hTwoScores + (size_t)offset * scoresPerSplit,
                    dTwoScores,
-                   (size_t)curBatch * sizeof(long long),
+                   (size_t)curBatch * scoresPerSplit * sizeof(long long),
                    cudaMemcpyDeviceToHost);
 
         // ── tqdm-style progress bar (multi-batch only) ────────────────────
@@ -828,8 +1134,9 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsGPU(
     // -------------------------------------------------------------------------
     // Build Java long[] result
     // -------------------------------------------------------------------------
-    jlongArray result = env->NewLongArray(numSplits);
-    env->SetLongArrayRegion(result, 0, numSplits, (jlong*)hTwoScores);
+    jsize outLen = (jsize)((size_t)numSplits * scoresPerSplit);
+    jlongArray result = env->NewLongArray(outLen);
+    env->SetLongArrayRegion(result, 0, outLen, (jlong*)hTwoScores);
 
     // -------------------------------------------------------------------------
     // Cleanup
@@ -864,11 +1171,15 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsSmallerSideGPU(
     JNIEnv* env, jclass cls,
     jintArray jSplits, jintArray jParts, jintArray jOrderings, jintArray jInvIndex,
     jint numSplits, jint numParts, jint numGpuTrees, jint numTaxa, jint totalN,
-    jint batchSizeHint, jdouble vramFraction, jboolean jUseDouble)
+    jint batchSizeHint, jdouble vramFraction, jint scoreMode)
 {
-    bool useDouble = (jUseDouble == JNI_TRUE);
+    bool useDouble = (scoreMode == 1);
+    bool useI128   = (scoreMode == 2);
+    int  scoresPerSplit = useI128 ? 2 : 1;
     fprintf(stderr, "[ASTRAL-X GPU] weight accumulator: %s\n",
-            useDouble ? "DOUBLE (64-bit float, overflow-safe)" : "LONG (exact 64-bit integer)");
+            useI128   ? "INT128 (exact 128-bit integer)"
+          : useDouble ? "DOUBLE (64-bit float, overflow-safe)"
+                      : "LONG (exact 64-bit integer)");
     jint* hSplits    = env->GetIntArrayElements(jSplits,    NULL);
     jint* hParts     = env->GetIntArrayElements(jParts,     NULL);
     jint* hOrderings = env->GetIntArrayElements(jOrderings, NULL);
@@ -914,7 +1225,7 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsSmallerSideGPU(
         size_t freeVRAM = 0, totalVRAM = 0;
         cudaMemGetInfo(&freeVRAM, &totalVRAM);
         size_t usable = (size_t)((double)freeVRAM * (double)vramFraction);
-        size_t perSplitBytes = 10 * sizeof(int) + sizeof(long long);
+        size_t perSplitBytes = 10 * sizeof(int) + scoresPerSplit * sizeof(long long);
         long long autoSize = (long long)(usable / perSplitBytes);
         if (autoSize < 1) autoSize = 1;
         if (autoSize > (long long)numSplits) autoSize = (long long)numSplits;
@@ -930,7 +1241,7 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsSmallerSideGPU(
     long long* dTwoScores = NULL;
     while (batchSize > 0) {
         size_t splitBufSz = (size_t)batchSize * 10 * sizeof(int);
-        size_t scoreBufSz = (size_t)batchSize * sizeof(long long);
+        size_t scoreBufSz = (size_t)batchSize * scoresPerSplit * sizeof(long long);
         cudaError_t e1 = cudaMalloc(&dSplits,    splitBufSz);
         cudaError_t e2 = cudaMalloc(&dTwoScores, scoreBufSz);
         if (e1 == cudaSuccess && e2 == cudaSuccess) break;
@@ -949,7 +1260,7 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsSmallerSideGPU(
         return NULL;
     }
 
-    long long* hTwoScores = new long long[numSplits]();
+    long long* hTwoScores = new long long[(size_t)numSplits * scoresPerSplit]();
 
     int    blockSize  = WB_BLOCK;
     int    numBatches = (numSplits + batchSize - 1) / batchSize;
@@ -966,7 +1277,11 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsSmallerSideGPU(
                    (size_t)curBatch * 10 * sizeof(int), cudaMemcpyHostToDevice);
 
         int gridSize = (curBatch + blockSize - 1) / blockSize;
-        if (useDouble)
+        if (useI128)
+            computeWeightsSmallerSideKernelI128<<<gridSize, blockSize>>>(
+                dSplits, dParts, dOrderings, dInvIndex,
+                curBatch, numParts, numTaxa, totalN, dTwoScores);
+        else if (useDouble)
             computeWeightsSmallerSideKernel<double><<<gridSize, blockSize>>>(
                 dSplits, dParts, dOrderings, dInvIndex,
                 curBatch, numParts, numTaxa, totalN, dTwoScores);
@@ -981,8 +1296,8 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsSmallerSideGPU(
                     b + 1, numBatches, cudaGetErrorString(err));
         }
 
-        cudaMemcpy(hTwoScores + offset, dTwoScores,
-                   (size_t)curBatch * sizeof(long long), cudaMemcpyDeviceToHost);
+        cudaMemcpy(hTwoScores + (size_t)offset * scoresPerSplit, dTwoScores,
+                   (size_t)curBatch * scoresPerSplit * sizeof(long long), cudaMemcpyDeviceToHost);
 
         if (numBatches > 1) {
             double elapsed  = wb_now_sec() - t_loop_start;
@@ -1007,8 +1322,9 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsSmallerSideGPU(
         }
     }
 
-    jlongArray result = env->NewLongArray(numSplits);
-    env->SetLongArrayRegion(result, 0, numSplits, (jlong*)hTwoScores);
+    jsize outLen = (jsize)((size_t)numSplits * scoresPerSplit);
+    jlongArray result = env->NewLongArray(outLen);
+    env->SetLongArrayRegion(result, 0, outLen, (jlong*)hTwoScores);
 
     delete[] hTwoScores;
     cudaFree(dSplits);

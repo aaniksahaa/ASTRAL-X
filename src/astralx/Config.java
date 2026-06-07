@@ -25,6 +25,16 @@ public class Config {
      */
     public enum WeightIntersectionMethod { PREFIX_SUM, SMALLER_SIDE_TRAVERSAL }
 
+    /**
+     * Numeric type used for weight scores when the taxon set is large enough that
+     * exact 64-bit integers would overflow (see WeightTable.needsDoubleAccumulation).
+     * Below that threshold scores are always exact LONG regardless of this setting.
+     *   INT128 — exact 128-bit integers (default); fast full-rate integer math on GPU.
+     *   DOUBLE — 64-bit floating point; simpler but FP64 is heavily throttled on
+     *            consumer GPUs, making the weight kernel much slower.
+     */
+    public enum LargeScoreType { INT128, DOUBLE }
+
     private static Config instance;
 
     private String inputFile;
@@ -37,6 +47,7 @@ public class Config {
     private boolean treatAsUnrooted = true;
     private SearchMode searchMode = SearchMode.LOCAL;
     private WeightIntersectionMethod weightIntersectionMethod = WeightIntersectionMethod.PREFIX_SUM;
+    private LargeScoreType largeScoreType = LargeScoreType.INT128;
 
     /**
      * GPU split-batching control.
@@ -156,6 +167,9 @@ public class Config {
     public void setSearchMode(SearchMode s)   { this.searchMode = s; }
     public WeightIntersectionMethod getWeightIntersectionMethod()        { return weightIntersectionMethod; }
     public void setWeightIntersectionMethod(WeightIntersectionMethod m)  { this.weightIntersectionMethod = m; }
+
+    public LargeScoreType getLargeScoreType()        { return largeScoreType; }
+    public void setLargeScoreType(LargeScoreType t)  { this.largeScoreType = t; }
     public boolean isGpuBatch()               { return gpuBatch; }
     public void setGpuBatch(boolean b)        { this.gpuBatch = b; }
     public int getGpuBatchSize()              { return gpuBatchSize; }

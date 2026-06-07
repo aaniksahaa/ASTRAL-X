@@ -7,6 +7,7 @@ import astralx.cluster.ClusterTable;
 import astralx.partition.PartitionTable;
 import astralx.taxon.TaxonRegistry;
 import astralx.tree.Tree;
+import astralx.util.Int128;
 import astralx.weight.WeightTable;
 
 import java.util.*;
@@ -25,6 +26,7 @@ public class Inference {
 
     private final Map<ClusterHash, Long>             dpMemo     = new HashMap<>();   // LONG score path
     private final Map<ClusterHash, Double>           dpMemoD    = new HashMap<>();   // DOUBLE score path
+    private final Map<ClusterHash, Int128>           dpMemoI    = new HashMap<>();   // INT128 score path
     private final Map<ClusterHash, BipartitionSplit> bestSplits = new HashMap<>();
 
     // -------------------------------------------------------------------------
@@ -47,8 +49,13 @@ public class Inference {
         ClusterHash root = dpTable.getRootHash();
 
         // The score type mirrors the WeightTable's accumulation decision: exact
-        // LONG for normal sizes, DOUBLE when the integer score would overflow.
-        if (weightTable.isDouble()) {
+        // LONG for normal sizes; above the overflow threshold, exact INT128
+        // (default) or approximate DOUBLE.  The [tag] makes the type explicit.
+        if (weightTable.isInt128()) {
+            Int128 totalScore = solveI(root, dpTable, weightTable);
+            long ms = (System.nanoTime() - t0) / 1_000_000;
+            Logging.info("Inference DP: optimal quartet score = %s  [int128]  (%d ms)", totalScore, ms);
+        } else if (weightTable.isDouble()) {
             double totalScore = solveD(root, dpTable, weightTable);
             long ms = (System.nanoTime() - t0) / 1_000_000;
             // %.0f keeps it a plain (huge) number for log parsers; the [double]
@@ -141,6 +148,45 @@ public class Inference {
         }
 
         dpMemoD.put(ch, best);
+        if (bestSp != null) bestSplits.put(ch, bestSp);
+        return best;
+    }
+
+    /**
+     * Exact 128-bit mirror of {@link #solve} (default path for very large taxon
+     * sets).  Identical structure; accumulator/comparison use {@link Int128}.
+     * Populates the shared {@code bestSplits} map, so Newick reconstruction is
+     * unchanged.
+     */
+    private Int128 solveI(ClusterHash ch, DPTable dpTable, WeightTable weightTable) {
+        Int128 memo = dpMemoI.get(ch);
+        if (memo != null) return memo;
+
+        if (ch.size == 1) {
+            dpMemoI.put(ch, Int128.ZERO);
+            return Int128.ZERO;
+        }
+
+        Set<BipartitionSplit> splits = dpTable.getSplits(ch);
+        if (splits.isEmpty()) {
+            dpMemoI.put(ch, Int128.ZERO);
+            return Int128.ZERO;
+        }
+
+        Int128 best = null;   // null = lowest sentinel
+        BipartitionSplit bestSp = null;
+
+        for (BipartitionSplit split : splits) {
+            Int128 score = weightTable.getScoreI(split)
+                         .add(solveI(split.lo, dpTable, weightTable))
+                         .add(solveI(split.hi, dpTable, weightTable));
+            if (best == null || score.compareTo(best) > 0) {
+                best  = score;
+                bestSp = split;
+            }
+        }
+
+        dpMemoI.put(ch, best);
         if (bestSp != null) bestSplits.put(ch, bestSp);
         return best;
     }

@@ -1,13 +1,11 @@
-# Adaptive `long` → `double` Weight Accumulation (Large-`n` Overflow Fix)
+# Adaptive Large-`n` Weight Accumulation (LONG → INT128 / DOUBLE)
 
 ## Problem
 
 ASTRAL-X scores each candidate bipartition split by summing, over every
-gene-tree tripartition, `frequency · 2·QI`, where `QI` is the quartet-intersection
-score of the 3×3 intersection matrix. Both the per-split score and the DP total
-were accumulated as signed 64-bit integers (`long` in Java, `long long` in CUDA).
-
-For large taxon sets these values **overflow `long`**:
+gene-tree tripartition, `frequency · 2·QI`. Both the per-split score and the DP
+total were accumulated as signed 64-bit integers (`long` / `long long`). For
+large taxon sets these **overflow `long`**:
 
 ```
 per-split 2·score  ≈  genes · C(n,4) · 2  ≈  genes · n⁴ / 12
@@ -21,128 +19,159 @@ per-split 2·score  ≈  genes · C(n,4) · 2  ≈  genes · n⁴ / 12
 | 50,000  | 1000  | 5.2e20           | **NO → wraps negative**    |
 | 100,000 | 1000  | 8.3e21           | **NO**                     |
 
-The observed symptom was a **negative "optimal quartet score"** at n=50,000
-(two's-complement wraparound). The overflow is end-to-end: the CUDA accumulator,
-the JNI transport, the `WeightTable` score map, and the `long`-based inference DP
-all overflow.
+Observed symptom: a **negative "optimal quartet score"** at n=50,000
+(two's-complement wraparound). The overflow is end-to-end — CUDA accumulator,
+JNI transport, the `WeightTable` score map, and the `long`-based inference DP.
 
-## Decision: adaptive switch to `double`
+## Decision: keep LONG below threshold; above it use INT128 (default) or DOUBLE
 
-When the estimated maximum score would exceed the long-safe range, the entire
-scoring + DP pipeline switches from exact 64-bit integers to 64-bit floating
-point (`double`). Below the threshold, the exact-integer path is **unchanged**.
+When the estimated maximum score would exceed the long-safe range, the whole
+scoring + DP pipeline switches to a wider type. Two options, selected by
+`--large-n-score-type`:
 
-### Why `double` (and not int128 / scaling)
+- **INT128 (default)** — exact 128-bit integers. On the GPU this is emulated
+  from full-rate integer instructions (`__umul64hi` + carries).
+- **DOUBLE** — 64-bit floating point. Simpler, but FP64 is heavily throttled on
+  consumer GPUs.
 
-- **`double`**: 64-bit (no memory change), ~2⁻⁵³ ≈ 1e-16 relative precision, no
-  overflow until ~1e308. The rounding error is **topologically irrelevant** — a
-  DP decision only flips when two competing resolutions' totals differ by less
-  than ~1e-8 relative, i.e. at statistically-tied/unsupported nodes whose exact
-  answer is itself arbitrary. GPU FP64 throughput is lower, but at large `n` the
-  weight kernel is memory-bound (bottleneck = loading the orderings/invIndex
-  prefix data), so the arithmetic cost is largely absorbed.
-- **int128 (rejected)**: exact, but requires emulated 128-bit in the innermost
-  kernel loop, `(hi,lo)` JNI transport, an `Int128` type threaded through the DP
-  hot loop (no Java operator overloading → 1.5–3× slower DP), and pushes a
-  `> 2⁶³` integer into the CSV that overflows int64 again in downstream
-  pandas/numpy analysis. Its only advantage (exactness) does not change the trees.
-- **scaling to long (rejected)**: marginal headroom; reported score becomes a
-  scaled quantity.
+Below the threshold, scores are always exact LONG and the existing code path is
+**byte-for-byte unchanged**.
 
-See the conversation rationale; this doc records the chosen `double` design.
+### Why INT128 is the default (GPU performance)
+
+The weight kernel is **compute-bound** at scale (observed: sustained ~100% GPU
+utilization, weight precomputation dominating total runtime). On consumer GPUs:
+
+- **double (FP64): 1/64 of FP32 throughput** — every QI multiply hits the
+  throttled FP64 units. Empirically the DOUBLE path is significantly slower than
+  the integer path at large n.
+- **int128 (emulated): full-rate INT32/INT64** — many cheap integer ops beat one
+  heavily-throttled FP64 op.
+
+So INT128 is both **exact** and **fast** on the hardware we run on, whereas
+DOUBLE trades exactness for a large FP64 slowdown. DOUBLE remains available
+(`--large-n-score-type double`) for datacenter GPUs (A100/H100, FP64 at 1/2
+rate) or when floating-point scores are acceptable.
+
+### Why not int128 *everywhere*
+
+Below the threshold `long` is exact and fastest; using int128 there would only
+add register pressure for no benefit. Hence the adaptive gate.
 
 ## Threshold
 
-`WeightTable.needsDoubleAccumulation(n, numGenes)`:
+`WeightTable.needsDoubleAccumulation(n, numGenes)` (the name predates the int128
+option; it gates *any* widening):
 
 ```
 estMaxTwoScore = numGenes · n⁴ / 12          // ≈ max per-split doubled score
 longSafe       = Long.MAX_VALUE / 8          // ≈ 1.153e18, 8× margin for
                                              //   intermediate freq·2QI and partial sums
-useDouble = estMaxTwoScore > longSafe
+widen = estMaxTwoScore > longSafe            // → INT128 (default) or DOUBLE
 ```
 
-For `genes = 1000` this switches at `n ≈ 10,800` (comfortably below the hard
-overflow at `n ≈ 18,000`, with margin to spare). The estimate is computed in
-`double` to avoid overflow in the check itself.
+For `genes = 1000` this switches at `n ≈ 10,800` (below the hard overflow at
+`n ≈ 18,000`, with margin). Computed in `double` to avoid overflow in the check.
 
-**Overrides for testing:**
-- `ASTRALX_WEIGHT_FORCE_DOUBLE=1` — force the double path.
-- `ASTRALX_WEIGHT_FORCE_LONG=1` — force the exact-integer path.
+**Overrides for testing:** `ASTRALX_WEIGHT_FORCE_DOUBLE=1` (force widen) /
+`ASTRALX_WEIGHT_FORCE_LONG=1` (force exact long). The *widened* type is then
+INT128 or DOUBLE per `--large-n-score-type`.
+
+## CLI flag
+
+```
+--large-n-score-type int128   # default — exact, fast on consumer GPUs
+--large-n-score-type double    # approximate, FP64 (slower on consumer GPUs)
+```
+(`--large-score-type` is an accepted alias.)
 
 ## How the data type is logged
 
-The active numeric type is stated explicitly, at three points:
+Stated explicitly at multiple points:
 
-1. **Phase 6 decision line** (`WeightTable`):
+1. **Phase-6 decision line** (`WeightTable`), e.g.:
    ```
-   Weight accumulation: DOUBLE (64-bit floating point, ~15-16 significant digits)
-     [taxa=50000, genes=1000, est. max 2·score ≈ 5.21e+20 exceeds long-safe 1.15e+18]
-     — switched to avoid 64-bit integer overflow; scores are approximate but
-       topologically equivalent.
+   Weight accumulation: INT128 (exact 128-bit integer)  [taxa=50000, genes=1000,
+     est. max 2·score ≈ 5.21e+20 exceeds long-safe 1.15e+18]  — switched to avoid
+     64-bit integer overflow; scores remain exact (full-rate integer math, no FP64
+     penalty).  Override with --large-n-score-type double.
    ```
-   or, below the threshold:
-   ```
-   Weight accumulation: LONG (exact 64-bit integer)
-     [taxa=1000, genes=1000, est. max 2·score ≈ 8.33e+13 within long-safe 1.15e+18].
-   ```
-2. **Native kernel line** (`stderr`): `[ASTRAL-X GPU] weight accumulator: DOUBLE …` / `LONG …`.
-3. **Weight-table summary**: `… splits scored [DOUBLE] …` / `[LONG] …`.
-4. **Inference score line**: `Inference DP: optimal quartet score = … [double]` / `[long]`.
+   (DOUBLE and LONG produce analogous lines.)
+2. **Native kernel line** (`stderr`): `[ASTRAL-X GPU] weight accumulator: INT128 …` / `DOUBLE …` / `LONG …`.
+3. **Weight-table summary**: `… splits scored [INT128] …` / `[DOUBLE]` / `[LONG]`.
+4. **Inference score line**: `Inference DP: optimal quartet score = … [int128]` / `[double]` / `[long]`.
 
 ## Implementation map
 
 | Layer | File | Change |
 |-------|------|--------|
-| Threshold + decision logging | `src/astralx/weight/WeightTable.java` | `needsDoubleAccumulation`, `estimatedMaxTwoScore`, `longSafeBound`, `logAccumulationDecision` |
-| Score storage | `WeightTable.java` | parallel `scoresD` map + `maxScoreD`/`totalScoreD`; `useDouble` flag; `getScoreD`/`getMaxScoreD`/`getTotalScoreD`/`isDouble` accessors |
-| CPU scoring | `WeightTable.java` | `computeScoreD` + `computeTwoQIDouble` (double mirrors of the exact methods); `computeScoresCPU` branches |
-| GPU transport decode | `WeightTable.java` | `unpackTwoScores` — long verbatim, or `Double.longBitsToDouble` in double mode |
-| JNI signatures | `src/astralx/gpu/GPUWeightCalculator.java` | added `boolean useDouble` to both native methods |
-| CUDA kernels | `src/native/astralx_weight.cu` | `scoreSplit<ACC>`, `computeWeightsKernel<GLOBAL,ACC>`, `computeWeightsSmallerSideKernel<ACC>`; `storeTwoScore` overloads; `jboolean` param on both JNI entry points; launch/attribute/occupancy branched on `useDouble` |
-| Inference DP | `src/astralx/dp/Inference.java` | parallel `solveD` + `dpMemoD`; `run` branches on `weightTable.isDouble()`; type-tagged score log |
-| Verifier | `src/astralx/Phase6Verifier.java` | prints score type; skips the long-map per-split scan in double mode |
+| 128-bit value type (Java) | `src/astralx/util/Int128.java` | immutable {hi signed, lo unsigned}; `add`, `compareTo`, `halve`, `mulLong` (via `Math.multiplyHigh`), `mulScalar`, `toDouble`, `toString` (BigInteger) |
+| Config flag | `src/astralx/Config.java` | `enum LargeScoreType {INT128, DOUBLE}` (default INT128) + getter/setter |
+| CLI | `src/astralx/Main.java` | `--large-n-score-type int128\|double` |
+| Threshold + 3-way decision + logging | `src/astralx/weight/WeightTable.java` | `Mode {LONG,DOUBLE,INT128}`; `needsDoubleAccumulation`, `nativeScoreMode`, `logAccumulationDecision` |
+| Score storage | `WeightTable.java` | parallel `scores`/`scoresD`/`scoresI` maps + per-mode max/total; accessors `getScore`/`getScoreD`/`getScoreI`, `getMode`/`isDouble`/`isInt128` |
+| CPU scoring | `WeightTable.java` | `computeScoreI` + `computeTwoQIInt128` (exact 128-bit), alongside long/double variants |
+| GPU transport decode | `WeightTable.java` | `unpackTwoScores` — long verbatim / `longBitsToDouble` / `(lo,hi)`→`Int128.halve()` |
+| JNI signatures | `src/astralx/gpu/GPUWeightCalculator.java` | `int scoreMode` (0=LONG,1=DOUBLE,2=INT128) on both natives |
+| CUDA kernels | `src/native/astralx_weight.cu` | device `I128` struct + helpers (`i128_add`, `i128_mul_u64` via `__umul64hi`, `i128_mul_scalar`); `scoreSplitI128` + `computeWeightsKernelI128<GLOBAL>`; `computeWeightsSmallerSideKernelI128`; `scoreMode` dispatch, 2-wide INT128 transport, scaled batch buffers/memcpy/result arrays |
+| Inference DP | `src/astralx/dp/Inference.java` | `solveI` + `dpMemoI` (Int128); `run` 3-way branch; type-tagged score log |
+| Verifier | `src/astralx/Phase6Verifier.java` | prints `getMode()`; skips the long-map scan in non-LONG modes |
 
-### Transport trick (single JNI return type)
+### Transport formats (single JNI return type)
 
-The native kernels still return `long[]` (one slot per split = `2·score`). In
-LONG mode the slot is the exact integer. In DOUBLE mode the kernel stores the
-IEEE-754 **bit pattern** of the floating-point `2·score`
-(`__double_as_longlong`), which Java decodes with `Double.longBitsToDouble`.
-This keeps one JNI signature and avoids `(hi,lo)` array packing. `0LL` is the bit
-pattern of `+0.0`, so the "invalid split → 0" path is correct in both modes.
+The native kernels return `long[]`:
+- **LONG**: `numSplits` slots, each the exact integer `2·score`.
+- **DOUBLE**: `numSplits` slots, each the IEEE-754 bit pattern of `2·score`
+  (`__double_as_longlong`; decode with `Double.longBitsToDouble`).
+- **INT128**: `2·numSplits` slots — `[2i]` = low (unsigned), `[2i+1]` = high
+  (signed). Java rebuilds `new Int128(hi, lo).halve()` (2·score → score).
 
-### Why the exact-integer path is byte-identical below threshold
+`0LL` is the bit pattern of `+0.0` and the zero Int128 low word, so the
+"invalid split → 0" path is correct in all three modes.
 
-The `long` accumulators, the `scores` map, `solve`/`dpMemo`, and the kernel's
-`long long` instantiation are all untouched. `useDouble` is `false` below the
-threshold, so all existing (sub-threshold) runs are bit-for-bit unchanged. The
-`double` path is a strict addition (parallel methods, separate maps).
+### GPU int128 magnitude budget (why 128 bits suffices and where the wide ops live)
+
+```
+ai·bj·ck      ≤ ~2^51   (fits signed 64-bit; computed as a plain long long)
+(ai·bj·ck)·su  → ~2^70  (one 64×64→128 via __umul64hi → I128)
+2·QI = Σ6 terms, freq·2·QI (i128_mul_scalar), per-split block sum  → all < 2^96
+```
+
+So the only 128-bit work per node is six `__umul64hi` + adds and one scalar
+multiply — minimal, on full-rate integer units. Even at n=200K / genes=1e4 the
+DP total stays far under 2^127.
+
+### Why the exact-LONG path is byte-identical below threshold
+
+`mode == LONG` keeps the original `long` accumulators, `scores` map,
+`solve`/`dpMemo`, and the kernel's `long long` instantiation untouched. The
+DOUBLE and INT128 paths are strict additions (separate methods, maps, kernels).
 
 ## Validation
 
-On the 48-taxon / 500-gene set, LONG (default) and forced-DOUBLE
-(`ASTRALX_WEIGHT_FORCE_DOUBLE=1`) were compared across all code paths:
+48-taxon / 500-gene set, all paths, forcing the widened modes
+(`ASTRALX_WEIGHT_FORCE_DOUBLE=1` + `--large-n-score-type …`):
 
-| Path | LONG score | DOUBLE score | trees |
-|------|-----------|--------------|-------|
-| prefix-sum GPU      | 134991678 | 134991678 | byte-identical |
-| smaller-side GPU    | 134991678 | 134991678 | byte-identical |
-| CPU                 | 134991678 | 134991678 | byte-identical |
+| Path | LONG | DOUBLE | INT128 | trees |
+|------|------|--------|--------|-------|
+| prefix-sum GPU   | 134991678 | 134991678 | 134991678 | byte-identical |
+| smaller-side GPU | 134991678 | —         | 134991678 | byte-identical |
+| CPU              | 134991678 | 134991678 | 134991678 | byte-identical |
 
-At this size `double` represents the integer scores exactly (`< 2⁵³`), so the
-match is exact. At very large `n` the double score carries ~1e-8 worst-case
-relative rounding (realistically ~1e-12 to 1e-10 due to balanced block
-reductions), which does not affect tree topology.
+Default over-threshold selects INT128; a normal (sub-threshold) run stays LONG
+and is unchanged. At this size all three types are exact (values `< 2^53`), so
+the agreement is exact. At very large n, INT128 stays exact while DOUBLE carries
+~1e-8 worst-case relative rounding (topology-irrelevant).
 
-## Accuracy notes (large n)
+## Accuracy / performance notes (large n)
 
-- **Topology (RF rate)**: effectively unaffected. Only edges where competing
-  resolutions are within ~1e-8 relative could flip — these are statistically
-  unsupported edges whose exact resolution is already arbitrary.
-- **Reported quartet score**: becomes floating-point above the threshold.
-  Accurate to ~8 significant figures worst case (more in practice). The run
-  scripts parse `optimal quartet score = <value>` and store the string verbatim;
-  `%.0f` keeps it a plain number for the CSV.
-- **Determinism**: preserved — the GPU block reduction order and the
-  single-threaded DP are deterministic for fixed input.
+- **INT128**: exact integer scores, no overflow (128 bits ≫ the ~10²⁸ DP total
+  even at n=200K). Fast on consumer GPUs (full-rate integer math); modest extra
+  register pressure vs LONG.
+- **DOUBLE**: ~1e-8 worst-case relative rounding (does not change topology), but
+  the reported score becomes floating-point **and** can exceed 2⁶³ — so reading
+  it into int64-typed pandas/numpy columns can itself overflow. INT128 prints an
+  exact decimal string (also `>2⁶³`), so downstream analysis must treat the
+  quartet-score column as a big integer / string, not int64.
+- **Determinism**: preserved — GPU block-reduction order and the single-threaded
+  DP are deterministic for fixed input.
