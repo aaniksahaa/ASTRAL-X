@@ -49,7 +49,7 @@ public class Config {
     private boolean treatAsUnrooted = true;
     private SearchMode searchMode = SearchMode.LOCAL;
     private WeightIntersectionMethod weightIntersectionMethod = WeightIntersectionMethod.PREFIX_SUM;
-    private LargeScoreType largeScoreType = LargeScoreType.DOUBLE;
+    private LargeScoreType largeScoreType = LargeScoreType.INT128;
 
     /**
      * GPU split-batching control.
