@@ -29,9 +29,11 @@ public class Config {
      * Numeric type used for weight scores when the taxon set is large enough that
      * exact 64-bit integers would overflow (see WeightTable.needsDoubleAccumulation).
      * Below that threshold scores are always exact LONG regardless of this setting.
-     *   INT128 — exact 128-bit integers (default); fast full-rate integer math on GPU.
-     *   DOUBLE — 64-bit floating point; simpler but FP64 is heavily throttled on
-     *            consumer GPUs, making the weight kernel much slower.
+     *   DOUBLE — 64-bit floating point (default); faster in practice despite FP64
+     *            throttling on consumer GPUs, because INT128 emulation requires more
+     *            instructions and 2× memory bandwidth for JNI transport.
+     *   INT128 — exact 128-bit integers; use when exact scores are required
+     *            (--large-n-score-type int128).
      */
     public enum LargeScoreType { INT128, DOUBLE }
 
@@ -47,7 +49,7 @@ public class Config {
     private boolean treatAsUnrooted = true;
     private SearchMode searchMode = SearchMode.LOCAL;
     private WeightIntersectionMethod weightIntersectionMethod = WeightIntersectionMethod.PREFIX_SUM;
-    private LargeScoreType largeScoreType = LargeScoreType.INT128;
+    private LargeScoreType largeScoreType = LargeScoreType.DOUBLE;
 
     /**
      * GPU split-batching control.

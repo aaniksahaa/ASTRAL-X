@@ -23,35 +23,35 @@ Observed symptom: a **negative "optimal quartet score"** at n=50,000
 (two's-complement wraparound). The overflow is end-to-end — CUDA accumulator,
 JNI transport, the `WeightTable` score map, and the `long`-based inference DP.
 
-## Decision: keep LONG below threshold; above it use INT128 (default) or DOUBLE
+## Decision: keep LONG below threshold; above it use DOUBLE (default) or INT128
 
 When the estimated maximum score would exceed the long-safe range, the whole
 scoring + DP pipeline switches to a wider type. Two options, selected by
 `--large-n-score-type`:
 
-- **INT128 (default)** — exact 128-bit integers. On the GPU this is emulated
-  from full-rate integer instructions (`__umul64hi` + carries).
-- **DOUBLE** — 64-bit floating point. Simpler, but FP64 is heavily throttled on
-  consumer GPUs.
+- **DOUBLE (default)** — 64-bit floating point. Faster in practice on consumer
+  GPUs despite the 1/64 FP64 throttle, because INT128 emulation requires more
+  instructions per multiply and 2× JNI transport bandwidth.
+- **INT128** — exact 128-bit integers, emulated from `__umul64hi` + carries.
+  Use when exact integer scores are required (`--large-n-score-type int128`).
 
 Below the threshold, scores are always exact LONG and the existing code path is
 **byte-for-byte unchanged**.
 
-### Why INT128 is the default (GPU performance)
+### Why DOUBLE is the default (measured performance)
 
-The weight kernel is **compute-bound** at scale (observed: sustained ~100% GPU
-utilization, weight precomputation dominating total runtime). On consumer GPUs:
+The INT128 emulation turned out slower in practice due to three compounding factors:
 
-- **double (FP64): 1/64 of FP32 throughput** — every QI multiply hits the
-  throttled FP64 units. Empirically the DOUBLE path is significantly slower than
-  the integer path at large n.
-- **int128 (emulated): full-rate INT32/INT64** — many cheap integer ops beat one
-  heavily-throttled FP64 op.
+- **More PTX instructions per multiply** — `__umul64hi` + add-with-carry is
+  several instructions vs one FP64 multiply, even counting the 1/64 throttle.
+- **2× JNI transport bandwidth** — INT128 returns 2 longs per split; the host
+  buffer, `cudaMemcpy`, and Java unpack step all double in size.
+- **Higher register pressure** — the `I128` struct needs two registers per
+  accumulator; on a register-heavy reduction kernel this reduces occupancy and
+  limits latency hiding.
 
-So INT128 is both **exact** and **fast** on the hardware we run on, whereas
-DOUBLE trades exactness for a large FP64 slowdown. DOUBLE remains available
-(`--large-n-score-type double`) for datacenter GPUs (A100/H100, FP64 at 1/2
-rate) or when floating-point scores are acceptable.
+Empirically the DOUBLE path finishes faster at large n on consumer hardware
+(RTX 4090). INT128 remains available for exact-score use cases.
 
 ### Why not int128 *everywhere*
 
@@ -80,8 +80,8 @@ INT128 or DOUBLE per `--large-n-score-type`.
 ## CLI flag
 
 ```
---large-n-score-type int128   # default — exact, fast on consumer GPUs
---large-n-score-type double    # approximate, FP64 (slower on consumer GPUs)
+--large-n-score-type double    # default — faster in practice on consumer GPUs
+--large-n-score-type int128   # exact integer scores (slower; use when needed)
 ```
 (`--large-score-type` is an accepted alias.)
 
