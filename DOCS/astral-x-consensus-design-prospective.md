@@ -384,6 +384,16 @@ sweep them with a stack to read the induced bipartition structure (the topology
 of gene tree `i` restricted to the `d` reps) in `O(d)`. No traversal of the
 full tree, no `n/64` scan.
 
+> **Correction / status (see
+> [consensus-emission-and-restriction-optimization.md](consensus-emission-and-restriction-optimization.md) §3):**
+> the sketch above is under-specified — postorder positions *alone* do not
+> determine the induced topology; the correct `O(d log d)` primitive is the
+> *auxiliary/virtual tree* (sort by Euler order, adjacent-pair LCA depths,
+> depth-stack build), which needs an LCA structure — already available in
+> `completion/EulerTourBuilder`. The current implementation (`PolytomyResolver.stepB`)
+> still does the `O(n)` full walk; the auxiliary-tree variant (incl. the
+> frequency-*multiplicity* subtlety) is specified in that doc.
+
 ## 9. Emission into X — Always the Smaller Side, Always a Signature
 
 Every resolution yields "side L | rest". To add to X:
