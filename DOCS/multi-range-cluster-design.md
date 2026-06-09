@@ -265,6 +265,20 @@ blanket-materialize every non-contiguous residual — otherwise X (and DP cost, 
 `O(#clusters × #splits)`) can blow up. Multi-range is the *mechanism*; the *amount* added is
 a deliberate, separate tuning decision.
 
+### 5.0 IMPLEMENTED (current): GPU/CPU hybrid, zero kernel change
+
+The first shipped GPU implementation is a **hybrid**, not the two-tier range-CSR below:
+`WeightTable.buildSplitsData` emits **all-zeros** for any split that references a
+multi-range cluster (the kernel already yields score 0 for zero-packed splits), so the
+**unchanged, validated** GPU kernel scores the single-range bulk; a parallel CPU pass
+(`correctMultiRangeSplits`) then recomputes exactly the multi-range splits via the same
+`computeScore/D/I` the pure-CPU path uses. Correctness is by composition (single-range
+GPU == CPU is bit-identical by the regression suite; multi-range uses identical CPU code),
+so it needs **no CUDA changes** and carries zero risk to the kernel. Trade-off: the
+multi-range splits run on CPU — fine while they are a small fraction (the expected case).
+The full two-tier range-CSR below remains the path to keep *everything* on-GPU if the
+multi-range split fraction ever becomes large enough to matter; §5.1–§5.5 specify it.
+
 ### 5.5 Interaction with polytomy — does the CSR layout get a "double blow"?
 
 Concern: if we ship **both** polytomy and multi-range, the gene-tree partition (M) side and

@@ -124,14 +124,14 @@ public class WeightTable {
         boolean useGPU = (Config.getInstance().getComputeMode() == Config.ComputeMode.GPU)
                          && GPUWeightCalculator.tryLoad();
 
-        // Multi-range clusters (consensus emission bridge) are CPU-only for now:
-        // both GPU kernels pack single-range split sides. The two-tier range-CSR
-        // (DOCS/multi-range-cluster-design.md §5.2/§5.3) lands separately.
-        if (useGPU && clusterTable.hasMultiRange()) {
-            Logging.info("Multi-range clusters present (consensus emission) — "
-                + "GPU weight path disabled, using CPU (GPU multi-range support pending)");
-            useGPU = false;
-        }
+        // Multi-range clusters (consensus emission bridge): GPU/CPU HYBRID.
+        // The GPU kernels pack single-range split sides, so any split that references
+        // a multi-range cluster is emitted as all-zeros by buildSplitsData (→ kernel
+        // score 0) and then CORRECTED on the CPU afterward. The overwhelming bulk —
+        // single-range splits — keep the unchanged, validated GPU fast path. This
+        // achieves GPU scalability without any kernel change (a pragmatic alternative
+        // to the two-tier range-CSR of DOCS/multi-range-cluster-design.md §5.2/§5.3).
+        boolean hybridMultiRange = useGPU && clusterTable.hasMultiRange();
 
         if (useGPU) {
             Config cfg = Config.getInstance();
@@ -214,6 +214,13 @@ public class WeightTable {
                 Logging.info("GPU weight path infeasible (e.g. shared-memory limit), falling back to CPU");
                 computeScoresCPU(splitList, partTable.entries(), clusterTable,
                                  clusterTrees, partTrees, scoreArray, scoreArrayD, scoreArrayI);
+            } else if (hybridMultiRange) {
+                // GPU scored single-range splits correctly and multi-range splits as 0;
+                // correct the latter on the CPU multi-range dispatch path.
+                int corrected = correctMultiRangeSplits(splitList, partTable.entries(), clusterTable,
+                                 clusterTrees, partTrees, scoreArray, scoreArrayD, scoreArrayI);
+                Logging.info("Hybrid weight path: %d multi-range splits corrected on CPU "
+                    + "(single-range splits scored on GPU)", corrected);
             }
         } else {
             if (Config.getInstance().getComputeMode() == Config.ComputeMode.GPU) {
@@ -496,7 +503,11 @@ public class WeightTable {
             ClusterTable.Entry eA = clusterTable.get(split.lo);
             ClusterTable.Entry eB = clusterTable.get(split.hi);
             int base = i * 10;
-            if (eA != null && eB != null) {
+            // Single-range splits are packed for the kernel. A split touching a
+            // multi-range cluster is left all-zeros (→ kernel score 0) and corrected
+            // on the CPU by correctMultiRangeSplits() — the GPU/CPU hybrid path.
+            if (eA != null && eB != null
+                    && !eA.exemplar.isMultiRange() && !eB.exemplar.isMultiRange()) {
                 Cluster cA = eA.exemplar, cB = eB.exemplar;
                 splitsData[base + 0] = cA.treeIndex;
                 splitsData[base + 1] = cA.left;
@@ -681,6 +692,38 @@ public class WeightTable {
     // -------------------------------------------------------------------------
     // CPU path
     // -------------------------------------------------------------------------
+
+    /**
+     * Hybrid-path CPU correction: recompute (on the multi-range-aware CPU path) the
+     * scores of exactly those splits that reference a multi-range cluster — which the
+     * GPU kernel emitted as 0. Single-range split scores from the GPU are left intact.
+     * Parallel over the (typically small) set of multi-range splits.
+     *
+     * @return number of splits corrected
+     */
+    private int correctMultiRangeSplits(List<BipartitionSplit> splitList,
+                                        Collection<PartitionTable.Entry> partitions,
+                                        ClusterTable clusterTable,
+                                        List<Tree> clusterTrees, List<Tree> partTrees,
+                                        long[] scoreArray, double[] scoreArrayD, Int128[] scoreArrayI) {
+        List<Integer> mr = new ArrayList<>();
+        for (int i = 0; i < splitList.size(); i++) {
+            BipartitionSplit sp = splitList.get(i);
+            ClusterTable.Entry eA = clusterTable.get(sp.lo);
+            ClusterTable.Entry eB = clusterTable.get(sp.hi);
+            if (eA == null || eB == null) continue;
+            if (eA.exemplar.isMultiRange() || eB.exemplar.isMultiRange()) mr.add(i);
+        }
+        if (mr.isEmpty()) return 0;
+        Threading.processRangeParallel(mr.size(), j -> {
+            int i = mr.get(j);
+            BipartitionSplit sp = splitList.get(i);
+            if (useInt128) scoreArrayI[i] = computeScoreI(sp, partitions, clusterTable, clusterTrees, partTrees);
+            else if (useDouble) scoreArrayD[i] = computeScoreD(sp, partitions, clusterTable, clusterTrees, partTrees);
+            else scoreArray[i] = computeScore(sp, partitions, clusterTable, clusterTrees, partTrees);
+        });
+        return mr.size();
+    }
 
     // -------------------------------------------------------------------------
     // Cluster-side intersection dispatch (single-range fast path / multi-range).
