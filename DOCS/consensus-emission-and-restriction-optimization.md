@@ -138,22 +138,25 @@ tiny (`≤ 31`, or `≤ √(50+25n)`), so `log d` is a ~5× constant, and **both
 `completion/EulerTourBuilder` builds exactly the Euler tour + sparse-table RMQ for `O(1)` LCA
 (currently used by the similarity/distance matrices). It can be reused verbatim.
 
-### 3.3 The multiplicity subtlety (don't silently change the result)
+### 3.3 The multiplicity question — turned out to be a NON-issue (verified)
 
-`walkCollect` emits a bitmap at **every** qualifying internal node — so a chain of gene-tree
-internal nodes that all enclose the same rep set contributes that bitmap **multiple times**, and
-those multiplicities become the **frequencies** that drive the mini-greedy sort order (hence
-which splits get accepted). A naive auxiliary tree emits each induced clade **once**, losing the
-multiplicity → potentially a different sort order → a (slightly) different emission set.
+An earlier worry was that `walkCollect` might emit a bitmap at *every* enclosing internal node
+(creating frequency multiplicities the induced tree would lose). Reading the actual code settles
+it: `walkCollect` emits **only at binary MERGE nodes** (`legit == 2` — both children carry ≥1
+present rep). Those merge nodes are *exactly* the internal nodes of the gene tree restricted to
+the present reps, each producing its clade **once**. A "pass-through" node (reps on only one
+child) does not emit. So the induced-tree enumeration is **exactly faithful** — no multiplicity
+recovery is needed.
 
-To stay faithful, recover the multiplicity from depths: the number of original internal nodes
-collapsed onto an induced edge is the **depth gap** along that edge (between a node and its
-induced parent's LCA depth). That's `O(d)` extra, computed from the same LCA depths. **Decision
-to make explicitly** (same flavor as design §10.4's local-vs-global novelty tradeoff):
-- **Faithful**: recover multiplicities → matches the `O(n)`-walk emission set. Recommended if we
-  want the optimization to be a pure speedup.
-- **Approximate**: one count per induced clade → simpler, but changes greedy order. Only
-  acceptable if we've already accepted §10.4-style non-bit-identical emission.
+**Status: IMPLEMENTED and validated.** `PolytomyResolver.collectGeneTreeBitmapsFast` enumerates
+the induced clades via a min-split recursion over consecutive-rep LCA depths (the Cartesian tree
+on separator depths), applying the same `2 ≤ sz ≤ d-2` filter and the same gene-tree-root skip
+(a merge at Euler depth 0). Selected by `--stepb-restriction dlogd|n` (**default dlogd**); the
+O(n) walk remains as the `n` fallback. Validated: **222,000 per-tree checks** comparing fast vs
+slow bitmap multisets across 4 inputs (0 mismatches), and end-to-end the two routes give
+**identical** emission counts, weight totalScore, and inference score. The per-tree Euler+RMQ
+(`EulerTourBuilder.build`) is built once per gene tree and shared read-only across all parallel
+tasks.
 
 ### 3.4 Complexity: before vs after
 

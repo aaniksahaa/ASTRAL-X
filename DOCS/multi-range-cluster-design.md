@@ -265,19 +265,30 @@ blanket-materialize every non-contiguous residual — otherwise X (and DP cost, 
 `O(#clusters × #splits)`) can blow up. Multi-range is the *mechanism*; the *amount* added is
 a deliberate, separate tuning decision.
 
-### 5.0 IMPLEMENTED (current): GPU/CPU hybrid, zero kernel change
+### 5.0 IMPLEMENTED (current): full two-tier range-CSR — multi-range scored 100% on GPU
 
-The first shipped GPU implementation is a **hybrid**, not the two-tier range-CSR below:
-`WeightTable.buildSplitsData` emits **all-zeros** for any split that references a
-multi-range cluster (the kernel already yields score 0 for zero-packed splits), so the
-**unchanged, validated** GPU kernel scores the single-range bulk; a parallel CPU pass
-(`correctMultiRangeSplits`) then recomputes exactly the multi-range splits via the same
-`computeScore/D/I` the pure-CPU path uses. Correctness is by composition (single-range
-GPU == CPU is bit-identical by the regression suite; multi-range uses identical CPU code),
-so it needs **no CUDA changes** and carries zero risk to the kernel. Trade-off: the
-multi-range splits run on CPU — fine while they are a small fraction (the expected case).
-The full two-tier range-CSR below remains the path to keep *everything* on-GPU if the
-multi-range split fraction ever becomes large enough to matter; §5.1–§5.5 specify it.
+The shipped GPU implementation is the **full two-tier range-CSR** (§5.1–§5.5), not a CPU
+hybrid: multi-range split sides are scored entirely on the GPU.
+
+- **Per-split range descriptor** `splitRangeMeta[i*4]={aRngOff,aRngCnt,bRngOff,bRngCnt}`
+  (offsets in pairs) + a **resident flat** `rangeData` of `[lo,hi]` pairs. A single-range
+  side has `cnt==0` → the kernel uses the split's `[lo,hi)` — **byte-identical** fast path.
+  Built by `WeightTable.buildSplitRangeData`; batched alongside the splits, `rangeData`
+  uploaded once.
+- **Prefix-sum kernel**: `buildPrefix` membership becomes "pos in any of `cnt` ranges"
+  when `cnt>0` (§5.2); the node loop is unchanged.
+- **Smaller-side kernel**: `ssIntersectSide`/`ssRowSum` sum `ssCoreIntersect` over the
+  side's ranges when `cnt>0` (§5.3).
+- Both numeric accumulators (LONG/DOUBLE; INT128 shares the same membership code).
+
+**Validated.** 13/13 GPU regression bit-identical (single-range packs `cnt==0`). On an
+identical X with 36 multi-range clusters / **103 multi-range splits**, both kernels
+(prefix-sum and smaller-side) score **bit-identical to CPU** — 3248 splits, 0 mismatches,
+in LONG and DOUBLE modes (`WeightKernelCheck`). No CPU correction remains; the only CPU
+fallback is the pre-existing "GPU infeasible → full CPU" path.
+
+> The earlier CPU/GPU **hybrid** (zero kernel change, multi-range splits corrected on CPU)
+> was the interim delivery; it is now superseded by this full-GPU path.
 
 ### 5.5 Interaction with polytomy — does the CSR layout get a "double blow"?
 

@@ -401,6 +401,13 @@ public class Main {
                 case "--verify-upgma"              -> cfg.setVerifyUpgma(true);
                 case "--verify-greedy-consensus"   -> cfg.setVerifyGreedyConsensus(true);
                 case "--consensus-experimental"    -> cfg.setConsensusExperimental(true);
+                case "--stepb-restriction"         -> {
+                    if (++i >= args.length) return false;
+                    String v = args[i].toLowerCase();
+                    if (v.equals("dlogd") || v.equals("fast"))      cfg.setStepBFastRestriction(true);
+                    else if (v.equals("n") || v.equals("full"))     cfg.setStepBFastRestriction(false);
+                    else { System.err.println("--stepb-restriction expects dlogd|n"); return false; }
+                }
                 case "--autocomplete-incomplete-gene-trees" -> cfg.setAutoCompleteIncompleteTrees(true);
                 case "--completion-method" -> {
                     if (++i >= args.length) return false;

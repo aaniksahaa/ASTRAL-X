@@ -124,14 +124,11 @@ public class WeightTable {
         boolean useGPU = (Config.getInstance().getComputeMode() == Config.ComputeMode.GPU)
                          && GPUWeightCalculator.tryLoad();
 
-        // Multi-range clusters (consensus emission bridge): GPU/CPU HYBRID.
-        // The GPU kernels pack single-range split sides, so any split that references
-        // a multi-range cluster is emitted as all-zeros by buildSplitsData (→ kernel
-        // score 0) and then CORRECTED on the CPU afterward. The overwhelming bulk —
-        // single-range splits — keep the unchanged, validated GPU fast path. This
-        // achieves GPU scalability without any kernel change (a pragmatic alternative
-        // to the two-tier range-CSR of DOCS/multi-range-cluster-design.md §5.2/§5.3).
-        boolean hybridMultiRange = useGPU && clusterTable.hasMultiRange();
+        // Multi-range clusters (consensus emission bridge) are handled fully ON GPU
+        // via the two-tier range-CSR: buildSplitRangeData packs each multi-range split
+        // side's ranges (single-range sides carry count 0 → the byte-identical fast
+        // path), and both kernels sum the intersection over a side's ranges
+        // (DOCS/multi-range-cluster-design.md §5.2/§5.3). No CPU correction needed.
 
         if (useGPU) {
             Config cfg = Config.getInstance();
@@ -214,13 +211,6 @@ public class WeightTable {
                 Logging.info("GPU weight path infeasible (e.g. shared-memory limit), falling back to CPU");
                 computeScoresCPU(splitList, partTable.entries(), clusterTable,
                                  clusterTrees, partTrees, scoreArray, scoreArrayD, scoreArrayI);
-            } else if (hybridMultiRange) {
-                // GPU scored single-range splits correctly and multi-range splits as 0;
-                // correct the latter on the CPU multi-range dispatch path.
-                int corrected = correctMultiRangeSplits(splitList, partTable.entries(), clusterTable,
-                                 clusterTrees, partTrees, scoreArray, scoreArrayD, scoreArrayI);
-                Logging.info("Hybrid weight path: %d multi-range splits corrected on CPU "
-                    + "(single-range splits scored on GPU)", corrected);
             }
         } else {
             if (Config.getInstance().getComputeMode() == Config.ComputeMode.GPU) {
@@ -369,12 +359,15 @@ public class WeightTable {
         int partTreeOffset = splitTrees ? clusterTrees.size() : 0;
 
         int[] splitsData = buildSplitsData(splitList, clusterTable);
+        int[][] rng      = buildSplitRangeData(splitList, clusterTable);
+        int[] splitRangeMeta = rng[0], rangeData = rng[1];
         int[][] oi       = buildOrderingsInvIndex(clusterTrees, partTrees, numGpuTrees);
         int[] orderings  = oi[0], invIndex = oi[1];
 
         long t1 = System.nanoTime();
         long[] twoScores = GPUWeightCalculator.computeWeightsGPU(
-            splitsData, csr.nodeData, csr.nodeFreq, csr.nodeOffset, csr.partLeafCount,
+            splitsData, splitRangeMeta, rangeData,
+            csr.nodeData, csr.nodeFreq, csr.nodeOffset, csr.partLeafCount,
             orderings, invIndex,
             numSplits, numPartTrees, partTreeOffset, csr.maxLeafCount,
             numGpuTrees, n,
@@ -445,6 +438,8 @@ public class WeightTable {
         int partTreeOffset = splitTrees ? clusterTrees.size() : 0;
 
         int[] splitsData = buildSplitsData(splitList, clusterTable);
+        int[][] rng      = buildSplitRangeData(splitList, clusterTable);
+        int[] splitRangeMeta = rng[0], rangeData = rng[1];
 
         // --- parts: numParts * 9 ints (deduplicated tripartitions) ---
         // treeIdx stored as (p.treeIndex + partTreeOffset) so the kernel reads the
@@ -473,7 +468,7 @@ public class WeightTable {
 
         long t1 = System.nanoTime();
         long[] twoScores = GPUWeightCalculator.computeWeightsSmallerSideGPU(
-            splitsData, partsData, orderings, invIndex,
+            splitsData, splitRangeMeta, rangeData, partsData, orderings, invIndex,
             numSplits, numParts, numGpuTrees, n, n,
             batchSizeHint, vramFraction, nativeScoreMode());
         long gpuMs = (System.nanoTime() - t1) / 1_000_000;
@@ -503,11 +498,10 @@ public class WeightTable {
             ClusterTable.Entry eA = clusterTable.get(split.lo);
             ClusterTable.Entry eB = clusterTable.get(split.hi);
             int base = i * 10;
-            // Single-range splits are packed for the kernel. A split touching a
-            // multi-range cluster is left all-zeros (→ kernel score 0) and corrected
-            // on the CPU by correctMultiRangeSplits() — the GPU/CPU hybrid path.
-            if (eA != null && eB != null
-                    && !eA.exemplar.isMultiRange() && !eB.exemplar.isMultiRange()) {
+            // Pack both single- and multi-range clusters. For a multi-range side the
+            // kernel ignores [lo,hi) (it reads the split's range descriptor instead),
+            // but tree/comp/size are still needed — left/right hold the bounding span.
+            if (eA != null && eB != null) {
                 Cluster cA = eA.exemplar, cB = eB.exemplar;
                 splitsData[base + 0] = cA.treeIndex;
                 splitsData[base + 1] = cA.left;
@@ -523,6 +517,43 @@ public class WeightTable {
             // else: all zeros → empty clusters → kernel yields score 0 for this split.
         }
         return splitsData;
+    }
+
+    /**
+     * Per-split range descriptor + resident flat range array for the GPU two-tier
+     * multi-range path (DOCS/multi-range-cluster-design.md §5.2/§5.3).
+     *   meta[i*4 + {0,1,2,3}] = {aRngOff, aRngCnt, bRngOff, bRngCnt}  (offsets in PAIRS)
+     *   rangeData             = concatenated [lo,hi] pairs of every multi-range split side
+     * A single-range side has count 0 — the kernel then uses the split's [lo,hi) fast path.
+     * For runs with no multi-range clusters, meta is all-zero and rangeData is empty
+     * (so the kernel's per-leaf membership is byte-identical to before).
+     *
+     * @return int[2][] = {meta (numSplits*4), rangeData}
+     */
+    private int[][] buildSplitRangeData(List<BipartitionSplit> splitList, ClusterTable clusterTable) {
+        int numSplits = splitList.size();
+        int[] meta = new int[numSplits * 4];
+        java.util.ArrayList<Integer> ranges = new java.util.ArrayList<>(); // flat lo,hi pairs
+        for (int i = 0; i < numSplits; i++) {
+            BipartitionSplit sp = splitList.get(i);
+            ClusterTable.Entry eA = clusterTable.get(sp.lo);
+            ClusterTable.Entry eB = clusterTable.get(sp.hi);
+            if (eA != null && eA.exemplar.isMultiRange()) {
+                Cluster c = eA.exemplar;
+                meta[i * 4 + 0] = ranges.size() / 2;   // offset in pairs
+                meta[i * 4 + 1] = c.los.length;
+                for (int j = 0; j < c.los.length; j++) { ranges.add(c.los[j]); ranges.add(c.his[j]); }
+            }
+            if (eB != null && eB.exemplar.isMultiRange()) {
+                Cluster c = eB.exemplar;
+                meta[i * 4 + 2] = ranges.size() / 2;
+                meta[i * 4 + 3] = c.los.length;
+                for (int j = 0; j < c.los.length; j++) { ranges.add(c.los[j]); ranges.add(c.his[j]); }
+            }
+        }
+        int[] rangeData = new int[ranges.size()];
+        for (int k = 0; k < ranges.size(); k++) rangeData[k] = ranges.get(k);
+        return new int[][]{ meta, rangeData };
     }
 
     /**
@@ -687,42 +718,6 @@ public class WeightTable {
             });
             wBar.done();
         }
-    }
-
-    // -------------------------------------------------------------------------
-    // CPU path
-    // -------------------------------------------------------------------------
-
-    /**
-     * Hybrid-path CPU correction: recompute (on the multi-range-aware CPU path) the
-     * scores of exactly those splits that reference a multi-range cluster — which the
-     * GPU kernel emitted as 0. Single-range split scores from the GPU are left intact.
-     * Parallel over the (typically small) set of multi-range splits.
-     *
-     * @return number of splits corrected
-     */
-    private int correctMultiRangeSplits(List<BipartitionSplit> splitList,
-                                        Collection<PartitionTable.Entry> partitions,
-                                        ClusterTable clusterTable,
-                                        List<Tree> clusterTrees, List<Tree> partTrees,
-                                        long[] scoreArray, double[] scoreArrayD, Int128[] scoreArrayI) {
-        List<Integer> mr = new ArrayList<>();
-        for (int i = 0; i < splitList.size(); i++) {
-            BipartitionSplit sp = splitList.get(i);
-            ClusterTable.Entry eA = clusterTable.get(sp.lo);
-            ClusterTable.Entry eB = clusterTable.get(sp.hi);
-            if (eA == null || eB == null) continue;
-            if (eA.exemplar.isMultiRange() || eB.exemplar.isMultiRange()) mr.add(i);
-        }
-        if (mr.isEmpty()) return 0;
-        Threading.processRangeParallel(mr.size(), j -> {
-            int i = mr.get(j);
-            BipartitionSplit sp = splitList.get(i);
-            if (useInt128) scoreArrayI[i] = computeScoreI(sp, partitions, clusterTable, clusterTrees, partTrees);
-            else if (useDouble) scoreArrayD[i] = computeScoreD(sp, partitions, clusterTable, clusterTrees, partTrees);
-            else scoreArray[i] = computeScore(sp, partitions, clusterTable, clusterTrees, partTrees);
-        });
-        return mr.size();
     }
 
     // -------------------------------------------------------------------------

@@ -142,6 +142,7 @@ __device__ inline void storeTwoScoreI128(long long* out, int idx, I128 v) {
 __device__ void buildPrefix(
     int* __restrict__ pX, int* __restrict__ scan, int L,
     size_t gBase, size_t clBase, int clLo, int clHi, int clComp,
+    int clRngOff, int clRngCnt, const int* __restrict__ rangeData,
     const int* __restrict__ orderings,
     const int* __restrict__ invIndex,
     int tid, int nthreads)
@@ -159,11 +160,24 @@ __device__ void buildPrefix(
     if (end   > L) end   = L;
 
     // Pass A: write indicator into pX[start..end), accumulate this chunk's sum.
+    // Single-range cluster (clRngCnt==0): membership is one interval test — the
+    // original fast path, byte-identical. Multi-range (clRngCnt>0): membership is
+    // "pos in ANY of clRngCnt disjoint ranges" (DOCS/multi-range-cluster-design.md §5.2).
     int sum = 0;
     for (int p = start; p < end; p++) {
         int t   = orderings[gBase + (size_t)p];
         int pos = invIndex[clBase + (size_t)t];
-        int in  = (pos >= clLo && pos < clHi) ? 1 : 0;
+        int in;
+        if (clRngCnt == 0) {
+            in = (pos >= clLo && pos < clHi) ? 1 : 0;
+        } else {
+            in = 0;
+            for (int r = 0; r < clRngCnt; r++) {
+                int rlo = rangeData[2 * (clRngOff + r)];
+                int rhi = rangeData[2 * (clRngOff + r) + 1];
+                if (pos >= rlo && pos < rhi) { in = 1; break; }
+            }
+        }
         in     ^= clComp;          // clComp is 0/1
         pX[p]   = in;
         sum    += in;
@@ -204,6 +218,8 @@ template<typename ACC>
 __device__ void scoreSplit(
     int s,
     const int* __restrict__ splits,
+    const int* __restrict__ splitRangeMeta,
+    const int* __restrict__ rangeData,
     const int* __restrict__ nodeData,
     const int* __restrict__ nodeFreq,
     const int* __restrict__ nodeOffset,
@@ -220,6 +236,9 @@ __device__ void scoreSplit(
     const int* sp = splits + (size_t)s * 10;
     int aTree = sp[0], aLo = sp[1], aHi = sp[2], aComp = sp[3], aSize = sp[4];
     int bTree = sp[5], bLo = sp[6], bHi = sp[7], bComp = sp[8], bSize = sp[9];
+    // Multi-range descriptor: [aRngOff, aRngCnt, bRngOff, bRngCnt]; cnt==0 ⇒ single-range.
+    const int* rm = splitRangeMeta + (size_t)s * 4;
+    int aRngOff = rm[0], aRngCnt = rm[1], bRngOff = rm[2], bRngCnt = rm[3];
 
     // Invalid / overlapping split → zero (defensive; real DP splits are disjoint).
     // (0LL is also the bit pattern of +0.0, so it decodes correctly in both modes.)
@@ -246,8 +265,8 @@ __device__ void scoreSplit(
         int    L     = partLeafCount[g];
         size_t gBase = (size_t)(partTreeOffset + g) * numTaxa;
 
-        buildPrefix(pA, scan, L, gBase, aBase, aLo, aHi, aComp, orderings, invIndex, tid, nthreads);
-        buildPrefix(pB, scan, L, gBase, bBase, bLo, bHi, bComp, orderings, invIndex, tid, nthreads);
+        buildPrefix(pA, scan, L, gBase, aBase, aLo, aHi, aComp, aRngOff, aRngCnt, rangeData, orderings, invIndex, tid, nthreads);
+        buildPrefix(pB, scan, L, gBase, bBase, bLo, bHi, bComp, bRngOff, bRngCnt, rangeData, orderings, invIndex, tid, nthreads);
 
         int lgA = pA[L];
         int lgB = pB[L];
@@ -319,6 +338,8 @@ __device__ void scoreSplit(
 template<bool GLOBAL, typename ACC>
 __global__ void computeWeightsKernel(
     const int* __restrict__ splits,
+    const int* __restrict__ splitRangeMeta,
+    const int* __restrict__ rangeData,
     const int* __restrict__ nodeData,
     const int* __restrict__ nodeFreq,
     const int* __restrict__ nodeOffset,
@@ -343,7 +364,7 @@ __global__ void computeWeightsKernel(
         int* pA   = gPrefix + (size_t)blockIdx.x * 2 * prefixStride;
         int* pB   = pA + prefixStride;
         for (int s = blockIdx.x; s < curBatch; s += gridDim.x) {
-            scoreSplit<ACC>(s, splits, nodeData, nodeFreq, nodeOffset, partLeafCount,
+            scoreSplit<ACC>(s, splits, splitRangeMeta, rangeData, nodeData, nodeFreq, nodeOffset, partLeafCount,
                        orderings, invIndex, numPartTrees, partTreeOffset,
                        numTaxa, totalN, pA, pB, scan, tid, nthreads, twoScores);
         }
@@ -353,7 +374,7 @@ __global__ void computeWeightsKernel(
         int* scan = smem + 2 * prefixStride;
         int s = blockIdx.x;
         if (s < curBatch) {
-            scoreSplit<ACC>(s, splits, nodeData, nodeFreq, nodeOffset, partLeafCount,
+            scoreSplit<ACC>(s, splits, splitRangeMeta, rangeData, nodeData, nodeFreq, nodeOffset, partLeafCount,
                        orderings, invIndex, numPartTrees, partTreeOffset,
                        numTaxa, totalN, pA, pB, scan, tid, nthreads, twoScores);
         }
@@ -369,6 +390,8 @@ __global__ void computeWeightsKernel(
 __device__ void scoreSplitI128(
     int s,
     const int* __restrict__ splits,
+    const int* __restrict__ splitRangeMeta,
+    const int* __restrict__ rangeData,
     const int* __restrict__ nodeData,
     const int* __restrict__ nodeFreq,
     const int* __restrict__ nodeOffset,
@@ -385,6 +408,8 @@ __device__ void scoreSplitI128(
     const int* sp = splits + (size_t)s * 10;
     int aTree = sp[0], aLo = sp[1], aHi = sp[2], aComp = sp[3], aSize = sp[4];
     int bTree = sp[5], bLo = sp[6], bHi = sp[7], bComp = sp[8], bSize = sp[9];
+    const int* rm = splitRangeMeta + (size_t)s * 4;
+    int aRngOff = rm[0], aRngCnt = rm[1], bRngOff = rm[2], bRngCnt = rm[3];
 
     if (aSize + bSize > totalN) {
         if (tid == 0) storeTwoScoreI128(twoScores, s, i128_zero());
@@ -408,8 +433,8 @@ __device__ void scoreSplitI128(
         int    L     = partLeafCount[g];
         size_t gBase = (size_t)(partTreeOffset + g) * numTaxa;
 
-        buildPrefix(pA, scan, L, gBase, aBase, aLo, aHi, aComp, orderings, invIndex, tid, nthreads);
-        buildPrefix(pB, scan, L, gBase, bBase, bLo, bHi, bComp, orderings, invIndex, tid, nthreads);
+        buildPrefix(pA, scan, L, gBase, aBase, aLo, aHi, aComp, aRngOff, aRngCnt, rangeData, orderings, invIndex, tid, nthreads);
+        buildPrefix(pB, scan, L, gBase, bBase, bLo, bHi, bComp, bRngOff, bRngCnt, rangeData, orderings, invIndex, tid, nthreads);
 
         int lgA = pA[L];
         int lgB = pB[L];
@@ -473,6 +498,8 @@ __device__ void scoreSplitI128(
 template<bool GLOBAL>
 __global__ void computeWeightsKernelI128(
     const int* __restrict__ splits,
+    const int* __restrict__ splitRangeMeta,
+    const int* __restrict__ rangeData,
     const int* __restrict__ nodeData,
     const int* __restrict__ nodeFreq,
     const int* __restrict__ nodeOffset,
@@ -497,7 +524,7 @@ __global__ void computeWeightsKernelI128(
         int* pA   = gPrefix + (size_t)blockIdx.x * 2 * prefixStride;
         int* pB   = pA + prefixStride;
         for (int s = blockIdx.x; s < curBatch; s += gridDim.x) {
-            scoreSplitI128(s, splits, nodeData, nodeFreq, nodeOffset, partLeafCount,
+            scoreSplitI128(s, splits, splitRangeMeta, rangeData, nodeData, nodeFreq, nodeOffset, partLeafCount,
                            orderings, invIndex, numPartTrees, partTreeOffset,
                            numTaxa, totalN, pA, pB, scan, tid, nthreads, twoScores);
         }
@@ -507,7 +534,7 @@ __global__ void computeWeightsKernelI128(
         int* scan = smem + 2 * prefixStride;
         int s = blockIdx.x;
         if (s < curBatch) {
-            scoreSplitI128(s, splits, nodeData, nodeFreq, nodeOffset, partLeafCount,
+            scoreSplitI128(s, splits, splitRangeMeta, rangeData, nodeData, nodeFreq, nodeOffset, partLeafCount,
                            orderings, invIndex, numPartTrees, partTreeOffset,
                            numTaxa, totalN, pA, pB, scan, tid, nthreads, twoScores);
         }
@@ -561,10 +588,50 @@ __device__ int ssIntersect(
     return cComp ? (szGTRange - raw) : raw;
 }
 
+// Multi-range-aware |M_range ∩ cluster|: rCnt==0 ⇒ single-range fast path; else sum
+// ssCoreIntersect over the cluster's disjoint ranges (multi-range-cluster-design §5.3).
+__device__ int ssIntersectSide(
+    int tGT, int loGT, int hiGT,
+    int cTree, int cLo, int cHi, int cComp, int szGTRange,
+    int rOff, int rCnt, const int* __restrict__ rangeData,
+    const int* __restrict__ orderings, const int* __restrict__ invIndex, int numTaxa)
+{
+    if (rCnt == 0)
+        return ssIntersect(tGT, loGT, hiGT, cTree, cLo, cHi, cComp, szGTRange, orderings, invIndex, numTaxa);
+    int core = 0;
+    for (int r = 0; r < rCnt; r++) {
+        int rlo = rangeData[2 * (rOff + r)];
+        int rhi = rangeData[2 * (rOff + r) + 1];
+        core += ssCoreIntersect(tGT, loGT, hiGT, cTree, rlo, rhi, orderings, invIndex, numTaxa);
+    }
+    return cComp ? (szGTRange - core) : core;
+}
+
+// Multi-range-aware row sum |cluster ∩ Lg_GT| for incomplete gene trees.
+__device__ int ssRowSum(
+    int tGT, int L_GT, int cTree, int cLo, int cHi, int cComp,
+    int rOff, int rCnt, const int* __restrict__ rangeData,
+    const int* __restrict__ orderings, const int* __restrict__ invIndex, int numTaxa)
+{
+    int core = 0;
+    if (rCnt == 0) {
+        core = ssCoreIntersect(tGT, 0, L_GT, cTree, cLo, cHi, orderings, invIndex, numTaxa);
+    } else {
+        for (int r = 0; r < rCnt; r++) {
+            int rlo = rangeData[2 * (rOff + r)];
+            int rhi = rangeData[2 * (rOff + r) + 1];
+            core += ssCoreIntersect(tGT, 0, L_GT, cTree, rlo, rhi, orderings, invIndex, numTaxa);
+        }
+    }
+    return cComp ? (L_GT - core) : core;
+}
+
 // One thread per split; loop all deduplicated tripartitions (parts, 9 ints each).
 template<typename ACC>
 __global__ void computeWeightsSmallerSideKernel(
     const int* __restrict__ splits,    // curBatch * 10
+    const int* __restrict__ splitRangeMeta, // curBatch * 4  [aOff,aCnt,bOff,bCnt]
+    const int* __restrict__ rangeData,      // resident flat [lo,hi] pairs
     const int* __restrict__ parts,     // numParts  * 9
     const int* __restrict__ orderings, // numGpuTrees * numTaxa
     const int* __restrict__ invIndex,  // numGpuTrees * numTaxa
@@ -580,6 +647,8 @@ __global__ void computeWeightsSmallerSideKernel(
     const int* sp = splits + (size_t)idx * 10;
     int loTree = sp[0], loLeft = sp[1], loRight = sp[2], loComp = sp[3], sizeA = sp[4];
     int hiTree = sp[5], hiLeft = sp[6], hiRight = sp[7], hiComp = sp[8], sizeB = sp[9];
+    const int* rm = splitRangeMeta + (size_t)idx * 4;
+    int aRngOff = rm[0], aRngCnt = rm[1], bRngOff = rm[2], bRngCnt = rm[3];
 
     int sizeC = totalN - sizeA - sizeB;
     if (sizeC < 0) { twoScores[idx] = 0LL; return; }   // 0LL == bits of +0.0 in both modes
@@ -598,10 +667,10 @@ __global__ void computeWeightsSmallerSideKernel(
         int sz1 = pt[5], sz2 = pt[6], sz3 = pt[7];
         int freq = pt[8];
 
-        int a0 = ssIntersect(tGT, lo1, hi1, loTree, loLeft, loRight, loComp, sz1, orderings, invIndex, numTaxa);
-        int a1 = ssIntersect(tGT, lo2, hi2, loTree, loLeft, loRight, loComp, sz2, orderings, invIndex, numTaxa);
-        int b0 = ssIntersect(tGT, lo1, hi1, hiTree, hiLeft, hiRight, hiComp, sz1, orderings, invIndex, numTaxa);
-        int b1 = ssIntersect(tGT, lo2, hi2, hiTree, hiLeft, hiRight, hiComp, sz2, orderings, invIndex, numTaxa);
+        int a0 = ssIntersectSide(tGT, lo1, hi1, loTree, loLeft, loRight, loComp, sz1, aRngOff, aRngCnt, rangeData, orderings, invIndex, numTaxa);
+        int a1 = ssIntersectSide(tGT, lo2, hi2, loTree, loLeft, loRight, loComp, sz2, aRngOff, aRngCnt, rangeData, orderings, invIndex, numTaxa);
+        int b0 = ssIntersectSide(tGT, lo1, hi1, hiTree, hiLeft, hiRight, hiComp, sz1, bRngOff, bRngCnt, rangeData, orderings, invIndex, numTaxa);
+        int b1 = ssIntersectSide(tGT, lo2, hi2, hiTree, hiLeft, hiRight, hiComp, sz2, bRngOff, bRngCnt, rangeData, orderings, invIndex, numTaxa);
 
         int L_GT = sz1 + sz2 + sz3;
         int lgA, lgB;
@@ -609,10 +678,8 @@ __global__ void computeWeightsSmallerSideKernel(
             lgA = sizeA;
             lgB = sizeB;
         } else {
-            int coreA = ssCoreIntersect(tGT, 0, L_GT, loTree, loLeft, loRight, orderings, invIndex, numTaxa);
-            lgA = loComp ? (L_GT - coreA) : coreA;
-            int coreB = ssCoreIntersect(tGT, 0, L_GT, hiTree, hiLeft, hiRight, orderings, invIndex, numTaxa);
-            lgB = hiComp ? (L_GT - coreB) : coreB;
+            lgA = ssRowSum(tGT, L_GT, loTree, loLeft, loRight, loComp, aRngOff, aRngCnt, rangeData, orderings, invIndex, numTaxa);
+            lgB = ssRowSum(tGT, L_GT, hiTree, hiLeft, hiRight, hiComp, bRngOff, bRngCnt, rangeData, orderings, invIndex, numTaxa);
         }
 
         int a2 = lgA - a0 - a1;
@@ -643,6 +710,8 @@ __global__ void computeWeightsSmallerSideKernel(
 // INT128 variant of the smaller-side kernel (one thread per split, exact 128-bit).
 __global__ void computeWeightsSmallerSideKernelI128(
     const int* __restrict__ splits,
+    const int* __restrict__ splitRangeMeta,
+    const int* __restrict__ rangeData,
     const int* __restrict__ parts,
     const int* __restrict__ orderings,
     const int* __restrict__ invIndex,
@@ -658,6 +727,8 @@ __global__ void computeWeightsSmallerSideKernelI128(
     const int* sp = splits + (size_t)idx * 10;
     int loTree = sp[0], loLeft = sp[1], loRight = sp[2], loComp = sp[3], sizeA = sp[4];
     int hiTree = sp[5], hiLeft = sp[6], hiRight = sp[7], hiComp = sp[8], sizeB = sp[9];
+    const int* rm = splitRangeMeta + (size_t)idx * 4;
+    int aRngOff = rm[0], aRngCnt = rm[1], bRngOff = rm[2], bRngCnt = rm[3];
 
     int sizeC = totalN - sizeA - sizeB;
     if (sizeC < 0) { storeTwoScoreI128(twoScores, idx, i128_zero()); return; }
@@ -676,10 +747,10 @@ __global__ void computeWeightsSmallerSideKernelI128(
         int sz1 = pt[5], sz2 = pt[6], sz3 = pt[7];
         int freq = pt[8];
 
-        int a0 = ssIntersect(tGT, lo1, hi1, loTree, loLeft, loRight, loComp, sz1, orderings, invIndex, numTaxa);
-        int a1 = ssIntersect(tGT, lo2, hi2, loTree, loLeft, loRight, loComp, sz2, orderings, invIndex, numTaxa);
-        int b0 = ssIntersect(tGT, lo1, hi1, hiTree, hiLeft, hiRight, hiComp, sz1, orderings, invIndex, numTaxa);
-        int b1 = ssIntersect(tGT, lo2, hi2, hiTree, hiLeft, hiRight, hiComp, sz2, orderings, invIndex, numTaxa);
+        int a0 = ssIntersectSide(tGT, lo1, hi1, loTree, loLeft, loRight, loComp, sz1, aRngOff, aRngCnt, rangeData, orderings, invIndex, numTaxa);
+        int a1 = ssIntersectSide(tGT, lo2, hi2, loTree, loLeft, loRight, loComp, sz2, aRngOff, aRngCnt, rangeData, orderings, invIndex, numTaxa);
+        int b0 = ssIntersectSide(tGT, lo1, hi1, hiTree, hiLeft, hiRight, hiComp, sz1, bRngOff, bRngCnt, rangeData, orderings, invIndex, numTaxa);
+        int b1 = ssIntersectSide(tGT, lo2, hi2, hiTree, hiLeft, hiRight, hiComp, sz2, bRngOff, bRngCnt, rangeData, orderings, invIndex, numTaxa);
 
         int L_GT = sz1 + sz2 + sz3;
         int lgA, lgB;
@@ -687,10 +758,8 @@ __global__ void computeWeightsSmallerSideKernelI128(
             lgA = sizeA;
             lgB = sizeB;
         } else {
-            int coreA = ssCoreIntersect(tGT, 0, L_GT, loTree, loLeft, loRight, orderings, invIndex, numTaxa);
-            lgA = loComp ? (L_GT - coreA) : coreA;
-            int coreB = ssCoreIntersect(tGT, 0, L_GT, hiTree, hiLeft, hiRight, orderings, invIndex, numTaxa);
-            lgB = hiComp ? (L_GT - coreB) : coreB;
+            lgA = ssRowSum(tGT, L_GT, loTree, loLeft, loRight, loComp, aRngOff, aRngCnt, rangeData, orderings, invIndex, numTaxa);
+            lgB = ssRowSum(tGT, L_GT, hiTree, hiLeft, hiRight, hiComp, bRngOff, bRngCnt, rangeData, orderings, invIndex, numTaxa);
         }
 
         int a2 = lgA - a0 - a1;
@@ -790,7 +859,8 @@ Java_astralx_gpu_GPUWeightCalculator_queryVRAMMiB(JNIEnv* env, jclass cls)
 JNIEXPORT jlongArray JNICALL
 Java_astralx_gpu_GPUWeightCalculator_computeWeightsGPU(
     JNIEnv* env, jclass cls,
-    jintArray jSplits, jintArray jNodeData, jintArray jNodeFreq, jintArray jNodeOffset,
+    jintArray jSplits, jintArray jSplitRangeMeta, jintArray jRangeData,
+    jintArray jNodeData, jintArray jNodeFreq, jintArray jNodeOffset,
     jintArray jPartLeafCount, jintArray jOrderings, jintArray jInvIndex,
     jint numSplits, jint numPartTrees, jint partTreeOffset, jint maxLeafCount,
     jint numGpuTrees, jint numTaxa,
@@ -808,6 +878,8 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsGPU(
     // Pin host arrays
     // -------------------------------------------------------------------------
     jint* hSplits        = env->GetIntArrayElements(jSplits,        NULL);
+    jint* hSplitRangeMeta= env->GetIntArrayElements(jSplitRangeMeta,NULL);
+    jint* hRangeData     = env->GetIntArrayElements(jRangeData,     NULL);
     jint* hNodeData      = env->GetIntArrayElements(jNodeData,      NULL);
     jint* hNodeFreq      = env->GetIntArrayElements(jNodeFreq,      NULL);
     jint* hNodeOffset    = env->GetIntArrayElements(jNodeOffset,    NULL);
@@ -815,6 +887,7 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsGPU(
     jint* hOrderings     = env->GetIntArrayElements(jOrderings,     NULL);
     jint* hInvIndex      = env->GetIntArrayElements(jInvIndex,      NULL);
 
+    jsize rangeDataLen = env->GetArrayLength(jRangeData);  // = 2 * (#multi-range ranges)
     jsize nodeDataLen = env->GetArrayLength(jNodeData);   // = totalNodes * 3
 
     // -------------------------------------------------------------------------
@@ -858,12 +931,15 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsGPU(
     // Upload static data ONCE (orderings, invIndex, node CSR stay resident)
     // -------------------------------------------------------------------------
     int *dNodeData, *dNodeFreq, *dNodeOffset, *dPartLeafCount, *dOrderings, *dInvIndex;
+    int *dRangeData;   // resident flat [lo,hi] pairs for multi-range split sides
 
     size_t nodeDataSz   = (size_t)nodeDataLen          * sizeof(int);
     size_t nodeFreqSz   = (size_t)(nodeDataLen / 3)    * sizeof(int);   // numUnique entries
     size_t nodeOffsetSz = (size_t)(numPartTrees + 1)   * sizeof(int);
     size_t partLeafSz   = (size_t)numPartTrees         * sizeof(int);
     size_t orderingSz   = (size_t)numGpuTrees * numTaxa * sizeof(int);
+    // Guard empty (no multi-range clusters): allocate ≥1 int so cudaMalloc/pointer is valid.
+    size_t rangeDataSz  = (size_t)(rangeDataLen > 0 ? rangeDataLen : 1) * sizeof(int);
 
     cudaMalloc(&dNodeData,      nodeDataSz);
     cudaMalloc(&dNodeFreq,      nodeFreqSz);
@@ -871,6 +947,7 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsGPU(
     cudaMalloc(&dPartLeafCount, partLeafSz);
     cudaMalloc(&dOrderings,     orderingSz);
     cudaMalloc(&dInvIndex,      orderingSz);
+    cudaMalloc(&dRangeData,     rangeDataSz);
 
     cudaMemcpy(dNodeData,      hNodeData,      nodeDataSz,   cudaMemcpyHostToDevice);
     cudaMemcpy(dNodeFreq,      hNodeFreq,      nodeFreqSz,   cudaMemcpyHostToDevice);
@@ -878,6 +955,8 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsGPU(
     cudaMemcpy(dPartLeafCount, hPartLeafCount, partLeafSz,   cudaMemcpyHostToDevice);
     cudaMemcpy(dOrderings,     hOrderings,     orderingSz,   cudaMemcpyHostToDevice);
     cudaMemcpy(dInvIndex,      hInvIndex,      orderingSz,   cudaMemcpyHostToDevice);
+    if (rangeDataLen > 0)
+        cudaMemcpy(dRangeData, hRangeData, (size_t)rangeDataLen * sizeof(int), cudaMemcpyHostToDevice);
 
     // Analytical VRAM budget: show exactly what is resident on-device
     {
@@ -937,7 +1016,10 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsGPU(
             fprintf(stderr, "[ASTRAL-X GPU] weight: FATAL — cannot allocate global prefix pool\n");
             cudaFree(dNodeData); cudaFree(dNodeFreq); cudaFree(dNodeOffset);
             cudaFree(dPartLeafCount); cudaFree(dOrderings); cudaFree(dInvIndex);
+            cudaFree(dRangeData);
             env->ReleaseIntArrayElements(jSplits,        hSplits,        JNI_ABORT);
+            env->ReleaseIntArrayElements(jSplitRangeMeta,hSplitRangeMeta,JNI_ABORT);
+            env->ReleaseIntArrayElements(jRangeData,     hRangeData,     JNI_ABORT);
             env->ReleaseIntArrayElements(jNodeData,      hNodeData,      JNI_ABORT);
             env->ReleaseIntArrayElements(jNodeFreq,      hNodeFreq,      JNI_ABORT);
             env->ReleaseIntArrayElements(jNodeOffset,    hNodeOffset,    JNI_ABORT);
@@ -987,17 +1069,21 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsGPU(
     // -------------------------------------------------------------------------
     // Allocate batch-local device buffers (with halving fallback on OOM)
     // -------------------------------------------------------------------------
-    int*       dSplits    = NULL;
-    long long* dTwoScores = NULL;
+    int*       dSplits        = NULL;
+    int*       dSplitRangeMeta = NULL;   // batched: curBatch * 4
+    long long* dTwoScores     = NULL;
 
     while (batchSize > 0) {
         size_t splitBufSz = (size_t)batchSize * 10 * sizeof(int);
+        size_t metaBufSz  = (size_t)batchSize * 4  * sizeof(int);
         size_t scoreBufSz = (size_t)batchSize * scoresPerSplit * sizeof(long long);
-        cudaError_t e1 = cudaMalloc(&dSplits,    splitBufSz);
-        cudaError_t e2 = cudaMalloc(&dTwoScores, scoreBufSz);
-        if (e1 == cudaSuccess && e2 == cudaSuccess) break;
-        if (dSplits)    { cudaFree(dSplits);    dSplits    = NULL; }
-        if (dTwoScores) { cudaFree(dTwoScores); dTwoScores = NULL; }
+        cudaError_t e1 = cudaMalloc(&dSplits,         splitBufSz);
+        cudaError_t e2 = cudaMalloc(&dTwoScores,      scoreBufSz);
+        cudaError_t e3 = cudaMalloc(&dSplitRangeMeta, metaBufSz);
+        if (e1 == cudaSuccess && e2 == cudaSuccess && e3 == cudaSuccess) break;
+        if (dSplits)         { cudaFree(dSplits);         dSplits         = NULL; }
+        if (dTwoScores)      { cudaFree(dTwoScores);      dTwoScores      = NULL; }
+        if (dSplitRangeMeta) { cudaFree(dSplitRangeMeta); dSplitRangeMeta = NULL; }
         batchSize /= 2;
         fprintf(stderr, "[ASTRAL-X GPU] cudaMalloc failed, retrying with batchSize=%d\n",
                 batchSize);
@@ -1006,8 +1092,11 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsGPU(
         fprintf(stderr, "[ASTRAL-X GPU] FATAL: cannot allocate GPU batch buffers\n");
         cudaFree(dNodeData); cudaFree(dNodeFreq); cudaFree(dNodeOffset);
         cudaFree(dPartLeafCount); cudaFree(dOrderings); cudaFree(dInvIndex);
+        cudaFree(dRangeData); if (dSplitRangeMeta) cudaFree(dSplitRangeMeta);
         if (dPrefix) cudaFree(dPrefix);
         env->ReleaseIntArrayElements(jSplits,        hSplits,        JNI_ABORT);
+        env->ReleaseIntArrayElements(jSplitRangeMeta,hSplitRangeMeta,JNI_ABORT);
+        env->ReleaseIntArrayElements(jRangeData,     hRangeData,     JNI_ABORT);
         env->ReleaseIntArrayElements(jNodeData,      hNodeData,      JNI_ABORT);
         env->ReleaseIntArrayElements(jNodeFreq,      hNodeFreq,      JNI_ABORT);
         env->ReleaseIntArrayElements(jNodeOffset,    hNodeOffset,    JNI_ABORT);
@@ -1054,22 +1143,26 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsGPU(
                    hSplits + (size_t)offset * 10,
                    (size_t)curBatch * 10 * sizeof(int),
                    cudaMemcpyHostToDevice);
+        cudaMemcpy(dSplitRangeMeta,
+                   hSplitRangeMeta + (size_t)offset * 4,
+                   (size_t)curBatch * 4 * sizeof(int),
+                   cudaMemcpyHostToDevice);
 
         if (useShared) {
             // Fast path: one block per split; prefix arrays in shared memory.
             if (useI128)
                 computeWeightsKernelI128<false><<<curBatch, WB_BLOCK, sharedBytes>>>(
-                    dSplits, dNodeData, dNodeFreq, dNodeOffset, dPartLeafCount, dOrderings, dInvIndex,
+                    dSplits, dSplitRangeMeta, dRangeData, dNodeData, dNodeFreq, dNodeOffset, dPartLeafCount, dOrderings, dInvIndex,
                     curBatch, numPartTrees, partTreeOffset, stride, numTaxa, numTaxa,
                     NULL, dTwoScores);
             else if (useDouble)
                 computeWeightsKernel<false, double><<<curBatch, WB_BLOCK, sharedBytes>>>(
-                    dSplits, dNodeData, dNodeFreq, dNodeOffset, dPartLeafCount, dOrderings, dInvIndex,
+                    dSplits, dSplitRangeMeta, dRangeData, dNodeData, dNodeFreq, dNodeOffset, dPartLeafCount, dOrderings, dInvIndex,
                     curBatch, numPartTrees, partTreeOffset, stride, numTaxa, numTaxa,
                     NULL, dTwoScores);
             else
                 computeWeightsKernel<false, long long><<<curBatch, WB_BLOCK, sharedBytes>>>(
-                    dSplits, dNodeData, dNodeFreq, dNodeOffset, dPartLeafCount, dOrderings, dInvIndex,
+                    dSplits, dSplitRangeMeta, dRangeData, dNodeData, dNodeFreq, dNodeOffset, dPartLeafCount, dOrderings, dInvIndex,
                     curBatch, numPartTrees, partTreeOffset, stride, numTaxa, numTaxa,
                     NULL, dTwoScores);
         } else {
@@ -1078,17 +1171,17 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsGPU(
             int gridDim = (curBatch < maxResident) ? curBatch : maxResident;
             if (useI128)
                 computeWeightsKernelI128<true><<<gridDim, WB_BLOCK, sharedBytes>>>(
-                    dSplits, dNodeData, dNodeFreq, dNodeOffset, dPartLeafCount, dOrderings, dInvIndex,
+                    dSplits, dSplitRangeMeta, dRangeData, dNodeData, dNodeFreq, dNodeOffset, dPartLeafCount, dOrderings, dInvIndex,
                     curBatch, numPartTrees, partTreeOffset, stride, numTaxa, numTaxa,
                     dPrefix, dTwoScores);
             else if (useDouble)
                 computeWeightsKernel<true, double><<<gridDim, WB_BLOCK, sharedBytes>>>(
-                    dSplits, dNodeData, dNodeFreq, dNodeOffset, dPartLeafCount, dOrderings, dInvIndex,
+                    dSplits, dSplitRangeMeta, dRangeData, dNodeData, dNodeFreq, dNodeOffset, dPartLeafCount, dOrderings, dInvIndex,
                     curBatch, numPartTrees, partTreeOffset, stride, numTaxa, numTaxa,
                     dPrefix, dTwoScores);
             else
                 computeWeightsKernel<true, long long><<<gridDim, WB_BLOCK, sharedBytes>>>(
-                    dSplits, dNodeData, dNodeFreq, dNodeOffset, dPartLeafCount, dOrderings, dInvIndex,
+                    dSplits, dSplitRangeMeta, dRangeData, dNodeData, dNodeFreq, dNodeOffset, dPartLeafCount, dOrderings, dInvIndex,
                     curBatch, numPartTrees, partTreeOffset, stride, numTaxa, numTaxa,
                     dPrefix, dTwoScores);
         }
@@ -1143,6 +1236,8 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsGPU(
     // -------------------------------------------------------------------------
     delete[] hTwoScores;
     cudaFree(dSplits);
+    cudaFree(dSplitRangeMeta);
+    cudaFree(dRangeData);
     cudaFree(dTwoScores);
     cudaFree(dNodeData);
     cudaFree(dNodeFreq);
@@ -1153,6 +1248,8 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsGPU(
     if (dPrefix) cudaFree(dPrefix);
 
     env->ReleaseIntArrayElements(jSplits,        hSplits,        JNI_ABORT);
+    env->ReleaseIntArrayElements(jSplitRangeMeta,hSplitRangeMeta,JNI_ABORT);
+    env->ReleaseIntArrayElements(jRangeData,     hRangeData,     JNI_ABORT);
     env->ReleaseIntArrayElements(jNodeData,      hNodeData,      JNI_ABORT);
     env->ReleaseIntArrayElements(jNodeFreq,      hNodeFreq,      JNI_ABORT);
     env->ReleaseIntArrayElements(jNodeOffset,    hNodeOffset,    JNI_ABORT);
@@ -1169,7 +1266,8 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsGPU(
 JNIEXPORT jlongArray JNICALL
 Java_astralx_gpu_GPUWeightCalculator_computeWeightsSmallerSideGPU(
     JNIEnv* env, jclass cls,
-    jintArray jSplits, jintArray jParts, jintArray jOrderings, jintArray jInvIndex,
+    jintArray jSplits, jintArray jSplitRangeMeta, jintArray jRangeData,
+    jintArray jParts, jintArray jOrderings, jintArray jInvIndex,
     jint numSplits, jint numParts, jint numGpuTrees, jint numTaxa, jint totalN,
     jint batchSizeHint, jdouble vramFraction, jint scoreMode)
 {
@@ -1181,21 +1279,28 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsSmallerSideGPU(
           : useDouble ? "DOUBLE (64-bit float, overflow-safe)"
                       : "LONG (exact 64-bit integer)");
     jint* hSplits    = env->GetIntArrayElements(jSplits,    NULL);
+    jint* hSplitRangeMeta = env->GetIntArrayElements(jSplitRangeMeta, NULL);
+    jint* hRangeData = env->GetIntArrayElements(jRangeData, NULL);
     jint* hParts     = env->GetIntArrayElements(jParts,     NULL);
     jint* hOrderings = env->GetIntArrayElements(jOrderings, NULL);
     jint* hInvIndex  = env->GetIntArrayElements(jInvIndex,  NULL);
+    jsize rangeDataLen = env->GetArrayLength(jRangeData);
 
-    // --- Upload static data once (parts, orderings, invIndex) ---
-    int *dParts, *dOrderings, *dInvIndex;
+    // --- Upload static data once (parts, orderings, invIndex, rangeData) ---
+    int *dParts, *dOrderings, *dInvIndex, *dRangeData;
     size_t partsSz    = (size_t)numParts  * 9 * sizeof(int);
     size_t orderingSz = (size_t)numGpuTrees * numTaxa * sizeof(int);
+    size_t rangeDataSz = (size_t)(rangeDataLen > 0 ? rangeDataLen : 1) * sizeof(int);
 
     cudaMalloc(&dParts,     partsSz);
     cudaMalloc(&dOrderings, orderingSz);
     cudaMalloc(&dInvIndex,  orderingSz);
+    cudaMalloc(&dRangeData, rangeDataSz);
     cudaMemcpy(dParts,     hParts,     partsSz,    cudaMemcpyHostToDevice);
     cudaMemcpy(dOrderings, hOrderings, orderingSz, cudaMemcpyHostToDevice);
     cudaMemcpy(dInvIndex,  hInvIndex,  orderingSz, cudaMemcpyHostToDevice);
+    if (rangeDataLen > 0)
+        cudaMemcpy(dRangeData, hRangeData, (size_t)rangeDataLen * sizeof(int), cudaMemcpyHostToDevice);
 
     {
         size_t staticTotal = partsSz + 2 * orderingSz;
@@ -1237,23 +1342,30 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsSmallerSideGPU(
             perSplitBytes, batchSize, numSplits, (numSplits + batchSize - 1) / batchSize);
     }
 
-    int*       dSplits    = NULL;
-    long long* dTwoScores = NULL;
+    int*       dSplits        = NULL;
+    int*       dSplitRangeMeta = NULL;
+    long long* dTwoScores     = NULL;
     while (batchSize > 0) {
         size_t splitBufSz = (size_t)batchSize * 10 * sizeof(int);
+        size_t metaBufSz  = (size_t)batchSize * 4  * sizeof(int);
         size_t scoreBufSz = (size_t)batchSize * scoresPerSplit * sizeof(long long);
-        cudaError_t e1 = cudaMalloc(&dSplits,    splitBufSz);
-        cudaError_t e2 = cudaMalloc(&dTwoScores, scoreBufSz);
-        if (e1 == cudaSuccess && e2 == cudaSuccess) break;
-        if (dSplits)    { cudaFree(dSplits);    dSplits    = NULL; }
-        if (dTwoScores) { cudaFree(dTwoScores); dTwoScores = NULL; }
+        cudaError_t e1 = cudaMalloc(&dSplits,         splitBufSz);
+        cudaError_t e2 = cudaMalloc(&dTwoScores,      scoreBufSz);
+        cudaError_t e3 = cudaMalloc(&dSplitRangeMeta, metaBufSz);
+        if (e1 == cudaSuccess && e2 == cudaSuccess && e3 == cudaSuccess) break;
+        if (dSplits)         { cudaFree(dSplits);         dSplits         = NULL; }
+        if (dTwoScores)      { cudaFree(dTwoScores);      dTwoScores      = NULL; }
+        if (dSplitRangeMeta) { cudaFree(dSplitRangeMeta); dSplitRangeMeta = NULL; }
         batchSize /= 2;
         fprintf(stderr, "[ASTRAL-X GPU] cudaMalloc failed, retrying with batchSize=%d\n", batchSize);
     }
     if (batchSize <= 0 || dSplits == NULL || dTwoScores == NULL) {
         fprintf(stderr, "[ASTRAL-X GPU] FATAL: cannot allocate GPU batch buffers\n");
-        cudaFree(dParts); cudaFree(dOrderings); cudaFree(dInvIndex);
+        cudaFree(dParts); cudaFree(dOrderings); cudaFree(dInvIndex); cudaFree(dRangeData);
+        if (dSplitRangeMeta) cudaFree(dSplitRangeMeta);
         env->ReleaseIntArrayElements(jSplits,    hSplits,    JNI_ABORT);
+        env->ReleaseIntArrayElements(jSplitRangeMeta, hSplitRangeMeta, JNI_ABORT);
+        env->ReleaseIntArrayElements(jRangeData, hRangeData, JNI_ABORT);
         env->ReleaseIntArrayElements(jParts,     hParts,     JNI_ABORT);
         env->ReleaseIntArrayElements(jOrderings, hOrderings, JNI_ABORT);
         env->ReleaseIntArrayElements(jInvIndex,  hInvIndex,  JNI_ABORT);
@@ -1275,19 +1387,21 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsSmallerSideGPU(
 
         cudaMemcpy(dSplits, hSplits + (size_t)offset * 10,
                    (size_t)curBatch * 10 * sizeof(int), cudaMemcpyHostToDevice);
+        cudaMemcpy(dSplitRangeMeta, hSplitRangeMeta + (size_t)offset * 4,
+                   (size_t)curBatch * 4 * sizeof(int), cudaMemcpyHostToDevice);
 
         int gridSize = (curBatch + blockSize - 1) / blockSize;
         if (useI128)
             computeWeightsSmallerSideKernelI128<<<gridSize, blockSize>>>(
-                dSplits, dParts, dOrderings, dInvIndex,
+                dSplits, dSplitRangeMeta, dRangeData, dParts, dOrderings, dInvIndex,
                 curBatch, numParts, numTaxa, totalN, dTwoScores);
         else if (useDouble)
             computeWeightsSmallerSideKernel<double><<<gridSize, blockSize>>>(
-                dSplits, dParts, dOrderings, dInvIndex,
+                dSplits, dSplitRangeMeta, dRangeData, dParts, dOrderings, dInvIndex,
                 curBatch, numParts, numTaxa, totalN, dTwoScores);
         else
             computeWeightsSmallerSideKernel<long long><<<gridSize, blockSize>>>(
-                dSplits, dParts, dOrderings, dInvIndex,
+                dSplits, dSplitRangeMeta, dRangeData, dParts, dOrderings, dInvIndex,
                 curBatch, numParts, numTaxa, totalN, dTwoScores);
 
         cudaError_t err = cudaDeviceSynchronize();
@@ -1328,12 +1442,16 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsSmallerSideGPU(
 
     delete[] hTwoScores;
     cudaFree(dSplits);
+    cudaFree(dSplitRangeMeta);
     cudaFree(dTwoScores);
     cudaFree(dParts);
     cudaFree(dOrderings);
     cudaFree(dInvIndex);
+    cudaFree(dRangeData);
 
     env->ReleaseIntArrayElements(jSplits,    hSplits,    JNI_ABORT);
+    env->ReleaseIntArrayElements(jSplitRangeMeta, hSplitRangeMeta, JNI_ABORT);
+    env->ReleaseIntArrayElements(jRangeData, hRangeData, JNI_ABORT);
     env->ReleaseIntArrayElements(jParts,     hParts,     JNI_ABORT);
     env->ReleaseIntArrayElements(jOrderings, hOrderings, JNI_ABORT);
     env->ReleaseIntArrayElements(jInvIndex,  hInvIndex,  JNI_ABORT);

@@ -83,6 +83,8 @@ public class GPUWeightCalculator {
      */
     public static native long[] computeWeightsGPU(
         int[] splits,
+        int[] splitRangeMeta,   // numSplits*4: [aRngOff,aRngCnt,bRngOff,bRngCnt]; cnt 0 = single-range
+        int[] rangeData,        // flat [lo,hi] pairs for multi-range split sides (resident)
         int[] nodeData,
         int[] nodeFreq,
         int[] nodeOffset,
@@ -133,6 +135,8 @@ public class GPUWeightCalculator {
      */
     public static native long[] computeWeightsSmallerSideGPU(
         int[] splits,
+        int[] splitRangeMeta,   // numSplits*4: [aRngOff,aRngCnt,bRngOff,bRngCnt]; cnt 0 = single-range
+        int[] rangeData,        // flat [lo,hi] pairs for multi-range split sides (resident)
         int[] parts,
         int[] orderings,
         int[] invIndex,

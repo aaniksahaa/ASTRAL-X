@@ -1,6 +1,8 @@
 package astralx.greedy;
 
+import astralx.Config;
 import astralx.cluster.ClusterHash;
+import astralx.completion.EulerTourBuilder;
 import astralx.completion.SimilarityMatrix;
 import astralx.tree.Tree;
 import astralx.tree.TreeNode;
@@ -64,6 +66,19 @@ public final class PolytomyResolver {
                                       long baseSeed) {
         if (tasks.isEmpty()) return 0;
 
+        // Step B per-gene-tree restriction route: O(d log d) auxiliary tree via
+        // Euler-tour LCA (default) vs the O(n) full walk. The Euler structures are
+        // immutable and shared read-only across all parallel tasks; build once.
+        final boolean fastRestriction = Config.getInstance().isStepBFastRestriction();
+        final EulerTourBuilder.TourData[] tours;
+        if (fastRestriction) {
+            tours = new EulerTourBuilder.TourData[geneTrees.size()];
+            for (int i = 0; i < geneTrees.size(); i++)
+                tours[i] = EulerTourBuilder.build(geneTrees.get(i), numTaxa);
+        } else {
+            tours = null;
+        }
+
         List<PolytomyTask> sorted = new ArrayList<>(tasks);
         sorted.sort((a, b) -> Long.compare(b.estimatedCost(), a.estimatedCost()));
 
@@ -74,7 +89,7 @@ public final class PolytomyResolver {
             futures.add(Threading.submit(() -> {
                 Random rng = new Random(seed);
                 int aCount = (sim != null) ? stepA(t, sim, buffer, numTaxa) : 0;
-                int bCount = stepB(t, geneTrees, buffer, numTaxa, rng, sim);
+                int bCount = stepB(t, geneTrees, tours, buffer, numTaxa, rng, sim);
                 return new int[]{aCount, bCount};
             }));
         }
@@ -269,6 +284,7 @@ public final class PolytomyResolver {
      * degree near √(50 + 25n) ≪ 31 for typical n; we assert anyway.
      */
     public static int stepB(PolytomyTask task, List<Tree> geneTrees,
+                            EulerTourBuilder.TourData[] tours,
                             EmissionBuffer buffer, int numTaxa, Random rng,
                             SimilarityMatrix sim) {
         int d = task.numGroups;
@@ -280,7 +296,7 @@ public final class PolytomyResolver {
         int j = 0;
         while (j < STEPB_DEFAULT_RUNS + adaptBonus) {
             int beforeSize = buffer.size();
-            stepBRound(task, geneTrees, buffer, numTaxa, rng, sim);
+            stepBRound(task, geneTrees, tours, buffer, numTaxa, rng, sim);
             int newThisRound = buffer.size() - beforeSize;
             totalNewSignatures += newThisRound;
             if (newThisRound >= STEPB_MIN_FREQ && adaptBonus < STEPB_MAX) {
@@ -314,6 +330,7 @@ public final class PolytomyResolver {
      *      smaller-side selection, hashed via the consensus prefix-scan.
      */
     private static void stepBRound(PolytomyTask task, List<Tree> geneTrees,
+                                    EulerTourBuilder.TourData[] tours,
                                     EmissionBuffer buffer, int numTaxa, Random rng,
                                     SimilarityMatrix sim) {
         int d = task.numGroups;
@@ -342,8 +359,10 @@ public final class PolytomyResolver {
         // ── Step (2)+(3): collect induced bipartition counts ────────────────
         java.util.HashMap<Integer, Integer> counts = new java.util.HashMap<>();
         java.util.ArrayList<Integer> perTreeBitmaps = new java.util.ArrayList<>(8);
-        for (Tree gt : geneTrees) {
-            collectGeneTreeBitmaps(gt, task, reps, d, perTreeBitmaps);
+        for (int ti = 0; ti < geneTrees.size(); ti++) {
+            Tree gt = geneTrees.get(ti);
+            if (tours != null) collectGeneTreeBitmapsFast(gt, tours[ti], reps, d, perTreeBitmaps);
+            else               collectGeneTreeBitmaps(gt, task, reps, d, perTreeBitmaps);
             for (int bm : perTreeBitmaps) {
                 Integer cur = counts.get(bm);
                 if (cur != null) {
@@ -428,8 +447,9 @@ public final class PolytomyResolver {
     }
 
     /** Postorder walk that fills {@code out} with rep-bitmaps for each qualifying
-     *  non-root internal node (mirrors {@code Utils.getBitsets}). */
-    private static void collectGeneTreeBitmaps(Tree gt, PolytomyTask task, int[] reps,
+     *  non-root internal node (mirrors {@code Utils.getBitsets}).  O(n) reference route.
+     *  Package-visible for the equivalence harness. */
+    static void collectGeneTreeBitmaps(Tree gt, PolytomyTask task, int[] reps,
                                                 int d, java.util.ArrayList<Integer> out) {
         out.clear();
         int[] repAtPos = new int[gt.leafCount];
@@ -464,6 +484,76 @@ public final class PolytomyResolver {
         if (sz < 2 || sz >= d - 1) return bm;
         out.add(bm);
         return bm;
+    }
+
+    // ── O(d log d) restriction (auxiliary/induced tree via Euler-tour LCA) ──────
+    //
+    // walkCollect emits a rep-bitmap at exactly the binary MERGE nodes (legit==2),
+    // which are precisely the internal nodes of the gene tree restricted to the
+    // present reps — each once. So we can enumerate those clades directly from the
+    // induced tree without touching all n leaves:
+    //   1. Locate the ≤ d present reps and sort by leaf position (DFS order). O(d log d).
+    //   2. separator depth between consecutive reps = depth(LCA) via O(1) Euler RMQ.
+    //   3. The induced tree is the Cartesian tree on those separator depths; each
+    //      internal node spans a contiguous rep interval. Enumerate via a min-split
+    //      recursion (O(d²) on the ≤31-rep sequence — trivially fast), applying the
+    //      SAME size filter (2 ≤ sz ≤ d-2) and gene-tree-root skip (depth 0) as
+    //      walkCollect. Produces the identical per-tree bitmap set.
+    // See DOCS/consensus-emission-and-restriction-optimization.md §3.
+
+    /** Package-visible for the equivalence harness. */
+    static void collectGeneTreeBitmapsFast(Tree gt, EulerTourBuilder.TourData tour,
+                                           int[] reps, int d, java.util.ArrayList<Integer> out) {
+        out.clear();
+        int[] pos = new int[d], tax = new int[d], grp = new int[d];
+        int k = 0;
+        for (int gi = 0; gi < d; gi++) {
+            int r = reps[gi];
+            if (r < 0) continue;
+            int p = gt.positionMap[r];
+            if (p < 0) continue;
+            pos[k] = p; tax[k] = r; grp[k] = gi; k++;
+        }
+        if (k < 2) return;
+        // insertion sort by leaf position (k ≤ 31)
+        for (int i = 1; i < k; i++) {
+            int pp = pos[i], tt = tax[i], gg = grp[i], j = i - 1;
+            while (j >= 0 && pos[j] > pp) { pos[j+1]=pos[j]; tax[j+1]=tax[j]; grp[j+1]=grp[j]; j--; }
+            pos[j+1]=pp; tax[j+1]=tt; grp[j+1]=gg;
+        }
+        int[] sep = new int[k - 1];
+        for (int i = 0; i < k - 1; i++) sep[i] = lcaDepth(tour, tax[i], tax[i+1]);
+        int[] bit = new int[k];
+        for (int i = 0; i < k; i++) bit[i] = 1 << grp[i];
+        emitInducedClades(0, k - 1, sep, bit, d, out);
+    }
+
+    /** Min-split recursion over the sorted rep interval [lo,hi]; returns its bitmap. */
+    private static int emitInducedClades(int lo, int hi, int[] sep, int[] bit, int d,
+                                         java.util.ArrayList<Integer> out) {
+        if (lo == hi) return bit[lo];
+        // The LCA of reps[lo..hi] is the unique minimal-depth separator (binary tree).
+        int m = lo, minDepth = sep[lo];
+        for (int i = lo + 1; i <= hi - 1; i++) if (sep[i] < minDepth) { minDepth = sep[i]; m = i; }
+        int leftBM  = emitInducedClades(lo, m, sep, bit, d, out);
+        int rightBM = emitInducedClades(m + 1, hi, sep, bit, d, out);
+        int bm = leftBM | rightBM;
+        int sz = Integer.bitCount(bm);
+        // depth 0 ⇒ this merge is the gene-tree root (walkCollect's isRoot skip).
+        if (minDepth != 0 && sz >= 2 && sz <= d - 2) out.add(bm);
+        return bm;
+    }
+
+    /** depth(LCA(taxonA, taxonB)) via O(1) sparse-table RMQ over the Euler tour.
+     *  Queries are leaf-pairs, so the range length stays < tourLen ≤ 1<<log. */
+    private static int lcaDepth(EulerTourBuilder.TourData tour, int taxonA, int taxonB) {
+        int fa = tour.firstOcc[taxonA], fb = tour.firstOcc[taxonB];
+        int lo = Math.min(fa, fb), hi = Math.max(fa, fb);
+        int len = hi - lo + 1;
+        int k = 31 - Integer.numberOfLeadingZeros(len);     // floor(log2(len))
+        int d1 = tour.sparseMin[k][lo];
+        int d2 = tour.sparseMin[k][hi - (1 << k) + 1];
+        return Math.min(d1, d2);
     }
 
     /** Convert a rep-bitmap into a group-bipartition and emit (smaller side). */

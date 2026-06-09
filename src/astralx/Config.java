@@ -292,6 +292,15 @@ public class Config {
     public boolean isConsensusExperimental()        { return consensusExperimental; }
     public void setConsensusExperimental(boolean v) { this.consensusExperimental = v; }
 
+    // Step B (sampleAndResolve) per-gene-tree restriction route.
+    //   true  (default) = O(d log d) induced/auxiliary-tree via Euler-tour LCA
+    //   false           = O(n) full postorder walk (legacy reference route)
+    // Both produce the identical emission set; the fast route avoids touching all
+    // n leaves when only d≤31 reps matter (DOCS/consensus-emission-and-restriction-optimization.md §3).
+    private boolean stepBFastRestriction = true;
+    public boolean isStepBFastRestriction()        { return stepBFastRestriction; }
+    public void setStepBFastRestriction(boolean v) { this.stepBFastRestriction = v; }
+
     // ── Comparison / debug dump flags ─────────────────────────────────────────
     private String dumpClustersFile = null;
     public String getDumpClustersFile()       { return dumpClustersFile; }
