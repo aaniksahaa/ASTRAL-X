@@ -11,6 +11,7 @@ import astralx.gpu.GPUDistanceMatrix;
 import astralx.gpu.GPUSimilarityMatrix;
 import astralx.dp.DPTable;
 import astralx.dp.Inference;
+import astralx.greedy.EmissionBridge;
 import astralx.greedy.GreedyConsensus;
 import astralx.greedy.GreedyConsensusVerifier;
 import astralx.gpu.GPUDPBuilder;
@@ -214,6 +215,12 @@ public class Main {
             //   - autocomplete ON :  trees = completed gene trees + UPGMA
             //                        originalTrees still references the
             //                        pre-completion / pre-UPGMA list size.
+            // Exemplar list the WEIGHT phase uses for cluster position lookups.
+            // Defaults to the completed/gene trees; the consensus bridge may append
+            // consensus snapshot trees (membership-only exemplars) for synthesized
+            // multi-range clusters. The DP (Phase 5) keeps using `trees` directly,
+            // so consensus trees are never mined for local transitions.
+            List<Tree> weightClusterTrees = trees;
             if (cfg.isVerifyGreedyConsensus() || cfg.isConsensusExperimental()) {
                 List<Tree> geneTreesForGreedy = trees.subList(0, originalTrees.size());
 
@@ -227,10 +234,22 @@ public class Main {
                     GreedyConsensus.build(clusterTable, geneTreesForGreedy, pref, hasher,
                                            similarityMatrix, registry.size());
                 PhaseLogger.end("Phase 3.5 Greedy consensus build + polytomy resolution", t35, false);
-                // gcResult.snapshots are consumed by Part II (polytomy resolution → X)
-                // — wiring to that phase will land in a follow-up commit.
-                @SuppressWarnings("unused")
-                var _gcUnused = gcResult;
+
+                // ── Bridge emissions into X (Tier-1 lookup / Tier-2 synthesize) ──
+                List<Tree> ext = new ArrayList<>(trees);
+                int[] bridged = EmissionBridge.bridge(gcResult.emissions, clusterTable,
+                                                      ext, registry.size());
+                // Only switch to the extended list if exemplar trees were actually
+                // appended — preserves the `trees == originalTrees` identity that the
+                // weight path's autocomplete detection relies on when nothing changed.
+                if (ext.size() > trees.size()) weightClusterTrees = ext;
+                Logging.info("Consensus emission → X: %d already in X (tier-1), "
+                    + "%d synthesized multi-range (tier-2); +%d exemplar trees",
+                    bridged[0], bridged[1], ext.size() - trees.size());
+                if (cfg.getSearchMode() != Config.SearchMode.FULL && bridged[1] > 0) {
+                    Logging.info("Note: synthesized multi-range clusters gain DP transitions only "
+                        + "via Mode 2 (--search-mode full); in local mode they remain inert.");
+                }
             }
 
             // ── Phase 4: Gene-tree tripartition extraction (from ORIGINAL trees) ──
@@ -278,9 +297,10 @@ public class Main {
             boolean gpuWeight = (cfg.getComputeMode() == Config.ComputeMode.GPU)
                                 && GPUWeightCalculator.isLoaded();
             long t6 = PhaseLogger.begin("Phase 6  Weight calculation", gpuWeight);
-            // trees        = completed trees (for cluster exemplar position lookups)
-            // originalTrees = original trees (for gene-tree quartet scoring)
-            WeightTable weightTable = new WeightTable(dpTable, partTable, clusterTable, trees, originalTrees);
+            // weightClusterTrees = completed trees (+ any consensus exemplar trees from
+            //                      the emission bridge) for cluster exemplar position lookups
+            // originalTrees      = original trees (for gene-tree quartet scoring)
+            WeightTable weightTable = new WeightTable(dpTable, partTable, clusterTable, weightClusterTrees, originalTrees);
             PhaseLogger.end("Phase 6  Weight calculation", t6, gpuWeight);
 
             if (cfg.isVerifyWeights()) {

@@ -45,6 +45,11 @@ public class ClusterTable {
 
     private final int m; // number of hash seeds
 
+    // True once any multi-range exemplar has been inserted (consensus emission
+    // bridge). Used to gate the GPU weight path, which is single-range-only until
+    // the two-tier range-CSR lands (DOCS/multi-range-cluster-design.md §5.2/§5.3).
+    private boolean hasMultiRange = false;
+
     // -------------------------------------------------------------------------
     // Construction
     // -------------------------------------------------------------------------
@@ -182,6 +187,31 @@ public class ClusterTable {
     public void addTree(Tree tree, PrefixHashArrays pref, int numTaxa) {
         extractFromTree(tree, pref, numTaxa);
     }
+
+    /**
+     * Insert a cluster whose {@link ClusterHash} is already known — used by the
+     * consensus polytomy-resolution emission bridge, where the signature was
+     * computed via the consensus tree's own prefix scans (and is comparable to
+     * gene-tree signatures because the same {@code TaxonHasher} produced both).
+     *
+     * Mirrors {@link #registerCluster}'s table + sizeBins bookkeeping so the new
+     * cluster participates in Mode 2 cross-tree transitions exactly like a
+     * gene-tree-derived cluster. The all-taxa cluster and existing hashes are
+     * skipped. The exemplar may be single- or multi-range.
+     *
+     * @return true iff newly added
+     */
+    public boolean addCluster(ClusterHash hash, Cluster exemplar) {
+        if (hash.equals(allTaxaHash)) return false;
+        if (table.containsKey(hash))  return false;
+        table.put(hash, new Entry(hash, exemplar));
+        sizeBins.computeIfAbsent(hash.size, k -> new ArrayList<>()).add(hash);
+        if (exemplar.isMultiRange()) hasMultiRange = true;
+        return true;
+    }
+
+    /** True iff any inserted exemplar is multi-range (gates the GPU weight path). */
+    public boolean hasMultiRange() { return hasMultiRange; }
 
     // -------------------------------------------------------------------------
 

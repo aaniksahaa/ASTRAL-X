@@ -124,6 +124,15 @@ public class WeightTable {
         boolean useGPU = (Config.getInstance().getComputeMode() == Config.ComputeMode.GPU)
                          && GPUWeightCalculator.tryLoad();
 
+        // Multi-range clusters (consensus emission bridge) are CPU-only for now:
+        // both GPU kernels pack single-range split sides. The two-tier range-CSR
+        // (DOCS/multi-range-cluster-design.md §5.2/§5.3) lands separately.
+        if (useGPU && clusterTable.hasMultiRange()) {
+            Logging.info("Multi-range clusters present (consensus emission) — "
+                + "GPU weight path disabled, using CPU (GPU multi-range support pending)");
+            useGPU = false;
+        }
+
         if (useGPU) {
             Config cfg = Config.getInstance();
             boolean smallerSide = (cfg.getWeightIntersectionMethod()
@@ -673,6 +682,32 @@ public class WeightTable {
     // CPU path
     // -------------------------------------------------------------------------
 
+    // -------------------------------------------------------------------------
+    // Cluster-side intersection dispatch (single-range fast path / multi-range).
+    //
+    // For a single-range cluster (los == null) these are byte-identical to the
+    // original IntersectionCounter calls.  For a multi-range cluster they sum the
+    // intersection over the cluster's disjoint ranges (see multi-range-cluster-design.md
+    // §5.1).  Centralizing here keeps all three numeric modes consistent.
+    // -------------------------------------------------------------------------
+
+    /** |M_range ∩ cluster| where cluster c (in tree tC) may be single- or multi-range. */
+    private static int clusterIntersect(Tree tGT, int loGT, int hiGT,
+                                        Tree tC, Cluster c, int sizeGTRange) {
+        if (c.los != null)
+            return IntersectionCounter.intersectMulti(tGT, loGT, hiGT, tC, c.los, c.his,
+                                                      c.complement, sizeGTRange);
+        return IntersectionCounter.intersect(tGT, loGT, hiGT, tC, c.left, c.right,
+                                             c.complement, sizeGTRange);
+    }
+
+    /** |cluster ∩ Lg_GT| row sum for incomplete gene trees; single- or multi-range. */
+    private static int clusterFullTree(Tree tGT, Tree tC, Cluster c) {
+        if (c.los != null)
+            return IntersectionCounter.intersectWithFullTreeMulti(tGT, tC, c.los, c.his, c.complement);
+        return IntersectionCounter.intersectWithFullTree(tGT, tC, c.left, c.right, c.complement);
+    }
+
     private long computeScore(BipartitionSplit split,
                                Collection<PartitionTable.Entry> partitions,
                                ClusterTable clusterTable,
@@ -705,16 +740,14 @@ public class WeightTable {
             int sz1 = p.size1, sz2 = p.size2, sz3 = p.size3;
 
             // 4 core intersections
-            int a0 = IntersectionCounter.intersect(tGT, lo1, hi1, tA, cA.left, cA.right, cA.complement, sz1);
-            int a1 = IntersectionCounter.intersect(tGT, lo2, hi2, tA, cA.left, cA.right, cA.complement, sz2);
-            int b0 = IntersectionCounter.intersect(tGT, lo1, hi1, tB, cB.left, cB.right, cB.complement, sz1);
-            int b1 = IntersectionCounter.intersect(tGT, lo2, hi2, tB, cB.left, cB.right, cB.complement, sz2);
+            int a0 = clusterIntersect(tGT, lo1, hi1, tA, cA, sz1);
+            int a1 = clusterIntersect(tGT, lo2, hi2, tA, cA, sz2);
+            int b0 = clusterIntersect(tGT, lo1, hi1, tB, cB, sz1);
+            int b1 = clusterIntersect(tGT, lo2, hi2, tB, cB, sz2);
 
             // Row sums: for incomplete gene trees, |A∩Lg_GT| < sizeA; must compute explicitly
-            int lgA = tGT.isComplete ? sizeA
-                    : IntersectionCounter.intersectWithFullTree(tGT, tA, cA.left, cA.right, cA.complement);
-            int lgB = tGT.isComplete ? sizeB
-                    : IntersectionCounter.intersectWithFullTree(tGT, tB, cB.left, cB.right, cB.complement);
+            int lgA = tGT.isComplete ? sizeA : clusterFullTree(tGT, tA, cA);
+            int lgB = tGT.isComplete ? sizeB : clusterFullTree(tGT, tB, cB);
 
             // Derive remaining 5
             int a2 = lgA - a0 - a1;            // row constraint on A (w.r.t. Lg_GT)
@@ -804,15 +837,13 @@ public class WeightTable {
             int lo2 = p.rightStart, hi2 = p.rightEnd;
             int sz1 = p.size1, sz2 = p.size2, sz3 = p.size3;
 
-            int a0 = IntersectionCounter.intersect(tGT, lo1, hi1, tA, cA.left, cA.right, cA.complement, sz1);
-            int a1 = IntersectionCounter.intersect(tGT, lo2, hi2, tA, cA.left, cA.right, cA.complement, sz2);
-            int b0 = IntersectionCounter.intersect(tGT, lo1, hi1, tB, cB.left, cB.right, cB.complement, sz1);
-            int b1 = IntersectionCounter.intersect(tGT, lo2, hi2, tB, cB.left, cB.right, cB.complement, sz2);
+            int a0 = clusterIntersect(tGT, lo1, hi1, tA, cA, sz1);
+            int a1 = clusterIntersect(tGT, lo2, hi2, tA, cA, sz2);
+            int b0 = clusterIntersect(tGT, lo1, hi1, tB, cB, sz1);
+            int b1 = clusterIntersect(tGT, lo2, hi2, tB, cB, sz2);
 
-            int lgA = tGT.isComplete ? sizeA
-                    : IntersectionCounter.intersectWithFullTree(tGT, tA, cA.left, cA.right, cA.complement);
-            int lgB = tGT.isComplete ? sizeB
-                    : IntersectionCounter.intersectWithFullTree(tGT, tB, cB.left, cB.right, cB.complement);
+            int lgA = tGT.isComplete ? sizeA : clusterFullTree(tGT, tA, cA);
+            int lgB = tGT.isComplete ? sizeB : clusterFullTree(tGT, tB, cB);
 
             int a2 = lgA - a0 - a1;
             int b2 = lgB - b0 - b1;
@@ -880,15 +911,13 @@ public class WeightTable {
             int lo2 = p.rightStart, hi2 = p.rightEnd;
             int sz1 = p.size1, sz2 = p.size2, sz3 = p.size3;
 
-            int a0 = IntersectionCounter.intersect(tGT, lo1, hi1, tA, cA.left, cA.right, cA.complement, sz1);
-            int a1 = IntersectionCounter.intersect(tGT, lo2, hi2, tA, cA.left, cA.right, cA.complement, sz2);
-            int b0 = IntersectionCounter.intersect(tGT, lo1, hi1, tB, cB.left, cB.right, cB.complement, sz1);
-            int b1 = IntersectionCounter.intersect(tGT, lo2, hi2, tB, cB.left, cB.right, cB.complement, sz2);
+            int a0 = clusterIntersect(tGT, lo1, hi1, tA, cA, sz1);
+            int a1 = clusterIntersect(tGT, lo2, hi2, tA, cA, sz2);
+            int b0 = clusterIntersect(tGT, lo1, hi1, tB, cB, sz1);
+            int b1 = clusterIntersect(tGT, lo2, hi2, tB, cB, sz2);
 
-            int lgA = tGT.isComplete ? sizeA
-                    : IntersectionCounter.intersectWithFullTree(tGT, tA, cA.left, cA.right, cA.complement);
-            int lgB = tGT.isComplete ? sizeB
-                    : IntersectionCounter.intersectWithFullTree(tGT, tB, cB.left, cB.right, cB.complement);
+            int lgA = tGT.isComplete ? sizeA : clusterFullTree(tGT, tA, cA);
+            int lgB = tGT.isComplete ? sizeB : clusterFullTree(tGT, tB, cB);
 
             int a2 = lgA - a0 - a1;
             int b2 = lgB - b0 - b1;

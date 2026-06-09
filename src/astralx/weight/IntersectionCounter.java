@@ -82,4 +82,44 @@ public final class IntersectionCounter {
         int core = coreIntersect(tGT, 0, L_GT, tC, loC, hiC);
         return cComp ? (L_GT - core) : core;
     }
+
+    // -------------------------------------------------------------------------
+    // Multi-range cluster variants (DOCS/multi-range-cluster-design.md §5.1).
+    //
+    // A multi-range cluster's positive part is a union of PAIRWISE-DISJOINT
+    // ranges {[los[j],his[j])} in its exemplar tree tC.  Because the ranges are
+    // disjoint, |M ∩ (⋃ ranges)| = Σ_j |M ∩ [los[j],his[j])| — so each core count
+    // is a sum of per-range coreIntersect()s (each still walks the smaller side).
+    // The complement subtract trick (cComp ? size−core : core) is unchanged:
+    // |comp ∩ M| = |M| − |(⋃ ranges) ∩ M|, valid since M ⊆ Lg ⊆ S.
+    //
+    // These mirror the single-range methods exactly when los.length == 1, so a
+    // caller may always dispatch on Cluster.isMultiRange() with identical results.
+    // -------------------------------------------------------------------------
+
+    /** Σ_j |[loGT,hiGT) ∩ [los[j],his[j])| — disjoint ranges, each smaller-side walk. */
+    public static int coreIntersectMulti(Tree tGT, int loGT, int hiGT,
+                                          Tree tC, int[] los, int[] his) {
+        int total = 0;
+        for (int j = 0; j < los.length; j++) {
+            total += coreIntersect(tGT, loGT, hiGT, tC, los[j], his[j]);
+        }
+        return total;
+    }
+
+    /** Multi-range analogue of {@link #intersect}. */
+    public static int intersectMulti(Tree tGT, int loGT, int hiGT,
+                                     Tree tC, int[] los, int[] his, boolean cComp,
+                                     int sizeGTRange) {
+        int core = coreIntersectMulti(tGT, loGT, hiGT, tC, los, his);
+        return cComp ? (sizeGTRange - core) : core;
+    }
+
+    /** Multi-range analogue of {@link #intersectWithFullTree} (row sum vs full gene tree). */
+    public static int intersectWithFullTreeMulti(Tree tGT, Tree tC,
+                                                 int[] los, int[] his, boolean cComp) {
+        int L_GT = tGT.leafCount;
+        int core = coreIntersectMulti(tGT, 0, L_GT, tC, los, his);
+        return cComp ? (L_GT - core) : core;
+    }
 }
