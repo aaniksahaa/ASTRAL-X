@@ -57,7 +57,13 @@ ASTRAL-X's `stepBResolveByDistance` adds **only** the induced UPGMA tree (`infer
 it has **no `getQuadraticBitsets` equivalent anywhere**. → ASTRAL-X's X is missing a whole
 distance-derived candidate family around every polytomy.
 
-**D2 — Random resolution of leftover multifurcations in `resolveLinearly`.**
+**D2 — Random resolution of leftover multifurcations — ✅ IMPLEMENTED (opt-in).**
+`MiniGreedyBuilder.resolveLeftoverPolytomiesRandomly` + `stepBRound` step (6b): after the
+sampled mini-greedy build, for any node still with ≥3 children (incl. the virtual root), add
+the complement "rest" and **randomly pair-merge** until two remain, emitting each intermediate
+union via the validated `emitInducedSplit`. Gated like ASTRAL-MP on "the round accepted ≥1
+cluster" (`anyAccepted`) and behind the opt-in flag `--stepb-random-leftover-resolution`.
+Validated: emissions pass size + signature-fidelity; runs on CPU + GPU. *Original description:*
 After the greedy build, ASTRAL-MP (resolveLinearly :1441–1473) walks the sampled greedy tree and,
 for any node still with ≥3 children, **randomly pairs children** and adds the resulting unions to X
 (`forceresolution || added`). This injects extra, randomly-resolved candidate bipartitions.

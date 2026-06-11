@@ -408,6 +408,8 @@ public class Main {
                     else if (v.equals("n") || v.equals("full"))     cfg.setStepBFastRestriction(false);
                     else { System.err.println("--stepb-restriction expects dlogd|n"); return false; }
                 }
+                case "--stepb-quadratic-nn-balls"          -> cfg.setStepBQuadraticNnBalls(true);
+                case "--stepb-random-leftover-resolution"  -> cfg.setStepBRandomLeftoverResolution(true);
                 case "--autocomplete-incomplete-gene-trees" -> cfg.setAutoCompleteIncompleteTrees(true);
                 case "--completion-method" -> {
                     if (++i >= args.length) return false;

@@ -301,6 +301,24 @@ public class Config {
     public boolean isStepBFastRestriction()        { return stepBFastRestriction; }
     public void setStepBFastRestriction(boolean v) { this.stepBFastRestriction = v; }
 
+    // ── Optional extra X-enrichment around polytomies (OFF by default) ──────────
+    // Both reproduce ASTRAL-MP heuristics but materially ENLARGE the candidate set X
+    // (and thus DP + weight cost), so they are opt-in.
+
+    // D1: ASTRAL-MP getQuadraticBitsets — for each polytomy arm, add the nested
+    // nearest-neighbour "balls" (k-NN unions by induced rep similarity) as candidate
+    // (multi-range) clusters. O(d²) extra candidates per polytomy/round.
+    private boolean stepBQuadraticNnBalls = false;
+    public boolean isStepBQuadraticNnBalls()        { return stepBQuadraticNnBalls; }
+    public void setStepBQuadraticNnBalls(boolean v) { this.stepBQuadraticNnBalls = v; }
+
+    // D2: ASTRAL-MP resolveLinearly leftover step — after the sampled mini-greedy
+    // build, randomly pair-merge any still-unresolved multifurcation and add the
+    // intermediate unions as candidate clusters.
+    private boolean stepBRandomLeftoverResolution = false;
+    public boolean isStepBRandomLeftoverResolution()        { return stepBRandomLeftoverResolution; }
+    public void setStepBRandomLeftoverResolution(boolean v) { this.stepBRandomLeftoverResolution = v; }
+
     // ── Comparison / debug dump flags ─────────────────────────────────────────
     private String dumpClustersFile = null;
     public String getDumpClustersFile()       { return dumpClustersFile; }

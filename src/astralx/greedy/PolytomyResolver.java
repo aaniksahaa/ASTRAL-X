@@ -394,13 +394,21 @@ public final class PolytomyResolver {
         // ── Step (5): mini-greedy laminar build with buildTreeFromClusters
         //              semantics (LCA + ≥ 2 children moved).
         MiniGreedyBuilder mg = new MiniGreedyBuilder(d);
+        boolean anyAccepted = false;
         for (int[] entry : sorted) {
-            mg.tryInsert(entry[0]);
+            anyAccepted |= mg.tryInsert(entry[0]);
         }
 
         // ── Step (6): emit each accepted internal cluster bitmap as a full-taxa
         //              bipartition (smaller side, hashed via consensus prefix scan).
         mg.forEachAcceptedInternal(bm -> emitInducedSplit(bm, task, numTaxa, buffer));
+
+        // ── Step (6b) D2: random resolution of leftover multifurcations (opt-in).
+        //   ASTRAL-MP resolveLinearly runs this only when the round accepted ≥1 cluster.
+        if (Config.getInstance().isStepBRandomLeftoverResolution() && anyAccepted) {
+            mg.resolveLeftoverPolytomiesRandomly(rng,
+                bm -> emitInducedSplit(bm, task, numTaxa, buffer));
+        }
 
         // ── Step (7): resolveByDistance — UPGMA on the d×d induced similarity
         //              matrix (per-round, on the sampled reps).  Each non-root
@@ -444,8 +452,10 @@ public final class PolytomyResolver {
         Tree dendro = MiniUPGMA.build(inducedSim, d, /*treeIndex*/0);
         walkDendroAsRepBitmap(dendro.root, dendro.postorderArray, task, numTaxa, buffer);
 
-        // (b) quadratic nearest-neighbour balls (ASTRAL-MP getQuadraticBitsets), gated.
-        if (task.thresholdIndex < STEPB_QUADRATIC_MAX_THRESHOLD_INDEX
+        // (b) quadratic nearest-neighbour balls (ASTRAL-MP getQuadraticBitsets):
+        // opt-in (enlarges X), and gated to the loosest thresholds + non-bonus rounds.
+        if (Config.getInstance().isStepBQuadraticNnBalls()
+                && task.thresholdIndex < STEPB_QUADRATIC_MAX_THRESHOLD_INDEX
                 && roundIndex < STEPB_DEFAULT_RUNS) {
             emitQuadraticBalls(task, reps, inducedSim, d, numTaxa, buffer);
         }

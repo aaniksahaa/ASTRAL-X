@@ -142,4 +142,31 @@ final class MiniGreedyBuilder {
     void forEachAcceptedInternal(java.util.function.IntConsumer visitor) {
         for (int id = 1 + d; id < nextId; id++) visitor.accept(bitmap[id]);
     }
+
+    /**
+     * ASTRAL-MP {@code resolveLinearly} leftover step: for every node still with
+     * ≥3 children (an unresolved multifurcation — including the virtual root), add
+     * the complement "rest" (reps outside the node) as an extra part, then
+     * **randomly pair-merge** all parts until two remain, emitting each intermediate
+     * union bitmap to {@code emit}. Mirrors WQDataCollection.resolveLinearly:1441–1473.
+     * The caller decides whether to run this (gated on "the round accepted ≥1 cluster"
+     * and on the opt-in flag), and what to do with each union (→ multi-range emission).
+     */
+    void resolveLeftoverPolytomiesRandomly(java.util.Random rng,
+                                           java.util.function.IntConsumer emit) {
+        for (int id = 0; id < nextId; id++) {            // includes virtual root (id 0)
+            if (childCount[id] < 3) continue;
+            java.util.ArrayList<Integer> parts = new java.util.ArrayList<>(childCount[id] + 1);
+            for (int j = 0; j < childCount[id]; j++) parts.add(bitmap[children[id][j]]);
+            int rest = allBits & ~bitmap[id];            // reps outside this node (0 at the root)
+            if (rest != 0) parts.add(rest);
+            while (parts.size() > 2) {
+                int c1 = parts.remove(rng.nextInt(parts.size()));
+                int c2 = parts.remove(rng.nextInt(parts.size()));
+                int merged = c1 | c2;
+                emit.accept(merged);
+                parts.add(merged);
+            }
+        }
+    }
 }
