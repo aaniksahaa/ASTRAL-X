@@ -1,6 +1,8 @@
 # ASTRAL-X vs ASTRAL-MP — Deep Remaining Differences (all ASTRAL-X features ON)
 
-> **Status**: analysis only, no code change.
+> **Status**: D0/D1/D2 IMPLEMENTED (see §4). Per-polytomy enrichment is now essentially
+> matched. Remaining: **D7** (gene-tree polytomy scoring — the next major feature for
+> non-binary inputs) and the minor X gaps **D5 / D11 / D3** + unverified **D9**.
 > **Premise**: assume ASTRAL-X is run with *everything* enabled — `--search-mode full`,
 > `--consensus-experimental`, `--autocomplete…`, etc. The question is what genuine
 > **algorithmic / detail** differences from ASTRAL-MP *still* remain, beyond config.
@@ -117,12 +119,26 @@ ASTRAL-X has no equivalent. *Only matters if ASTRAL-MP is run in SLOW (`-x`/addE
 ASTRAL-MP baseline is default (addExtra=1), this one is moot — but **D1 (the per-polytomy quadratic)
 is on by default and is the bigger one.**
 
-**D5 — UPGMA species-tree `ST` exactness.**
-ASTRAL-MP's `ST = buildTreeFromClusters(speciesMatrix.inferTreeBitsets())` = its own UPGMA; its
-bipartitions enter X (steps 6 & 8). ASTRAL-X adds a UPGMA guide tree (`UPGMAClusterer`) — but the
-**linkage rule and tie-breaking** of `UPGMAClusterer.build` vs ASTRAL-MP's `SimilarityMatrix.UPGMA`
-may not be identical → a slightly different `ST` → different guide bipartitions. Worth a direct
-tree-vs-tree diff on a shared similarity matrix.
+**D5 — UPGMA species-tree `ST`: presence + exactness. ⚠️ STILL REMAINING (two parts).**
+ASTRAL-MP's `ST = buildTreeFromClusters(speciesMatrix.inferTreeBitsets())` is its own UPGMA; its
+bipartitions enter X **unconditionally** — both directly (`addBipartitionsFromSignleIndTreesToX(ST, …)`
+:749) and again in `addExtraBipartitionByDistance` (`inferTreeBitsets` :1032), independent of any flag.
+- **(a) Presence gap.** ASTRAL-X appends the UPGMA guide tree to X **only under `--autocomplete`**
+  (`Main.java:155`, `trees.add(upgmaGuideTree)`). With autocomplete OFF, ASTRAL-X has **no `ST`
+  bipartitions in X at all** — a clean miss vs ASTRAL-MP. (The angio runs use `--autocomplete`, so
+  this sub-gap is closed there.)
+- **(b) Exactness gap.** Even with the guide tree present, `UPGMAClusterer.build` vs ASTRAL-MP's
+  `SimilarityMatrix.UPGMA` may differ in linkage / tie-break → a slightly different `ST` → different
+  guide bipartitions. Worth a direct tree-vs-tree diff on a shared similarity matrix.
+
+**D11 — ST-based polytomy resolution in `addBipartitionsFromSignleIndTreesToX`. ⚠️ STILL REMAINING (new).**
+For every polytomy node of the `ST` *and* each greedy snapshot, ASTRAL-MP runs a second, distinct
+resolution against the **base trees (= `ST`)**: 3 rounds of `randomSampleAroundPolytomy` →
+`Utils.getBitsets(sample, ST)` → add-back unsampled taxa → add to X (:172–227). This is separate
+from the gene-tree-based Step B (`addExtraBipartitionByHeuristics`): it injects the *species tree's*
+view of each polytomy. ASTRAL-X resolves polytomies against **gene trees** only. Largely redundant
+with adding the full UPGMA tree to X (D5), but not identical — a small candidate family ASTRAL-X
+never adds.
 
 **D6 — Which trees feed the greedy consensus + `secondRoundSampling`.**
 For **single-individual** data ASTRAL-MP's `allGreedies[gt] = [relabelled gene tree]` and
@@ -156,29 +172,43 @@ two ASTRAL-X runs can differ. **Always compare the quartet *score* first.**
 
 ---
 
-## 4. What's confirmed matched (no gap)
+## 4. What's confirmed matched / now implemented (no gap)
 
 - Gene-tree **completion** (four-point / similarity) — previously simplified, now matched.
 - **Binary QI weight** (2·QI, LONG/DOUBLE/INT128, CPU + full-GPU incl. multi-range clusters).
 - **Greedy-consensus laminar construction** (7 thresholds) and the **mini-greedy** core of Step B,
   plus multi-range emission into X (validated for signature fidelity, GPU==CPU).
 - **O(d log d) Step B restriction.**
+- **D0 — all-degree polytomies** (lift the size-limit drop + `d > 31` cap) via
+  `--stepb-process-large-polytomies`; exact O(d²) NN-chain UPGMA + `long[]` Step B. ✅
+- **D1 — per-polytomy quadratic NN-balls** (`--stepb-quadratic-nn-balls`). ✅
+- **D2 — random leftover-polytomy resolution** (`--stepb-random-leftover-resolution`). ✅
 - The **DP search machinery** itself (given a fixed X).
 
 ---
 
 ## 5. Ranked suspects for the residual *score* difference (single-individual, all features on)
 
-1. **D1 — per-polytomy quadratic `getQuadraticBitsets`** (default-on for low thresholds): a whole
-   nearest-neighbour candidate family ASTRAL-X never adds. **Most likely.**
-2. **D2 — random leftover-polytomy resolution** in `resolveLinearly`: extra candidate bipartitions
-   ASTRAL-X doesn't emit.
-3. **D7 — gene-tree polytomies** if the input trees are not fully binary (then this dominates).
-4. **D5 — UPGMA `ST` exactness** and **D3 — adaptive-round criterion**: shift the emitted set.
-5. **D4 — global quadratic bitsets** only if the ASTRAL-MP baseline is SLOW (`-x`).
+**With D0/D1/D2 implemented, the per-polytomy enrichment is essentially matched.** What remains:
 
-All of D1–D5 make ASTRAL-X's **X a subset** of ASTRAL-MP's, so ASTRAL-X's optimum score is
-**≤** ASTRAL-MP's — the classic "we're missing candidate bipartitions" signature.
+*If the input gene trees are NOT fully binary (the general/real case):*
+1. **D7 — gene-tree polytomy d-partition QI.** This is a *scoring* gap (not an X gap) and
+   **dominates** whenever inputs are multifurcating. **The correct next major feature.**
+
+*If the input gene trees ARE binary (e.g. the deliberately-resolved angio control — so D7 is moot):*
+1. **D5 — UPGMA `ST`**: (a) present only under `--autocomplete`; (b) linkage/tie-break exactness.
+2. **D11 — ST-based polytomy resolution** in `addBipartitionsFromSignleIndTreesToX` (resolves
+   greedy/ST polytomies against `ST`, 3 rounds) — a small candidate family ASTRAL-X omits.
+3. **D3 — adaptive-round criterion** (different productive-round trigger → different round count).
+4. **D9 — full-mode DP search-equivalence** — believed equivalent, still unverified.
+5. **D10 — nondeterminism** (parallel similarity-matrix float reductions + parallel Step B):
+   ASTRAL-X's *own* emission set varies run-to-run, so always compare quartet *score*, and
+   factor this out (re-run twice) before attributing a gap to D5/D11/D3.
+6. **D4 — global quadratic bitsets** only if the ASTRAL-MP baseline is SLOW (`-x`).
+
+The remaining X gaps (**D5 / D11 / D3 / D4**) make ASTRAL-X's **X a subset** of ASTRAL-MP's, so
+ASTRAL-X's optimum score is **≤** ASTRAL-MP's — the classic "we're missing candidate bipartitions"
+signature. (D7 differs: it changes the *quartet weights*, not the candidate set.)
 
 ---
 
