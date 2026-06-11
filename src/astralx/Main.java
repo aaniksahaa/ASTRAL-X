@@ -410,6 +410,7 @@ public class Main {
                 }
                 case "--stepb-quadratic-nn-balls"          -> cfg.setStepBQuadraticNnBalls(true);
                 case "--stepb-random-leftover-resolution"  -> cfg.setStepBRandomLeftoverResolution(true);
+                case "--stepb-process-large-polytomies"    -> cfg.setStepBProcessLargePolytomies(true);
                 case "--autocomplete-incomplete-gene-trees" -> cfg.setAutoCompleteIncompleteTrees(true);
                 case "--completion-method" -> {
                     if (++i >= args.length) return false;

@@ -319,6 +319,21 @@ public class Config {
     public boolean isStepBRandomLeftoverResolution()        { return stepBRandomLeftoverResolution; }
     public void setStepBRandomLeftoverResolution(boolean v) { this.stepBRandomLeftoverResolution = v; }
 
+    // "Lift the bar": process polytomies of ANY degree, matching ASTRAL-MP, which
+    // never drops a polytomy — its polytomySizeLimit only disables the quadratic
+    // NN-balls for over-limit polytomies; the linear path (Step A UPGMA + Step B
+    // mini-greedy + UPGMA-on-reps) still runs for every polytomy.
+    //   OFF (default): pool drops d > sizeLimit, and Step B is capped at d ≤ 31.
+    //   ON: every polytomy is processed.  d ≤ 31 uses the unchanged int path;
+    //       d > 31 uses a long[]-bitmap Step B path; UPGMA on g > 31 uses the
+    //       exact O(d²) nearest-neighbour-chain (MiniUPGMA.buildFast).  Quadratic
+    //       NN-balls remain disabled for d > 31 (mirrors ASTRAL-MP's size gate).
+    // Turning this ON is purely ADDITIVE: small-polytomy emissions are identical;
+    // only the large-polytomy candidates are added.  ENLARGES X (and DP/weight cost).
+    private boolean stepBProcessLargePolytomies = false;
+    public boolean isStepBProcessLargePolytomies()        { return stepBProcessLargePolytomies; }
+    public void setStepBProcessLargePolytomies(boolean v) { this.stepBProcessLargePolytomies = v; }
+
     // ── Comparison / debug dump flags ─────────────────────────────────────────
     private String dumpClustersFile = null;
     public String getDumpClustersFile()       { return dumpClustersFile; }

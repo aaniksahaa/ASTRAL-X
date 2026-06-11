@@ -19,9 +19,12 @@ import java.util.List;
  *   4. {@code sizeLimit = last degree included}; or 3 if none.
  *   5. A polytomy of degree d is processed iff d ≤ sizeLimit.
  *
- * Larger polytomies are intentionally dropped — their signal is too diffuse
- * for random sampling to resolve productively, and Step A's O(|v|²) similarity
- * fill would be wasted.
+ * NOTE on ASTRAL-MP parity: ASTRAL-MP's loop (WQDataCollection.java:1154) actually
+ * processes EVERY polytomy; its polytomySizeLimit only disables the *quadratic*
+ * NN-balls (line 1247) for over-limit polytomies — the linear path still runs.
+ * By default we conservatively drop d > sizeLimit (smaller X, cheaper).  Setting
+ * --stepb-process-large-polytomies lifts that, processing every polytomy via the
+ * linear path (quadratic still skipped for the large ones), matching ASTRAL-MP.
  */
 public final class PolytomyPool {
 
@@ -100,6 +103,12 @@ public final class PolytomyPool {
         }
 
         // ── Pass 2: build PolytomyTask for accepted polytomies ──
+        // "Lift the bar": when --stepb-process-large-polytomies is set, accept
+        // EVERY polytomy regardless of degree (ASTRAL-MP never drops a polytomy;
+        // its size limit only disables the quadratic NN-balls).  Default: drop
+        // d > sizeLimit, exactly as before.
+        final boolean processAll =
+            astralx.Config.getInstance().isStepBProcessLargePolytomies();
         final int finalSizeLimit = sizeLimit;
         List<PolytomyTask> accepted = new ArrayList<>();
         int[] hist = new int[Math.max(8, maxDeg + 1)];
@@ -124,7 +133,7 @@ public final class PolytomyPool {
             ct.forEachInternalNode(node -> {
                 int d = node.children.size();
                 if (d <= 2) return;
-                if (d > finalSizeLimit) {
+                if (!processAll && d > finalSizeLimit) {
                     localSkipped.add(d);
                     return;
                 }

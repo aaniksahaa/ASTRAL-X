@@ -157,7 +157,12 @@ public final class PolytomyResolver {
         }
 
         // ── (2) Run UPGMA on the g×g matrix ─────────────────────────────────
-        Tree dendrogram = MiniUPGMA.build(groupSim, g, /*treeIndex*/0);
+        // Large polytomy (g > 31) under the lift-the-bar flag → exact O(d²) NN-chain
+        // (build()'s O(g³) closest-pair scan would dominate). g ≤ 31 keeps the
+        // proven O(g³) path so existing emissions are byte-identical.
+        Tree dendrogram = (g > 31 && Config.getInstance().isStepBProcessLargePolytomies())
+            ? MiniUPGMA.buildFast(groupSim, g, /*treeIndex*/0)
+            : MiniUPGMA.build(groupSim, g, /*treeIndex*/0);
 
         // ── (3) Walk dendrogram; emit each non-root internal node ──────────
         int[] addedNew = {0};
@@ -292,7 +297,8 @@ public final class PolytomyResolver {
                             SimilarityMatrix sim) {
         int d = task.numGroups;
         if (d < 4) return 0;                // need ≥ 4 groups for non-trivial induced split
-        if (d > 31) return 0;               // int-bitmap limit; future: use long[]
+        // d > 31 needs the long[]-bitmap path; only enabled by the lift-the-bar flag.
+        if (d > 31 && !Config.getInstance().isStepBProcessLargePolytomies()) return 0;
 
         int totalNewSignatures = 0;
         int adaptBonus = 0;
@@ -337,6 +343,11 @@ public final class PolytomyResolver {
                                     EmissionBuffer buffer, int numTaxa, Random rng,
                                     SimilarityMatrix sim, int roundIndex) {
         int d = task.numGroups;
+        // Large polytomy: rep-subsets no longer fit in an int → long[] path.
+        if (d > 31) {
+            stepBRoundLong(task, geneTrees, tours, buffer, numTaxa, rng, sim, roundIndex);
+            return;
+        }
         int[] aCons = task.tree.aCons();
         int allBits = (1 << d) - 1;
 
@@ -657,6 +668,283 @@ public final class PolytomyResolver {
         ClusterHash sig = new ClusterHash(sums, xors, canonicalSize, m);
         buffer.add(new EmittedBipartition(
             sig, canonical, canonicalSize, 'B', task.thresholdIndex));
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    //  LARGE-POLYTOMY (d > 31) long[]-bitmap Step B path
+    //  ----------------------------------------------------------------------
+    //  Mirrors the int path above method-for-method, with rep-subsets stored as
+    //  long[W] (W = ceil(d/64)) instead of a single int.  Reached only when
+    //  --stepb-process-large-polytomies is set (so the int path / existing
+    //  behaviour for d ≤ 31 is untouched).  Quadratic NN-balls are intentionally
+    //  NOT run here — matching ASTRAL-MP, which disables the quadratic family for
+    //  polytomies above its size limit while still running the linear path.
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /** Hashable / orderable wrapper over a long[] rep-subset bitmap. */
+    static final class BitKey {
+        final long[] w;
+        private final int h;
+        BitKey(long[] w) {
+            this.w = w;
+            int hh = 1;
+            for (long x : w) hh = 31 * hh + (int) (x ^ (x >>> 32));
+            this.h = hh;
+        }
+        @Override public int hashCode() { return h; }
+        @Override public boolean equals(Object o) {
+            return (o instanceof BitKey) && java.util.Arrays.equals(w, ((BitKey) o).w);
+        }
+        /** Ascending unsigned-magnitude order (deterministic tie-break). */
+        static int compare(BitKey a, BitKey b) {
+            for (int k = a.w.length - 1; k >= 0; k--) {
+                int c = Long.compareUnsigned(a.w[k], b.w[k]);
+                if (c != 0) return c;
+            }
+            return 0;
+        }
+    }
+
+    private static void stepBRoundLong(PolytomyTask task, List<Tree> geneTrees,
+                                       EulerTourBuilder.TourData[] tours,
+                                       EmissionBuffer buffer, int numTaxa, Random rng,
+                                       SimilarityMatrix sim, int roundIndex) {
+        int d = task.numGroups;
+        int W = (d + 63) >>> 6;
+        int[] aCons = task.tree.aCons();
+        long[] allBits = new long[W];
+        for (int b = 0; b < d; b++) allBits[b >>> 6] |= (1L << (b & 63));
+
+        // ── (1) one random rep per group (identical logic to the int path) ──
+        int[] reps = new int[d];
+        for (int gi = 0; gi < d; gi++) {
+            int firstLo = task.groupLos[gi], firstHi = task.groupHis[gi];
+            int firstSize = firstHi - firstLo;
+            int totalSize = firstSize;
+            boolean isRest = (gi == d - 1) && (task.numGroups > task.degree);
+            if (isRest && task.restSplit) totalSize += task.restHis2 - task.restLos2;
+            if (totalSize <= 0) { reps[gi] = -1; continue; }
+            int idx = rng.nextInt(totalSize);
+            int pos = (idx < firstSize) ? firstLo + idx
+                                        : task.restLos2 + (idx - firstSize);
+            reps[gi] = aCons[pos];
+        }
+
+        // ── (2)+(3) collect induced bipartition counts (complement-deduped) ──
+        java.util.HashMap<BitKey, Integer> counts = new java.util.HashMap<>();
+        java.util.ArrayList<long[]> perTree = new java.util.ArrayList<>(8);
+        for (int ti = 0; ti < geneTrees.size(); ti++) {
+            Tree gt = geneTrees.get(ti);
+            if (tours != null) collectGeneTreeBitmapsFastLong(gt, tours[ti], reps, d, W, perTree);
+            else               collectGeneTreeBitmapsLong(gt, reps, d, W, perTree);
+            for (long[] bm : perTree) {
+                BitKey key = new BitKey(bm);
+                Integer cur = counts.get(key);
+                if (cur != null) { counts.put(key, cur + 1); continue; }
+                long[] comp = new long[W];
+                for (int k = 0; k < W; k++) comp[k] = allBits[k] ^ bm[k];
+                BitKey ckey = new BitKey(comp);
+                Integer cc = counts.get(ckey);
+                if (cc != null) { counts.put(ckey, cc + 1); continue; }
+                counts.put(key, 1);
+            }
+        }
+        if (counts.isEmpty()) return;
+
+        // ── (4) sort by freq desc; deterministic tie-break by bitmap order ──
+        List<java.util.Map.Entry<BitKey, Integer>> sorted =
+            new ArrayList<>(counts.entrySet());
+        sorted.sort((a, b) -> {
+            int c = Integer.compare(b.getValue(), a.getValue());
+            return (c != 0) ? c : BitKey.compare(a.getKey(), b.getKey());
+        });
+
+        // ── (5) mini-greedy laminar build (long[] variant) ──────────────────
+        MiniGreedyBuilderLong mg = new MiniGreedyBuilderLong(d);
+        boolean anyAccepted = false;
+        for (var e : sorted) anyAccepted |= mg.tryInsert(e.getKey().w);
+
+        // ── (6) emit accepted clusters ──────────────────────────────────────
+        mg.forEachAcceptedInternal(bm -> emitInducedSplitLong(bm, task, numTaxa, buffer));
+
+        // ── (6b) D2 random leftover resolution (opt-in, round accepted ≥1) ──
+        if (Config.getInstance().isStepBRandomLeftoverResolution() && anyAccepted) {
+            mg.resolveLeftoverPolytomiesRandomly(rng,
+                bm -> emitInducedSplitLong(bm, task, numTaxa, buffer));
+        }
+
+        // ── (7) resolveByDistance: UPGMA on d×d induced reps (no quadratic) ──
+        if (sim != null) stepBResolveByDistanceLong(task, reps, sim, numTaxa, buffer, W);
+    }
+
+    private static void stepBResolveByDistanceLong(PolytomyTask task, int[] reps,
+                                                   SimilarityMatrix sim, int numTaxa,
+                                                   EmissionBuffer buffer, int W) {
+        int d = task.numGroups;
+        double[] inducedSim = new double[d * d];
+        for (int i = 0; i < d; i++) {
+            int ri = reps[i];
+            if (ri < 0) continue;
+            for (int j = i + 1; j < d; j++) {
+                int rj = reps[j];
+                if (rj < 0) continue;
+                double s = sim.getSim(ri, rj);
+                inducedSim[i * d + j] = s;
+                inducedSim[j * d + i] = s;
+            }
+        }
+        Tree dendro = MiniUPGMA.buildFast(inducedSim, d, /*treeIndex*/0);
+        walkDendroAsRepBitmapLong(dendro.root, dendro.postorderArray, task, numTaxa, buffer, d, W);
+    }
+
+    private static void walkDendroAsRepBitmapLong(TreeNode dn, int[] postArr,
+                                                  PolytomyTask task, int numTaxa,
+                                                  EmissionBuffer buffer, int d, int W) {
+        if (dn.isLeaf()) return;
+        walkDendroAsRepBitmapLong(dn.left,  postArr, task, numTaxa, buffer, d, W);
+        walkDendroAsRepBitmapLong(dn.right, postArr, task, numTaxa, buffer, d, W);
+        if (dn.isRoot()) return;
+        long[] bm = new long[W];
+        for (int p = dn.rangeStart; p < dn.rangeEnd; p++) {
+            int g = postArr[p];
+            bm[g >>> 6] |= (1L << (g & 63));
+        }
+        int sz = popcountL(bm);
+        if (sz < 2 || sz > d - 1) return;
+        emitInducedSplitLong(bm, task, numTaxa, buffer);
+    }
+
+    /** O(d log d) Euler-tour induced-clade enumeration (long[] variant of
+     *  {@link #collectGeneTreeBitmapsFast}). */
+    static void collectGeneTreeBitmapsFastLong(Tree gt, EulerTourBuilder.TourData tour,
+                                               int[] reps, int d, int W,
+                                               java.util.ArrayList<long[]> out) {
+        out.clear();
+        int[] pos = new int[d], tax = new int[d], grp = new int[d];
+        int k = 0;
+        for (int gi = 0; gi < d; gi++) {
+            int r = reps[gi];
+            if (r < 0) continue;
+            int p = gt.positionMap[r];
+            if (p < 0) continue;
+            pos[k] = p; tax[k] = r; grp[k] = gi; k++;
+        }
+        if (k < 2) return;
+        for (int i = 1; i < k; i++) {       // insertion sort by leaf position
+            int pp = pos[i], tt = tax[i], gg = grp[i], j = i - 1;
+            while (j >= 0 && pos[j] > pp) { pos[j+1]=pos[j]; tax[j+1]=tax[j]; grp[j+1]=grp[j]; j--; }
+            pos[j+1]=pp; tax[j+1]=tt; grp[j+1]=gg;
+        }
+        int[] sep = new int[k - 1];
+        for (int i = 0; i < k - 1; i++) sep[i] = lcaDepth(tour, tax[i], tax[i+1]);
+        int[] grpArr = java.util.Arrays.copyOf(grp, k);
+        emitInducedCladesLong(0, k - 1, sep, grpArr, d, W, out);
+    }
+
+    private static long[] emitInducedCladesLong(int lo, int hi, int[] sep, int[] grp,
+                                                int d, int W, java.util.ArrayList<long[]> out) {
+        if (lo == hi) {
+            long[] bm = new long[W];
+            bm[grp[lo] >>> 6] |= (1L << (grp[lo] & 63));
+            return bm;
+        }
+        int m = lo, minDepth = sep[lo];
+        for (int i = lo + 1; i <= hi - 1; i++) if (sep[i] < minDepth) { minDepth = sep[i]; m = i; }
+        long[] leftBM  = emitInducedCladesLong(lo, m, sep, grp, d, W, out);
+        long[] rightBM = emitInducedCladesLong(m + 1, hi, sep, grp, d, W, out);
+        long[] bm = new long[W];
+        for (int k = 0; k < W; k++) bm[k] = leftBM[k] | rightBM[k];
+        int sz = popcountL(bm);
+        if (minDepth != 0 && sz >= 2 && sz <= d - 2) out.add(bm);
+        return bm;
+    }
+
+    /** O(n) reference walk (long[] variant of {@link #collectGeneTreeBitmaps}). */
+    static void collectGeneTreeBitmapsLong(Tree gt, int[] reps, int d, int W,
+                                           java.util.ArrayList<long[]> out) {
+        out.clear();
+        int[] repAtPos = new int[gt.leafCount];
+        Arrays.fill(repAtPos, -1);
+        int presentCount = 0;
+        for (int gi = 0; gi < d; gi++) {
+            int r = reps[gi];
+            if (r < 0) continue;
+            int p = gt.positionMap[r];
+            if (p < 0) continue;
+            repAtPos[p] = gi;
+            presentCount++;
+        }
+        if (presentCount < 2) return;
+        walkCollectLong(gt.root, /*isRoot=*/true, repAtPos, d, W, out);
+    }
+
+    private static long[] walkCollectLong(TreeNode node, boolean isRoot, int[] repAtPos,
+                                          int d, int W, java.util.ArrayList<long[]> out) {
+        if (node.isLeaf()) {
+            int gi = repAtPos[node.rangeStart];
+            long[] bm = new long[W];
+            if (gi >= 0) bm[gi >>> 6] |= (1L << (gi & 63));
+            return bm;
+        }
+        long[] leftBM  = walkCollectLong(node.left,  false, repAtPos, d, W, out);
+        long[] rightBM = walkCollectLong(node.right, false, repAtPos, d, W, out);
+        long[] bm = new long[W];
+        for (int k = 0; k < W; k++) bm[k] = leftBM[k] | rightBM[k];
+        if (isRoot) return bm;
+        int legit = (nonZeroL(leftBM) ? 1 : 0) + (nonZeroL(rightBM) ? 1 : 0);
+        if (legit < 2) return bm;
+        int sz = popcountL(bm);
+        if (sz < 2 || sz >= d - 1) return bm;
+        out.add(bm);
+        return bm;
+    }
+
+    /** Convert a long[] rep-bitmap into a group bipartition and emit (smaller side). */
+    private static void emitInducedSplitLong(long[] repBitmap, PolytomyTask task,
+                                             int numTaxa, EmissionBuffer buffer) {
+        int d = task.numGroups;
+        boolean[] selected = new boolean[d];
+        int selectedSize = 0;
+        for (int gi = 0; gi < d; gi++) {
+            if ((repBitmap[gi >>> 6] & (1L << (gi & 63))) != 0) {
+                selected[gi] = true;
+                selectedSize += groupSize(task, gi);
+            }
+        }
+        int complementSize = numTaxa - selectedSize;
+        if (selectedSize <= 1 || complementSize <= 1) return;
+        if (selectedSize == numTaxa) return;
+
+        MultiRange canonical;
+        int canonicalSize;
+        if (selectedSize <= complementSize) {
+            canonical = buildSideMultiRange(task, selected, /*inverted=*/false);
+            canonicalSize = selectedSize;
+        } else {
+            canonical = buildSideMultiRange(task, selected, /*inverted=*/true);
+            canonicalSize = complementSize;
+        }
+
+        int m = task.tree.numSeeds();
+        long[] sums = new long[m];
+        long[] xors = new long[m];
+        for (int s = 0; s < m; s++) {
+            sums[s] = task.tree.combineDisjointSigma1(s, canonical.los, canonical.his);
+            xors[s] = task.tree.combineDisjointSigma2(s, canonical.los, canonical.his);
+        }
+        ClusterHash sig = new ClusterHash(sums, xors, canonicalSize, m);
+        buffer.add(new EmittedBipartition(
+            sig, canonical, canonicalSize, 'B', task.thresholdIndex));
+    }
+
+    private static int popcountL(long[] bm) {
+        int c = 0;
+        for (long x : bm) c += Long.bitCount(x);
+        return c;
+    }
+    private static boolean nonZeroL(long[] bm) {
+        for (long x : bm) if (x != 0) return true;
+        return false;
     }
 
     // ─────────────────────────────────────────────────────────────────────

@@ -34,6 +34,28 @@ Per polytomy, ASTRAL-MP does (WQDataCollection.java:1206–1260):
 
 ### The three concrete things ASTRAL-X omits here
 
+**D0 — Over-limit polytomies dropped entirely — ✅ IMPLEMENTED (opt-in).**
+ASTRAL-MP's `polytomySizeLimit` is a *misnomer-by-log*: the "discarded polytomies"
+block (WQDataCollection.java:1135–1139) only **logs** the degrees `d > polytomySizeLimit`;
+the work loop (:1154–1166) submits a task for **every** node with `getChildCount() > 2`.
+`polytomySizeLimit` gates exactly one thing — the `quadratic` flag (:1247). So an
+over-limit polytomy still gets Step A (`resolvePolytomy`) + `resolveLinearly` + the
+UPGMA-on-reps; only the NN-balls are skipped. ASTRAL-X originally **dropped** these
+polytomies outright in `PolytomyPool` (degree > sizeLimit) **and** hard-capped Step B
+at `d ≤ 31` (int rep-bitmap). `--stepb-process-large-polytomies` lifts both: the pool
+keeps every polytomy, and Step B uses a `long[]`-bitmap path (`MiniGreedyBuilderLong`)
+for `d > 31`, with the UPGMA switched to the exact O(d²) nearest-neighbour-chain
+(`MiniUPGMA.buildFast`) so Step A / resolveByDistance don't hit the old O(d³) wall.
+Quadratic NN-balls stay disabled for `d > 31` (mirrors ASTRAL-MP's size gate).
+Default OFF (enlarges X). Validated: 13/13 regression flag-off (byte-identical code
+path); flag-on processes the previously-dropped polytomies (e.g. degree 45 with
+sizeLimit 23), all emissions pass size + ASTRAL-MP signature fidelity, CPU **and**
+GPU (multi-range two-tier kernel) end-to-end with the optimal DP score matching.
+*Cost*: dominated by the largest polytomy — ~O(R·d² log d) per polytomy after the
+UPGMA fix (seconds even at d≈n/2); see the cost analysis. **This is the likely
+remaining single-individual X gap whenever the greedy consensus has big polytomies
+(common with incomplete gene trees).**
+
 **D1 — Quadratic "nearest-neighbour ball" bitsets — ✅ IMPLEMENTED** (was likely #1 culprit).
 `PolytomyResolver.emitQuadraticBalls` now reproduces `getQuadraticBitsets` on the induced
 rep matrix: for each arm, the nested k-NN balls (rep-to-rep similarity, descending, index

@@ -58,6 +58,7 @@ Optional:
   --stepb-fast-restriction              Enable O(d log d) Step B restriction (default: on)
   --stepb-quadratic-nn-balls            Enable quadratic NN-ball candidate emission (D1, opt-in)
   --stepb-random-leftover-resolution    Enable random leftover-polytomy resolution (D2, opt-in)
+  --stepb-process-large-polytomies      Process polytomies of any degree (lift the d≤sizeLimit/31 bar, opt-in)
   -v|-vv|-vvv        Verbosity
   --xms SIZE         Java min heap (default: ${XMS})
   --xmx SIZE         Java max heap (default: ${XMX})
@@ -110,7 +111,7 @@ while [[ $# -gt 0 ]]; do
       PROGRAM_ARGS+=("$1" "$2")
       shift 2
       ;;
-    --rooted|--unrooted|--no-gpu-batch|--consensus-experimental|--stepb-fast-restriction|--stepb-quadratic-nn-balls|--stepb-random-leftover-resolution|--verify-parse|--verify-hash|--verify-clusters|--verify-partitions|--verify-dp|--verify-weights|--verify-distance-matrix|--verify-similarity-matrix|--verify-upgma|--verify-greedy-consensus|--autocomplete-incomplete-gene-trees|-v|-vv|-vvv|-q|--quiet)
+    --rooted|--unrooted|--no-gpu-batch|--consensus-experimental|--stepb-fast-restriction|--stepb-quadratic-nn-balls|--stepb-random-leftover-resolution|--stepb-process-large-polytomies|--verify-parse|--verify-hash|--verify-clusters|--verify-partitions|--verify-dp|--verify-weights|--verify-distance-matrix|--verify-similarity-matrix|--verify-upgma|--verify-greedy-consensus|--autocomplete-incomplete-gene-trees|-v|-vv|-vvv|-q|--quiet)
       PROGRAM_ARGS+=("$1")
       shift
       ;;
