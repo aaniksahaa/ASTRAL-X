@@ -89,6 +89,16 @@ public class DPTable {
     /** Post-order recursion: emit transitions for this node, then children. */
     private void emit(TreeNode u, int ti, PrefixHashArrays pref) {
         if (u.isLeaf()) return;
+
+        // Polytomous node: recurse into all children, but add NO direct transitions of
+        // its own.  A polytomy is an unresolved node — it must not force any binary
+        // resolution into the DP search space; its quartet signal still enters via the
+        // d-partition QI weight.  (polytomy-design.md §3.7.)
+        if (u.isPolytomous()) {
+            for (TreeNode child : u.children) emit(child, ti, pref);
+            return;
+        }
+
         emit(u.left,  ti, pref);
         emit(u.right, ti, pref);
 
@@ -101,7 +111,10 @@ public class DPTable {
         // ── Type 2: S\sub(u) → sub(sibling) | S\sub(parent) ─────────────────
         // For non-root u: if parent is root and tree is complete, S\sub(root)=empty (size 0)
         // so hCompParent.size==0 and we skip.  For incomplete trees, S\sub(root) = S\Lg != empty.
-        if (!u.isRoot()) {
+        // GUARD: skip when the parent is polytomous — u.getSibling() has no well-defined
+        // value for a child of a polytomous node (polytomy-design.md §3.7).  For binary
+        // trees no node has a polytomous parent, so this clause is always true (unchanged).
+        if (!u.isRoot() && !u.parent.isPolytomous()) {
             TreeNode sib    = u.getSibling();
             TreeNode parent = u.parent;
 

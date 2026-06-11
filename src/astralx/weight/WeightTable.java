@@ -124,6 +124,11 @@ public class WeightTable {
         boolean useGPU = (Config.getInstance().getComputeMode() == Config.ComputeMode.GPU)
                          && GPUWeightCalculator.tryLoad();
 
+        // Polytomous gene-tree partitions (d > 3) are scored natively on BOTH GPU paths:
+        // prefix-sum via scorePolyNodes (O(1) memory, any degree), and smaller-side via the
+        // two-pass-rewalk poly loop (polytomy-design.md §3.8.4).  No CPU fallback is forced
+        // by polytomy alone — CPU is used only if the chosen GPU path is otherwise infeasible.
+
         // Multi-range clusters (consensus emission bridge) are handled fully ON GPU
         // via the two-tier range-CSR: buildSplitRangeData packs each multi-range split
         // side's ranges (single-range sides carry count 0 → the byte-identical fast
@@ -368,6 +373,7 @@ public class WeightTable {
         long[] twoScores = GPUWeightCalculator.computeWeightsGPU(
             splitsData, splitRangeMeta, rangeData,
             csr.nodeData, csr.nodeFreq, csr.nodeOffset, csr.partLeafCount,
+            csr.polyTreeOffset, csr.polyBoundOffset, csr.polyBounds, csr.polyFreq,
             orderings, invIndex,
             numSplits, numPartTrees, partTreeOffset, csr.maxLeafCount,
             numGpuTrees, n,
@@ -441,35 +447,57 @@ public class WeightTable {
         int[][] rng      = buildSplitRangeData(splitList, clusterTable);
         int[] splitRangeMeta = rng[0], rangeData = rng[1];
 
-        // --- parts: numParts * 9 ints (deduplicated tripartitions) ---
+        // --- parts (binary d==3): numParts * 9 ints; poly (d>3): separate CSR ---
         // treeIdx stored as (p.treeIndex + partTreeOffset) so the kernel reads the
         // original-tree half of the combined orderings/invIndex.
         // [treeIdx, lo1, hi1, lo2, hi2, sz1, sz2, sz3, frequency]
-        int numParts = partTable.size();
+        int numParts = 0, numPolyParts = 0;
+        long polyBoundsLen = 0;
+        for (PartitionTable.Entry pe : partTable.entries()) {
+            if (pe.exemplar.d == 3) numParts++;
+            else { numPolyParts++; polyBoundsLen += pe.exemplar.d; }
+        }
         int[] partsData = new int[numParts * 9];
-        int j = 0;
+        int[] ssPolyMeta        = new int[numPolyParts * 3];
+        int[] ssPolyBoundOffset = new int[numPolyParts + 1];
+        int[] ssPolyBounds      = new int[(int) polyBoundsLen];
+        int j = 0, pj = 0, boundCur = 0;
         for (PartitionTable.Entry pe : partTable.entries()) {
             Partition p = pe.exemplar;
-            int base = j * 9;
-            partsData[base + 0] = p.treeIndex + partTreeOffset;
-            partsData[base + 1] = p.leftStart;
-            partsData[base + 2] = p.leftEnd;
-            partsData[base + 3] = p.rightStart;
-            partsData[base + 4] = p.rightEnd;
-            partsData[base + 5] = p.size1;
-            partsData[base + 6] = p.size2;
-            partsData[base + 7] = p.size3;
-            partsData[base + 8] = pe.frequency;
-            j++;
+            if (p.d == 3) {
+                int base = j * 9;
+                partsData[base + 0] = p.treeIndex + partTreeOffset;
+                partsData[base + 1] = p.leftStart;
+                partsData[base + 2] = p.leftEnd;
+                partsData[base + 3] = p.rightStart;
+                partsData[base + 4] = p.rightEnd;
+                partsData[base + 5] = p.size1;
+                partsData[base + 6] = p.size2;
+                partsData[base + 7] = p.size3;
+                partsData[base + 8] = pe.frequency;
+                j++;
+            } else {
+                ssPolyMeta[pj * 3 + 0] = p.treeIndex + partTreeOffset;
+                ssPolyMeta[pj * 3 + 1] = partTrees.get(p.treeIndex).leafCount;  // L_GT
+                ssPolyMeta[pj * 3 + 2] = pe.frequency;
+                ssPolyBoundOffset[pj] = boundCur;
+                int k = p.d - 1;                         // # child intervals
+                for (int i = 0; i < k; i++) ssPolyBounds[boundCur + i] = p.partStarts[i];
+                ssPolyBounds[boundCur + k] = p.partEnds[k - 1];   // final boundary = hi
+                boundCur += p.d;
+                pj++;
+            }
         }
+        ssPolyBoundOffset[numPolyParts] = boundCur;
 
         int[][] oi      = buildOrderingsInvIndex(clusterTrees, partTrees, numGpuTrees);
         int[] orderings = oi[0], invIndex = oi[1];
 
         long t1 = System.nanoTime();
         long[] twoScores = GPUWeightCalculator.computeWeightsSmallerSideGPU(
-            splitsData, splitRangeMeta, rangeData, partsData, orderings, invIndex,
-            numSplits, numParts, numGpuTrees, n, n,
+            splitsData, splitRangeMeta, rangeData, partsData,
+            ssPolyMeta, ssPolyBoundOffset, ssPolyBounds, orderings, invIndex,
+            numSplits, numParts, numPolyParts, numGpuTrees, n, n,
             batchSizeHint, vramFraction, nativeScoreMode());
         long gpuMs = (System.nanoTime() - t1) / 1_000_000;
 
@@ -612,12 +640,17 @@ public class WeightTable {
      * because Σ_nodes QI ≡ Σ_unique frequency·QI.
      */
     private static final class NodeCSR {
-        int[] nodeData;       // numUnique * 3   [lo, mid, hi] of the exemplar
-        int[] nodeFreq;       // numUnique       frequency (occurrence count)
-        int[] nodeOffset;     // numTrees + 1    CSR row pointers (bucket by exemplar tree)
-        int[] partLeafCount;  // numTrees        leaf count L per tree
+        int[] nodeData;       // numBinUnique * 3   [lo, mid, hi] of the exemplar (d==3 only)
+        int[] nodeFreq;       // numBinUnique       frequency (occurrence count)
+        int[] nodeOffset;     // numTrees + 1       CSR row pointers (binary nodes by exemplar tree)
+        int[] partLeafCount;  // numTrees           leaf count L per tree
         int   maxLeafCount;   // max L over trees with ≥1 exemplar (shared-mem sizing)
-        int   totalNodes;     // numUnique
+        int   totalNodes;     // numBinUnique + numPolyUnique  (for logging)
+        // Polytomy (d>3) CSR — empty when no polytomous partitions.
+        int[] polyTreeOffset;   // numTrees + 1     poly nodes bucketed by exemplar tree
+        int[] polyBoundOffset;  // numPoly + 1      range into polyBounds (length d) per poly node
+        int[] polyBounds;       // Σ d              concatenated boundary lists b[0..d-1]
+        int[] polyFreq;         // numPoly          occurrence count
     }
 
     /**
@@ -628,48 +661,86 @@ public class WeightTable {
                                               List<Tree> partTrees) {
         int numTrees = partTrees.size();
 
-        // Pass 1: count unique tripartitions per exemplar tree → CSR offsets.
-        int[] nodeOffset = new int[numTrees + 1];
+        // Pass 1: count BINARY (d==3) and POLY (d>3) unique partitions per exemplar
+        // tree, and the total poly boundary length.
+        int[] nodeOffset     = new int[numTrees + 1];   // binary nodes per tree
+        int[] polyTreeOffset = new int[numTrees + 1];   // poly nodes per tree
+        long  polyBoundsLen  = 0;
         for (PartitionTable.Entry e : partTable.entries()) {
-            nodeOffset[e.exemplar.treeIndex + 1]++;
+            if (e.exemplar.d == 3) nodeOffset[e.exemplar.treeIndex + 1]++;
+            else { polyTreeOffset[e.exemplar.treeIndex + 1]++; polyBoundsLen += e.exemplar.d; }
         }
-        for (int g = 0; g < numTrees; g++) nodeOffset[g + 1] += nodeOffset[g];
-        int total = nodeOffset[numTrees];          // == numUnique == partTable.size()
-        if ((long) total * 3 > Integer.MAX_VALUE) {
-            throw new IllegalStateException("Too many tripartitions for a single int[] CSR: " + total);
+        for (int g = 0; g < numTrees; g++) {
+            nodeOffset[g + 1]     += nodeOffset[g];
+            polyTreeOffset[g + 1] += polyTreeOffset[g];
+        }
+        int total     = nodeOffset[numTrees];           // # binary unique
+        int numPoly   = polyTreeOffset[numTrees];       // # poly unique
+        if ((long) total * 3 > Integer.MAX_VALUE || polyBoundsLen > Integer.MAX_VALUE) {
+            throw new IllegalStateException("Too many partitions for a single int[] CSR");
         }
 
-        // Pass 2: scatter each unique tripartition into its exemplar tree's bucket.
+        // Pass 2: scatter into binary nodeData and poly bound CSR, bucketed by tree.
         int[] nodeData = new int[total * 3];
         int[] nodeFreq = new int[total];
-        int[] cursor   = nodeOffset.clone();       // per-tree write cursor
+        int[] polyFreq        = new int[numPoly];
+        int[] polyBoundOffset = new int[numPoly + 1];
+        int[] polyBounds      = new int[(int) polyBoundsLen];
+        int[] binCursor       = nodeOffset.clone();     // per-tree binary write cursor
+        int[] polyCursor      = polyTreeOffset.clone(); // per-tree poly write cursor
+
+        // Pre-fill polyBoundOffset by walking poly nodes in the SAME scatter order.
+        // We fill it incrementally during scatter via a running bound cursor per slot.
+        int[] polyDeg = new int[numPoly];               // degree per poly slot (for offsets)
         for (PartitionTable.Entry e : partTable.entries()) {
             Partition p = e.exemplar;
-            int pos = cursor[p.treeIndex]++;
-            int b   = pos * 3;
-            nodeData[b]     = p.leftStart;          // lo
-            nodeData[b + 1] = p.leftEnd;            // mid  (= p.rightStart)
-            nodeData[b + 2] = p.rightEnd;           // hi
-            nodeFreq[pos]   = e.frequency;
+            if (p.d == 3) {
+                int pos = binCursor[p.treeIndex]++;
+                int b   = pos * 3;
+                nodeData[b]     = p.leftStart;          // lo
+                nodeData[b + 1] = p.leftEnd;            // mid  (= p.rightStart)
+                nodeData[b + 2] = p.rightEnd;           // hi
+                nodeFreq[pos]   = e.frequency;
+            } else {
+                int pos = polyCursor[p.treeIndex]++;
+                polyFreq[pos] = e.frequency;
+                polyDeg[pos]  = p.d;
+            }
+        }
+        // Build polyBoundOffset (prefix sum of degrees) then scatter boundary lists.
+        for (int pn = 0; pn < numPoly; pn++) polyBoundOffset[pn + 1] = polyBoundOffset[pn] + polyDeg[pn];
+        int[] polyCursor2 = polyTreeOffset.clone();
+        for (PartitionTable.Entry e : partTable.entries()) {
+            Partition p = e.exemplar;
+            if (p.d == 3) continue;
+            int pos  = polyCursor2[p.treeIndex]++;
+            int base = polyBoundOffset[pos];
+            int k    = p.d - 1;                          // # child intervals
+            for (int i = 0; i < k; i++) polyBounds[base + i] = p.partStarts[i];
+            polyBounds[base + k] = p.partEnds[k - 1];    // final boundary = hi
         }
 
-        // Per-tree leaf counts; maxLeaf only over trees that actually need a prefix
-        // (an exemplar-empty tree is skipped by the kernel, so its L never matters).
+        // Per-tree leaf counts; maxLeaf over trees that need a prefix (binary OR poly).
         int[] partLeafCount = new int[numTrees];
         int   maxLeaf = 0;
         for (int g = 0; g < numTrees; g++) {
             int L = partTrees.get(g).leafCount;
             partLeafCount[g] = L;
-            if (nodeOffset[g + 1] > nodeOffset[g] && L > maxLeaf) maxLeaf = L;
+            boolean hasWork = nodeOffset[g + 1] > nodeOffset[g] || polyTreeOffset[g + 1] > polyTreeOffset[g];
+            if (hasWork && L > maxLeaf) maxLeaf = L;
         }
 
         NodeCSR csr = new NodeCSR();
-        csr.nodeData      = nodeData;
-        csr.nodeFreq      = nodeFreq;
-        csr.nodeOffset    = nodeOffset;
-        csr.partLeafCount = partLeafCount;
-        csr.maxLeafCount  = maxLeaf;
-        csr.totalNodes    = total;
+        csr.nodeData        = nodeData;
+        csr.nodeFreq        = nodeFreq;
+        csr.nodeOffset      = nodeOffset;
+        csr.partLeafCount   = partLeafCount;
+        csr.maxLeafCount    = maxLeaf;
+        csr.totalNodes      = total + numPoly;
+        csr.polyTreeOffset  = polyTreeOffset;
+        csr.polyBoundOffset = polyBoundOffset;
+        csr.polyBounds      = polyBounds;
+        csr.polyFreq        = polyFreq;
         return csr;
     }
 
@@ -772,6 +843,17 @@ public class WeightTable {
             // Partition positions are in original trees; use partTrees for gene-tree lookup.
             Tree tGT = partTrees.get(p.treeIndex);
 
+            // Polytomous partition (d > 3): O(d) QI formula (polytomy-design.md §3.8.2).
+            if (p.d > 3) {
+                int lgAp = tGT.isComplete ? sizeA : clusterFullTree(tGT, tA, cA);
+                int lgBp = tGT.isComplete ? sizeB : clusterFullTree(tGT, tB, cB);
+                int[][] parts = polyParts(p, tGT, tA, cA, tB, cB, lgAp, lgBp);
+                if (parts == null) continue;
+                long twoQI = polyTwoQILong(parts[0], parts[1], parts[2], p.d);
+                twoScore += (long) pe.frequency * twoQI;
+                continue;
+            }
+
             // M1 = [leftStart, leftEnd), M2 = [rightStart, rightEnd)
             int lo1 = p.leftStart,  hi1 = p.leftEnd;   // M1 range
             int lo2 = p.rightStart, hi2 = p.rightEnd;  // M2 range
@@ -871,6 +953,16 @@ public class WeightTable {
             Partition p = pe.exemplar;
             Tree tGT = partTrees.get(p.treeIndex);
 
+            if (p.d > 3) {   // polytomous: O(d) QI (double accumulation)
+                int lgAp = tGT.isComplete ? sizeA : clusterFullTree(tGT, tA, cA);
+                int lgBp = tGT.isComplete ? sizeB : clusterFullTree(tGT, tB, cB);
+                int[][] parts = polyParts(p, tGT, tA, cA, tB, cB, lgAp, lgBp);
+                if (parts == null) continue;
+                double twoQI = polyTwoQIDouble(parts[0], parts[1], parts[2], p.d);
+                twoScore += (double) pe.frequency * twoQI;
+                continue;
+            }
+
             int lo1 = p.leftStart,  hi1 = p.leftEnd;
             int lo2 = p.rightStart, hi2 = p.rightEnd;
             int sz1 = p.size1, sz2 = p.size2, sz3 = p.size3;
@@ -945,6 +1037,16 @@ public class WeightTable {
             Partition p = pe.exemplar;
             Tree tGT = partTrees.get(p.treeIndex);
 
+            if (p.d > 3) {   // polytomous: O(d) QI (exact 128-bit)
+                int lgAp = tGT.isComplete ? sizeA : clusterFullTree(tGT, tA, cA);
+                int lgBp = tGT.isComplete ? sizeB : clusterFullTree(tGT, tB, cB);
+                int[][] parts = polyParts(p, tGT, tA, cA, tB, cB, lgAp, lgBp);
+                if (parts == null) continue;
+                Int128 twoQI = polyTwoQIInt128(parts[0], parts[1], parts[2], p.d);
+                twoScore = twoScore.add(twoQI.mulScalar(pe.frequency));
+                continue;
+            }
+
             int lo1 = p.leftStart,  hi1 = p.leftEnd;
             int lo2 = p.rightStart, hi2 = p.rightEnd;
             int sz1 = p.size1, sz2 = p.size2, sz3 = p.size3;
@@ -991,6 +1093,100 @@ public class WeightTable {
             }
         }
         return sum;
+    }
+
+    // -------------------------------------------------------------------------
+    // Polytomy (d > 3) QI — the O(d) ASTRAL-III formula (polytomy-design.md §3.8.2):
+    //   2·QI = Σᵢ aᵢ(aᵢ-1)·[(Sb-bᵢ)(Sc-cᵢ) - Sbc + bᵢcᵢ]
+    //        + Σᵢ bᵢ(bᵢ-1)·[(Sa-aᵢ)(Sc-cᵢ) - Sac + aᵢcᵢ]
+    //        + Σᵢ cᵢ(cᵢ-1)·[(Sa-aᵢ)(Sb-bᵢ) - Sab + aᵢbᵢ]
+    // Every bracket is a sum of products of non-negative parts ⇒ ≥ 0 (no cancellation),
+    // and the total ≤ O(n⁴) — the same magnitude budget as the binary formula.
+    // -------------------------------------------------------------------------
+
+    /**
+     * Build the d×3 intersection matrix (aᵢ,bᵢ,cᵢ for i=0..d-1) for a polytomous
+     * partition.  The d-1 child parts are intersected directly; the complement part
+     * (index d-1) is recovered from the row constraints (lgA, lgB).  Returns null if
+     * any complement-derived part is negative (incomplete-tree row mismatch → skip),
+     * mirroring the binary {@code a2/b2/c0/c1/c2 < 0} guard.
+     *
+     * @return {a[], b[], c[]} each length d, or null if invalid.
+     */
+    private static int[][] polyParts(Partition p, Tree tGT,
+                                     Tree tA, Cluster cA, Tree tB, Cluster cB,
+                                     int lgA, int lgB) {
+        int d = p.d;
+        int[] a = new int[d], b = new int[d], c = new int[d];
+        int sumA = 0, sumB = 0;
+        for (int i = 0; i < d - 1; i++) {
+            int lo = p.partStarts[i], hi = p.partEnds[i], szi = p.sizes[i];
+            int ai = clusterIntersect(tGT, lo, hi, tA, cA, szi);
+            int bi = clusterIntersect(tGT, lo, hi, tB, cB, szi);
+            int ci = szi - ai - bi;                 // ≥ 0: A,B disjoint ⇒ aᵢ+bᵢ ≤ |Mᵢ|
+            if (ci < 0) return null;                // defensive
+            a[i] = ai; b[i] = bi; c[i] = ci;
+            sumA += ai; sumB += bi;
+        }
+        int aC = lgA - sumA;                        // complement part via row constraint
+        int bC = lgB - sumB;
+        int cC = p.sizes[d - 1] - aC - bC;
+        if (aC < 0 || bC < 0 || cC < 0) return null;
+        a[d - 1] = aC; b[d - 1] = bC; c[d - 1] = cC;
+        return new int[][]{ a, b, c };
+    }
+
+    private static long polyTwoQILong(int[] a, int[] b, int[] c, int d) {
+        long Sa = 0, Sb = 0, Sc = 0, Sab = 0, Sac = 0, Sbc = 0;
+        for (int i = 0; i < d; i++) {
+            Sa += a[i]; Sb += b[i]; Sc += c[i];
+            Sab += (long) a[i] * b[i]; Sac += (long) a[i] * c[i]; Sbc += (long) b[i] * c[i];
+        }
+        long two = 0;
+        for (int i = 0; i < d; i++) {
+            long ai = a[i], bi = b[i], ci = c[i];
+            two += ai * (ai - 1) * ((Sb - bi) * (Sc - ci) - Sbc + bi * ci);
+            two += bi * (bi - 1) * ((Sa - ai) * (Sc - ci) - Sac + ai * ci);
+            two += ci * (ci - 1) * ((Sa - ai) * (Sb - bi) - Sab + ai * bi);
+        }
+        return two;
+    }
+
+    private static double polyTwoQIDouble(int[] a, int[] b, int[] c, int d) {
+        double Sa = 0, Sb = 0, Sc = 0, Sab = 0, Sac = 0, Sbc = 0;
+        for (int i = 0; i < d; i++) {
+            Sa += a[i]; Sb += b[i]; Sc += c[i];
+            Sab += (double) a[i] * b[i]; Sac += (double) a[i] * c[i]; Sbc += (double) b[i] * c[i];
+        }
+        double two = 0;
+        for (int i = 0; i < d; i++) {
+            double ai = a[i], bi = b[i], ci = c[i];
+            two += ai * (ai - 1) * ((Sb - bi) * (Sc - ci) - Sbc + bi * ci);
+            two += bi * (bi - 1) * ((Sa - ai) * (Sc - ci) - Sac + ai * ci);
+            two += ci * (ci - 1) * ((Sa - ai) * (Sb - bi) - Sab + ai * bi);
+        }
+        return two;
+    }
+
+    private static Int128 polyTwoQIInt128(int[] a, int[] b, int[] c, int d) {
+        long Sa = 0, Sb = 0, Sc = 0, Sab = 0, Sac = 0, Sbc = 0;
+        for (int i = 0; i < d; i++) {
+            Sa += a[i]; Sb += b[i]; Sc += c[i];
+            Sab += (long) a[i] * b[i]; Sac += (long) a[i] * c[i]; Sbc += (long) b[i] * c[i];
+        }
+        // Each weight aᵢ(aᵢ-1) ≤ n² and each bracket ≤ n² fit in a signed long; their
+        // product (≤ n⁴) is formed exactly in 128-bit via Int128.mulLong.
+        Int128 two = Int128.ZERO;
+        for (int i = 0; i < d; i++) {
+            long ai = a[i], bi = b[i], ci = c[i];
+            long bracketA = (Sb - bi) * (Sc - ci) - Sbc + bi * ci;
+            long bracketB = (Sa - ai) * (Sc - ci) - Sac + ai * ci;
+            long bracketC = (Sa - ai) * (Sb - bi) - Sab + ai * bi;
+            if (ai >= 2 && bracketA != 0) two = two.add(Int128.mulLong(ai * (ai - 1), bracketA));
+            if (bi >= 2 && bracketB != 0) two = two.add(Int128.mulLong(bi * (bi - 1), bracketB));
+            if (ci >= 2 && bracketC != 0) two = two.add(Int128.mulLong(ci * (ci - 1), bracketC));
+        }
+        return two;
     }
 
     // -------------------------------------------------------------------------

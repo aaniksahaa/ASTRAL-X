@@ -220,15 +220,19 @@ public class TreeParser {
     }
 
     /**
-     * Recursively validates a RawNode tree and converts it to binary TreeNode:
+     * Recursively validates a RawNode tree and converts it to a TreeNode (binary or
+     * polytomous — see DOCS/polytomy-design.md §3.2):
      *
-     *   isRoot=true, 2 children  → rooted binary root, recurse normally.
-     *   isRoot=true, 3 children  → unrooted input; root arbitrarily by isolating
-     *                              the first child and making a new internal node
-     *                              from the remaining two. Logs a message.
-     *   isRoot=false, 2 children → normal binary internal node.
-     *   leaf                     → leaf node.
-     *   any other arity          → RuntimeException (polytomy not supported).
+     *   isRoot=true,  2 children  → rooted binary root, recurse normally.
+     *   isRoot=true,  3 children  → unrooted binary input; root arbitrarily by isolating
+     *                               the first child and joining the other two. Logs a message.
+     *   isRoot=true,  ≥4 children → unrooted polytomy at root; isolate child[0] as the
+     *                               root's left and make children[1..nc-1] a polytomous
+     *                               right child (the inner node recovers the full nc-partition
+     *                               via its nc-1 children + complement = child[0]).
+     *   isRoot=false, 2 children  → normal binary internal node.
+     *   isRoot=false, ≥3 children → polytomous internal node (children[] array).
+     *   leaf                      → leaf node.
      */
     private static TreeNode validateAndConvert(RawNode raw, int treeIdx, boolean isRoot) {
         if (raw.isLeaf()) {
@@ -248,10 +252,9 @@ public class TreeParser {
             return node;
 
         } else if (nc == 3 && isRoot) {
-            // Unrooted tree: 3-furcation at root
+            // Unrooted binary tree: 3-furcation at root.
             // Root by isolating children[0] as left and joining children[1]+children[2]
-            // into a new internal right node.  Any choice gives a valid rooted binary
-            // tree equivalent under ASTRAL's rooting-agnostic scoring.
+            // into a new binary right node.  Rooting-agnostic ⇒ any choice is fine.
             Logging.info("Tree %d: unrooted input (3-furcation at root) — rooting arbitrarily", treeIdx);
 
             TreeNode c0 = validateAndConvert(raw.children.get(0), treeIdx, false);
@@ -271,10 +274,44 @@ public class TreeParser {
             inner.parent = root;
             return root;
 
+        } else if (nc >= 4 && isRoot) {
+            // Unrooted polytomy at root (degree ≥ 4).  Isolate child[0] as the root's
+            // left; the remaining nc-1 children form a polytomous right child whose
+            // complement is exactly child[0] — recovering the full nc-way partition.
+            Logging.info("Tree %d: unrooted input (%d-furcation at root) — polytomy, rooting arbitrarily",
+                treeIdx, nc);
+
+            TreeNode c0 = validateAndConvert(raw.children.get(0), treeIdx, false);
+
+            TreeNode inner = new TreeNode();
+            inner.children = new TreeNode[nc - 1];
+            for (int j = 1; j < nc; j++) {
+                TreeNode cj = validateAndConvert(raw.children.get(j), treeIdx, false);
+                inner.children[j - 1] = cj;
+                cj.parent = inner;
+            }
+            inner.left  = inner.children[0];
+            inner.right = inner.children[nc - 2];
+
+            TreeNode root = new TreeNode();
+            root.left  = c0;
+            root.right = inner;
+            c0.parent    = root;
+            inner.parent = root;
+            return root;
+
         } else {
-            String where = isRoot ? "root" : "internal node";
-            throw new RuntimeException("Tree " + treeIdx + ": " + nc
-                + "-furcation at " + where + " — polytomy not supported");
+            // nc >= 3 && !isRoot  → polytomous internal node.
+            TreeNode node = new TreeNode();
+            node.children = new TreeNode[nc];
+            for (int j = 0; j < nc; j++) {
+                TreeNode cj = validateAndConvert(raw.children.get(j), treeIdx, false);
+                node.children[j] = cj;
+                cj.parent = node;
+            }
+            node.left  = node.children[0];
+            node.right = node.children[nc - 1];
+            return node;
         }
     }
 
@@ -282,7 +319,8 @@ public class TreeParser {
      * Single left-to-right DFS:
      *   - Leaf: assign rangeStart=counter, rangeEnd=counter+1, increment counter,
      *           write taxonId into postorderArray[counter].
-     *   - Internal: recurse into left, then right; range spans children.
+     *   - Internal (binary or polytomous): recurse into children in order; range
+     *     spans from leftmost (left) to rightmost (right) child.
      */
     private static void assignRangesAndFillArray(TreeNode node,
                                                   int[] arr, int[] counter) {
@@ -293,8 +331,12 @@ public class TreeParser {
             counter[0]++;
             return;
         }
-        assignRangesAndFillArray(node.left,  arr, counter);
-        assignRangesAndFillArray(node.right, arr, counter);
+        if (node.isPolytomous()) {
+            for (TreeNode child : node.children) assignRangesAndFillArray(child, arr, counter);
+        } else {
+            assignRangesAndFillArray(node.left,  arr, counter);
+            assignRangesAndFillArray(node.right, arr, counter);
+        }
         node.rangeStart = node.left.rangeStart;
         node.rangeEnd   = node.right.rangeEnd;
     }

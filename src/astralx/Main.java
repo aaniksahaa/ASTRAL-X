@@ -199,6 +199,24 @@ public class Main {
                 dumpClusters(clusterTable, trees, registry, cfg.getDumpClustersFile());
             }
 
+            // ── Phase 3.6: Gene-tree polytomy X-enrichment (mechanism B, opt-in) ──
+            // Resolve each INPUT gene-tree polytomy against the UPGMA guide tree into
+            // arm-union (multi-range) clusters (ASTRAL-MP addBipartitionsFromSignleIndTreesToX).
+            // Distinct from d-partition QI scoring; gated since it enlarges X.
+            if (cfg.isResolveInputGeneTreePolytomies()
+                    && anyPolytomous(trees, originalTrees.size())) {
+                long t36 = PhaseLogger.begin("Phase 3.6 Gene-tree polytomy enrichment", false);
+                int nT = registry.size();
+                if (similarityMatrix == null) {
+                    similarityMatrix = SimilarityMatrixBuilder.buildCPU(trees, nT);
+                }
+                Tree guide = UPGMAClusterer.build(similarityMatrix.sim, nT, trees.size());
+                astralx.greedy.GeneTreePolytomySampler.run(
+                    trees, originalTrees.size(), guide, pref, nT, pref.numSeeds(),
+                    cfg.getBaseSeed() ^ 0xC0FFEEL, clusterTable);
+                PhaseLogger.end("Phase 3.6 Gene-tree polytomy enrichment", t36, false);
+            }
+
             // ── Phase 3.5: Greedy consensus + polytomy resolution (EXPERIMENTAL) ──
             // INCOMPLETE feature — emission of resolved polytomies into X is not
             // yet wired up.  Skipped entirely by default: no compute, no memory.
@@ -411,6 +429,7 @@ public class Main {
                 case "--stepb-quadratic-nn-balls"          -> cfg.setStepBQuadraticNnBalls(true);
                 case "--stepb-random-leftover-resolution"  -> cfg.setStepBRandomLeftoverResolution(true);
                 case "--stepb-process-large-polytomies"    -> cfg.setStepBProcessLargePolytomies(true);
+                case "--resolve-input-gene-tree-polytomies" -> cfg.setResolveInputGeneTreePolytomies(true);
                 case "--autocomplete-incomplete-gene-trees" -> cfg.setAutoCompleteIncompleteTrees(true);
                 case "--completion-method" -> {
                     if (++i >= args.length) return false;
@@ -496,6 +515,20 @@ public class Main {
      * Each bipartition is the sorted set of taxon names in that subtree.
      * Root (all-taxa) is skipped automatically (rangeSize == n).
      */
+    /** True iff any of the first {@code numGeneTrees} trees contains a polytomous node. */
+    private static boolean anyPolytomous(java.util.List<Tree> trees, int numGeneTrees) {
+        for (int g = 0; g < numGeneTrees && g < trees.size(); g++) {
+            if (hasPolytomousNode(trees.get(g).root)) return true;
+        }
+        return false;
+    }
+
+    private static boolean hasPolytomousNode(astralx.tree.TreeNode node) {
+        if (node == null || node.isLeaf()) return false;
+        if (node.isPolytomous()) return true;
+        return hasPolytomousNode(node.left) || hasPolytomousNode(node.right);
+    }
+
     private static void dumpUpgmaBipartitions(Tree upgmaTree, TaxonRegistry registry) {
         int n = registry.size();
         StringBuilder taxaLine = new StringBuilder("taxa=");

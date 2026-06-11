@@ -105,8 +105,15 @@ public class ClusterTable {
     private void walkNodes(TreeNode node, int ti, int L,
                            PrefixHashArrays pref, int numTaxa, int[] count) {
         if (!node.isLeaf()) {
-            walkNodes(node.left,  ti, L, pref, numTaxa, count);
-            walkNodes(node.right, ti, L, pref, numTaxa, count);
+            if (node.isPolytomous()) {
+                // Recurse into ALL children. A polytomous node still contributes only
+                // its own sub(u) + complement below — NO combo clusters (sub(cᵢ)∪sub(cⱼ))
+                // are added; confirmed ASTRAL-MP behaviour (polytomy-design.md §3.3).
+                for (TreeNode child : node.children) walkNodes(child, ti, L, pref, numTaxa, count);
+            } else {
+                walkNodes(node.left,  ti, L, pref, numTaxa, count);
+                walkNodes(node.right, ti, L, pref, numTaxa, count);
+            }
         }
 
         if (node.isRoot()) return;  // skip root -- it is the all-taxa cluster

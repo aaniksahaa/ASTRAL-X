@@ -334,6 +334,15 @@ public class Config {
     public boolean isStepBProcessLargePolytomies()        { return stepBProcessLargePolytomies; }
     public void setStepBProcessLargePolytomies(boolean v) { this.stepBProcessLargePolytomies = v; }
 
+    // Gene-tree polytomy X-enrichment (ASTRAL-MP "mechanism B",
+    // addBipartitionsFromSignleIndTreesToX :172-227): resolve each INPUT gene-tree
+    // polytomy against the UPGMA guide tree (3 samples) and add the resulting
+    // arm-union (multi-range) clusters to X.  Distinct from the d-partition QI
+    // SCORING (always on for polytomous inputs).  Default OFF: it enlarges X.
+    private boolean resolveInputGeneTreePolytomies = false;
+    public boolean isResolveInputGeneTreePolytomies()        { return resolveInputGeneTreePolytomies; }
+    public void setResolveInputGeneTreePolytomies(boolean v) { this.resolveInputGeneTreePolytomies = v; }
+
     // ── Comparison / debug dump flags ─────────────────────────────────────────
     private String dumpClustersFile = null;
     public String getDumpClustersFile()       { return dumpClustersFile; }

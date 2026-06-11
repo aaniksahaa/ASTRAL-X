@@ -28,67 +28,79 @@ def _top_commas(s):
         elif c == ',' and depth == 1: pos.append(i)
     return pos
 
-def parse_newick(s):
+# Node representation:  leaf = frozenset([name]);  internal = (children_tuple, own_leaves)
+def _node(children):
+    lv = frozenset()
+    for c in children:
+        lv = lv | leaves(c)
+    return (tuple(children), lv)
+
+def parse_newick(s, is_root=True):
     s = s.strip().rstrip(';').strip()
     # strip branch lengths / internal labels at this level
     s = re.sub(r':[^,)]*', '', s)   # remove ':0.12' annotations
     if not s.startswith('('):
         return frozenset([s.strip()])
     commas = _top_commas(s)
-    if len(commas) == 1:
-        # Rooted binary node: two children
-        c = commas[0]
-        left  = parse_newick(s[1:c])
-        right = parse_newick(s[c+1:-1])
-        return (left, right, leaves(left) | leaves(right))
-    elif len(commas) == 2:
-        # Unrooted tree: 3-furcation at root — root arbitrarily.
-        # Mirror ASTRAL-X: isolate first child as left, join second+third into
-        # a new inner right node.  ASTRAL is rooting-agnostic so any choice works.
-        c1, c2 = commas
-        n0 = parse_newick(s[1:c1])
-        n1 = parse_newick(s[c1+1:c2])
-        n2 = parse_newick(s[c2+1:-1])
-        inner = (n1, n2, leaves(n1) | leaves(n2))
-        return (n0, inner, leaves(n0) | leaves(n1) | leaves(n2))
-    else:
-        raise ValueError(f"Non-binary node (commas={len(commas)}): {s[:60]}")
+    # split into child substrings at depth-1 commas
+    childstrs, prev = [], 1
+    for c in commas:
+        childstrs.append(s[prev:c]); prev = c + 1
+    childstrs.append(s[prev:-1])
+    children = [parse_newick(cs, False) for cs in childstrs]
+    nc = len(children)
+    # Mirror ASTRAL-X TreeParser.validateAndConvert (polytomy-design.md §3.2):
+    if nc == 2:
+        return _node(children)                              # binary internal
+    if nc == 3 and is_root:
+        inner = _node([children[1], children[2]])           # arbitrary binary rooting
+        return _node([children[0], inner])
+    if nc >= 4 and is_root:
+        inner = _node(children[1:])                         # polytomous inner; complement=child0
+        return _node([children[0], inner])
+    # nc >= 3 and not root → polytomous node
+    return _node(children)
 
 def leaves(node):
     if isinstance(node, frozenset): return node
-    return node[2]
+    return node[1]
 
 def subtrees(node):
-    """All (left, right, own_leaves) internal nodes in the tree, post-order."""
+    """All internal nodes in the tree, post-order."""
     if isinstance(node, frozenset): return []
-    result = subtrees(node[0]) + subtrees(node[1]) + [node]
+    result = []
+    for c in node[0]:
+        result += subtrees(c)
+    result.append(node)
     return result
 
-# ─── Tripartitions ────────────────────────────────────────────────────────────
+# ─── d-Partitions ──────────────────────────────────────────────────────────────
 
 def extract_tripartitions(parsed_trees):
     """
-    For each non-root internal node u of gene tree g (leaf set Lg):
-      M1 = left child's leaves
-      M2 = right child's leaves
-      M3 = Lg - M1 - M2
-    Returns: dict{ (M1,M2,M3) -> frequency }  with M1 <= M2 canonically.
+    For each non-root internal node u of gene tree g (leaf set Lg) with children
+    c0..c_{k-1}:  the d-partition (d = k+1) is
+      M_i = sub(c_i)            for i = 0..k-1
+      M_{d-1} = Lg - sub(u)     (complement)
+    Returns: dict{ key -> frequency }.  For binary (d=3) the key matches ASTRAL-X's
+    PartitionHash exactly (sort {M0,M1}, complement separate); for d≥4 the key is
+    order-invariant over all d parts.
     """
     triparts = defaultdict(int)
     for (tree, lg) in parsed_trees:
-        nodes = subtrees(tree)
-        root_leaves = lg
-        for node in nodes:
-            own = node[2]
-            if own == root_leaves:
+        for node in subtrees(tree):
+            own = leaves(node)
+            if own == lg:
                 continue   # skip root
-            m1, m2 = node[0], node[1]
-            if isinstance(m1, tuple): m1 = m1[2]
-            if isinstance(m2, tuple): m2 = m2[2]
-            m3 = lg - m1 - m2
-            if not m3:
+            comp = lg - own
+            if not comp:
                 continue   # shouldn't happen for non-root
-            key = tuple(sorted([m1, m2], key=lambda x: sorted(x))) + (m3,)
+            child_parts = [leaves(c) for c in node[0]]
+            if len(child_parts) == 2:
+                m1, m2 = child_parts
+                key = tuple(sorted([m1, m2], key=lambda x: sorted(x))) + (comp,)
+            else:
+                key = tuple(sorted(child_parts + [comp], key=lambda x: sorted(x)))
             triparts[key] += 1
     return triparts
 
@@ -109,9 +121,10 @@ def extract_clusters(parsed_trees, S):
         nodes = subtrees(tree)
         root_leaves = lg
         for node in nodes:
-            own = node[2]
+            own = leaves(node)
             if own == root_leaves: continue
-            # sub(u)
+            # sub(u)  (for polytomous nodes this is the whole subtree; children's
+            # own sets are registered when subtrees() recurses into them — NO combos)
             clusters[own] += 1
             # super-complement S \ sub(u)
             sc = S - own
@@ -124,16 +137,21 @@ def extract_clusters(parsed_trees, S):
 
 # ─── QI computation ───────────────────────────────────────────────────────────
 
-_PERMS6 = list(iperms([0, 1, 2]))
-
 def two_qi(a, b, c):
-    """2*QI = sum_{(i,j,k) perm} a[i]*b[j]*c[k]*(a[i]+b[j]+c[k]-3)."""
+    """2*QI = sum over distinct (i,j,k) of a[i]*b[j]*c[k]*(a[i]+b[j]+c[k]-3),
+    the brute O(d³) definition for a d-partition (polytomy-design.md §4).
+    For d=3 this equals the binary 6-permutation formula."""
+    d = len(a)
     res = 0
-    for (i, j, k) in _PERMS6:
-        ai, bj, ck = a[i], b[j], c[k]
-        s = ai + bj + ck - 3
-        if s > 0:
-            res += ai * bj * ck * s
+    for i in range(d):
+        for j in range(d):
+            if j == i: continue
+            for k in range(d):
+                if k == i or k == j: continue
+                ai, bj, ck = a[i], b[j], c[k]
+                s = ai + bj + ck - 3
+                if s > 0:
+                    res += ai * bj * ck * s
     return res
 
 
@@ -141,46 +159,25 @@ def score_split(A_set, B_set, S, triparts, verbose=False):
     """
     Score the species-tree split (A_set | B_set), where C = S - A - B.
 
-    For each tripartition (M1, M2, M3) with frequency f:
-      a[i] = |A ∩ Mi|,  b[i] = |B ∩ Mi|
-      lgA   = |A ∩ (M1∪M2∪M3)|          ← row sum for A (correct for incomplete tGT)
-      lgB   = |B ∩ (M1∪M2∪M3)|
-      a2    = lgA - a0 - a1
-      b2    = lgB - b0 - b1
-      c0    = sz1 - a0 - b0
-      c1    = sz2 - a1 - b1
-      c2    = sz3 - a2 - b2              ← column M3 (CORRECT, NOT sz3-c0-c1)
+    For each d-partition (M_0|…|M_{d-1}) with frequency f, compute explicitly:
+      a[i] = |A ∩ M_i|,  b[i] = |B ∩ M_i|,  c[i] = |M_i| - a[i] - b[i]
+    (A,B disjoint ⇒ c[i] ≥ 0; the complement part M_{d-1} is stored explicitly so
+    a[i]/b[i] are the true intersections — equivalent to ASTRAL-X's row-constraint
+    derivation, but valid for any degree d, binary or polytomous).
 
     Returns: score = (1/2) * sum_P freq * 2*QI
     """
     two_score = 0
-    for (m1, m2, m3), freq in triparts.items():
-        lg  = m1 | m2 | m3
-        sz1, sz2, sz3 = len(m1), len(m2), len(m3)
-
-        a0 = len(A_set & m1);  a1 = len(A_set & m2)
-        b0 = len(B_set & m1);  b1 = len(B_set & m2)
-
-        lgA = len(A_set & lg)
-        lgB = len(B_set & lg)
-
-        a2 = lgA - a0 - a1
-        b2 = lgB - b0 - b1
-        c0 = sz1 - a0 - b0
-        c1 = sz2 - a1 - b1
-        c2 = sz3 - a2 - b2   # CORRECT column M3 formula
-
-        if a2 < 0 or b2 < 0 or c0 < 0 or c1 < 0 or c2 < 0:
-            if verbose:
-                print(f"    SKIP  sz={sz1}|{sz2}|{sz3} lgA={lgA} lgB={lgB} "
-                      f"a=[{a0},{a1},{a2}] b=[{b0},{b1},{b2}] c=[{c0},{c1},{c2}]")
+    for parts, freq in triparts.items():
+        a = [len(A_set & M) for M in parts]
+        b = [len(B_set & M) for M in parts]
+        c = [len(M) - a[i] - b[i] for i, M in enumerate(parts)]
+        if any(x < 0 for x in c):
             continue
-
-        tqi = two_qi([a0,a1,a2], [b0,b1,b2], [c0,c1,c2])
+        tqi = two_qi(a, b, c)
         if verbose:
-            print(f"    PART  sz={sz1}|{sz2}|{sz3} lgA={lgA} lgB={lgB} "
-                  f"a=[{a0},{a1},{a2}] b=[{b0},{b1},{b2}] c=[{c0},{c1},{c2}] "
-                  f"2*QI={tqi} freq={freq}")
+            szs = '|'.join(str(len(M)) for M in parts)
+            print(f"    PART d={len(parts)} sz={szs} a={a} b={b} c={c} 2*QI={tqi} freq={freq}")
         two_score += freq * tqi
 
     return two_score // 2
@@ -269,8 +266,10 @@ def main():
     triparts = extract_tripartitions(parsed)
     print(f"[Tripartitions] {len(triparts)} unique")
     if args.dump_triparts:
-        for (m1,m2,m3), f in sorted(triparts.items(), key=lambda x: (-x[1], sorted(x[0][0]))):
-            print(f"  freq={f:3d}  {sorted(m1)} | {sorted(m2)} | {sorted(m3)}  sz={len(m1)}|{len(m2)}|{len(m3)}")
+        for parts, f in sorted(triparts.items(), key=lambda x: (-x[1], sorted(x[0][0]))):
+            body = ' | '.join(str(sorted(M)) for M in parts)
+            szs  = '|'.join(str(len(M)) for M in parts)
+            print(f"  freq={f:3d}  d={len(parts)}  {body}  sz={szs}")
 
     # --- clusters ---
     clusters = extract_clusters(parsed, S)

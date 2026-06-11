@@ -412,7 +412,20 @@ bᵢ = IntersectionCounter.intersect(tGT, p.partStarts[i], p.partEnds[i],
 All three variants (LONG, DOUBLE, INT128) follow the same structure; only the numeric
 type differs.
 
-#### 3.8.4 GPU path with polytomy (full design)
+#### 3.8.4 GPU path with polytomy (full design) — ✅ IMPLEMENTED & VALIDATED
+
+> **Status (2026-06):** both GPU kernels implement polytomy natively.  Prefix-sum:
+> `scorePolyNodes<ACC>` + `scorePolyNodesI128`, a two-pass O(1)-memory loop over the
+> per-tree poly CSR, reusing the same `pA/pB/lgA/lgB` as the binary loop (any degree d).
+> Smaller-side: `ssScorePoly<ACC>` + `ssScorePolyI128`, the two-pass-rewalk over a poly
+> CSR.  Both binary loops are untouched; empty poly CSR ⇒ no-op ⇒ byte-identical on
+> binary inputs.  Validated: TC1–13 bit-identical on BOTH kernels (LONG/INT128); on
+> polytomous inputs **oracle == CPU == prefix-sum GPU == smaller-side GPU == INT128**
+> (5-way agreement, complete + incomplete, up to d≈n/2), combined with mechanism-B
+> multi-range clusters, and on the large-L global prefix path.  No CPU fallback is
+> forced by polytomy.
+
+
 
 This section gives a **real GPU design**, not a CPU fallback.  The key observation that
 makes it tractable:
@@ -715,12 +728,29 @@ the same integer as the O(d³) formula for every input.  A unit test verifies th
    candidate bipartitions; it computes no signal. This §5 is about (2), and it is largely
    **orthogonal** to input-gene-tree polytomy support.
 
+> **CORRECTION (verified 2026-06).** An earlier draft of this section claimed the
+> sampled polytomies live *only* in internally-built greedy-consensus trees, "not in the
+> raw input gene trees." **That is wrong for single-individual data.** At
+> `WQDataCollection.java:652–661`, `allGreedies[gt] = [the input gene tree, relabelled]`
+> — i.e. for single-individual datasets `allGreedies` IS the set of input gene trees.
+> `FormSetXLoop` (:761/828) then calls `addBipartitionsFromSignleIndTreesToX` on **each
+> input gene tree**, whose polytomy block (:172–227) resolves every input-gene-tree
+> polytomy against the base tree `ST` (3 samples, `getBitsets` + `addbackAfterSampling`)
+> and adds the resulting **arm-union (multi-range) clusters** to X.  So ASTRAL-MP DOES
+> enrich X from input gene-tree polytomies — a distinct mechanism from the d-partition
+> *scoring* in §3.8.  ASTRAL-X now has multi-range cluster support, so this enrichment is
+> implementable as a follow-up "gene-tree polytomy sampler" (resolve each input polytomy
+> against the UPGMA guide tree → arm-union emissions).  It is **orthogonal to and not
+> required for** correct d-partition scoring (which this design implements).
+
 **What ASTRAL-MP actually does** (verified in `WQDataCollection.java`):
 
-- The polytomies it resolves by sampling live in **internally-constructed greedy-consensus
-  trees** (`allGreedies`) and the reference tree `ST` — *not* in the raw input gene trees.
-  (Greedy consensus naturally produces polytomies where gene trees disagree.) Call sites:
-  line 749 (traverse `ST`) and line 761/828 (traverse `allGreedies`).
+- It resolves polytomies in **two** places: (1) each **input gene tree** directly (for
+  single-individual data `allGreedies` = input trees; `addBipartitionsFromSignleIndTreesToX`
+  resolves their polytomies against `ST`), and (2) internally-built **greedy-consensus
+  trees** + the reference tree `ST` (`addExtraBipartitionByHeuristics`).  Call sites:
+  line 749 (traverse `ST`), line 761/828 (traverse `allGreedies` = input trees), and the
+  greedy-consensus path at :799.
 - For each polytomous node of such a tree (`childbslist.size() > 2`, lines 172–227):
   1. Build the d arms: `children[0..k-1]` + complement (`remaining`).
   2. Pick one random taxon per arm → `randomSample` (d taxa).

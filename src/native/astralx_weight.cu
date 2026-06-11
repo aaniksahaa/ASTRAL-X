@@ -207,6 +207,134 @@ __device__ void buildPrefix(
 }
 
 // ---------------------------------------------------------------------------
+// Polytomy (d>3) per-node QI on the prefix-sum path (polytomy-design.md §3.8.4b).
+// Reuses the SAME pA/pB prefix arrays already built for tree g (and its lgA/lgB).
+// Each thread grid-strides over tree g's poly nodes; each computes the full O(d)
+// QI with O(1) working memory (child parts via O(1) prefix differences).  Returns
+// this thread's partial accumulation, to be added into threadAccum.
+//
+// Poly CSR (bucketed by exemplar tree):
+//   polyTreeOffset[g]..[g+1]      poly nodes of tree g
+//   polyBoundOffset[pn]..[pn+1]   range into polyBounds; length d (the degree)
+//   polyBounds[base + 0..d-1]     boundary list; child i = [b[i],b[i+1]) (i=0..d-2),
+//                                  part d-1 = complement Lg \ [b[0],b[d-1])
+//   polyFreq[pn]                  occurrence count
+// ---------------------------------------------------------------------------
+template<typename ACC>
+__device__ ACC scorePolyNodes(
+    int g, int L, int lgA, int lgB,
+    const int* __restrict__ pA, const int* __restrict__ pB,
+    const int* __restrict__ polyTreeOffset,
+    const int* __restrict__ polyBoundOffset,
+    const int* __restrict__ polyBounds,
+    const int* __restrict__ polyFreq,
+    int tid, int nthreads)
+{
+    ACC acc = (ACC) 0;
+    int pbeg = polyTreeOffset[g], pend = polyTreeOffset[g + 1];
+    for (int pn = pbeg + tid; pn < pend; pn += nthreads) {
+        int base = polyBoundOffset[pn];
+        int d    = polyBoundOffset[pn + 1] - base;
+        int b0   = polyBounds[base];
+        int bD   = polyBounds[base + d - 1];
+
+        // Pass 1: global marginals over all d parts (child parts via prefix diffs).
+        ACC Sa = 0, Sb = 0, Sc = 0, Sab = 0, Sac = 0, Sbc = 0;
+        int sumA = 0, sumB = 0;
+        for (int i = 0; i < d - 1; i++) {
+            int lo = polyBounds[base + i], hi = polyBounds[base + i + 1];
+            int ai = pA[hi] - pA[lo];
+            int bi = pB[hi] - pB[lo];
+            int ci = (hi - lo) - ai - bi;            // ≥ 0 by construction
+            Sa += ai; Sb += bi; Sc += ci;
+            Sab += (ACC) ai * bi; Sac += (ACC) ai * ci; Sbc += (ACC) bi * ci;
+            sumA += ai; sumB += bi;
+        }
+        int aC = lgA - sumA;
+        int bC = lgB - sumB;
+        int szC = L - (bD - b0);
+        int cC = szC - aC - bC;
+        if (aC < 0 || bC < 0 || cC < 0) continue;    // incomplete-tree row mismatch → skip node
+        Sa += aC; Sb += bC; Sc += cC;
+        Sab += (ACC) aC * bC; Sac += (ACC) aC * cC; Sbc += (ACC) bC * cC;
+
+        // Pass 2: O(d) QI (recompute child parts; complement reused).
+        ACC twoQI = (ACC) 0;
+        for (int i = 0; i < d; i++) {
+            int ai, bi, ci;
+            if (i < d - 1) {
+                int lo = polyBounds[base + i], hi = polyBounds[base + i + 1];
+                ai = pA[hi] - pA[lo]; bi = pB[hi] - pB[lo]; ci = (hi - lo) - ai - bi;
+            } else { ai = aC; bi = bC; ci = cC; }
+            ACC A = ai, B = bi, C = ci;
+            twoQI += A * (A - 1) * ((Sb - B) * (Sc - C) - Sbc + B * C);
+            twoQI += B * (B - 1) * ((Sa - A) * (Sc - C) - Sac + A * C);
+            twoQI += C * (C - 1) * ((Sa - A) * (Sb - B) - Sab + A * B);
+        }
+        acc += (ACC) polyFreq[pn] * twoQI;
+    }
+    return acc;
+}
+
+// INT128 twin of scorePolyNodes.  Marginals (Sa..Sbc) and each bracket fit in 64-bit
+// (≤ n²); the weight·bracket product (≤ n⁴) and the accumulation are 128-bit.
+__device__ I128 scorePolyNodesI128(
+    int g, int L, int lgA, int lgB,
+    const int* __restrict__ pA, const int* __restrict__ pB,
+    const int* __restrict__ polyTreeOffset,
+    const int* __restrict__ polyBoundOffset,
+    const int* __restrict__ polyBounds,
+    const int* __restrict__ polyFreq,
+    int tid, int nthreads)
+{
+    I128 acc = i128_zero();
+    int pbeg = polyTreeOffset[g], pend = polyTreeOffset[g + 1];
+    for (int pn = pbeg + tid; pn < pend; pn += nthreads) {
+        int base = polyBoundOffset[pn];
+        int d    = polyBoundOffset[pn + 1] - base;
+        int b0   = polyBounds[base];
+        int bD   = polyBounds[base + d - 1];
+
+        long long Sa = 0, Sb = 0, Sc = 0, Sab = 0, Sac = 0, Sbc = 0;
+        int sumA = 0, sumB = 0;
+        for (int i = 0; i < d - 1; i++) {
+            int lo = polyBounds[base + i], hi = polyBounds[base + i + 1];
+            int ai = pA[hi] - pA[lo];
+            int bi = pB[hi] - pB[lo];
+            int ci = (hi - lo) - ai - bi;
+            Sa += ai; Sb += bi; Sc += ci;
+            Sab += (long long) ai * bi; Sac += (long long) ai * ci; Sbc += (long long) bi * ci;
+            sumA += ai; sumB += bi;
+        }
+        int aC = lgA - sumA;
+        int bC = lgB - sumB;
+        int szC = L - (bD - b0);
+        int cC = szC - aC - bC;
+        if (aC < 0 || bC < 0 || cC < 0) continue;
+        Sa += aC; Sb += bC; Sc += cC;
+        Sab += (long long) aC * bC; Sac += (long long) aC * cC; Sbc += (long long) bC * cC;
+
+        I128 twoQI = i128_zero();
+        for (int i = 0; i < d; i++) {
+            long long ai, bi, ci;
+            if (i < d - 1) {
+                int lo = polyBounds[base + i], hi = polyBounds[base + i + 1];
+                ai = pA[hi] - pA[lo]; bi = pB[hi] - pB[lo]; ci = (hi - lo) - ai - bi;
+            } else { ai = aC; bi = bC; ci = cC; }
+            long long brA = (Sb - bi) * (Sc - ci) - Sbc + bi * ci;   // each ≥ 0, ≤ n²
+            long long brB = (Sa - ai) * (Sc - ci) - Sac + ai * ci;
+            long long brC = (Sa - ai) * (Sb - bi) - Sab + ai * bi;
+            long long wA = ai * (ai - 1), wB = bi * (bi - 1), wC = ci * (ci - 1);
+            if (wA > 0 && brA > 0) twoQI = i128_add(twoQI, i128_mul_u64((unsigned long long) wA, (unsigned long long) brA));
+            if (wB > 0 && brB > 0) twoQI = i128_add(twoQI, i128_mul_u64((unsigned long long) wB, (unsigned long long) brB));
+            if (wC > 0 && brC > 0) twoQI = i128_add(twoQI, i128_mul_u64((unsigned long long) wC, (unsigned long long) brC));
+        }
+        acc = i128_add(acc, i128_mul_scalar(twoQI, (unsigned long long) polyFreq[pn]));
+    }
+    return acc;
+}
+
+// ---------------------------------------------------------------------------
 // Score one split.  pA/pB are the two prefix buffers (in shared memory for the
 // fast path, or in a per-block global slot for the large-L path); scan is the
 // WB_BLOCK-int scratch used by buildPrefix (always in shared memory).
@@ -224,6 +352,10 @@ __device__ void scoreSplit(
     const int* __restrict__ nodeFreq,
     const int* __restrict__ nodeOffset,
     const int* __restrict__ partLeafCount,
+    const int* __restrict__ polyTreeOffset,
+    const int* __restrict__ polyBoundOffset,
+    const int* __restrict__ polyBounds,
+    const int* __restrict__ polyFreq,
     const int* __restrict__ orderings,
     const int* __restrict__ invIndex,
     int numPartTrees, int partTreeOffset, int numTaxa, int totalN,
@@ -260,7 +392,9 @@ __device__ void scoreSplit(
     for (int g = 0; g < numPartTrees; g++) {
         int nbeg = nodeOffset[g];
         int nend = nodeOffset[g + 1];
-        if (nbeg == nend) continue;   // exemplar-empty tree → no prefix needed (uniform skip)
+        int pbeg = polyTreeOffset[g];
+        int pend = polyTreeOffset[g + 1];
+        if (nbeg == nend && pbeg == pend) continue;   // no binary AND no poly nodes (uniform skip)
 
         int    L     = partLeafCount[g];
         size_t gBase = (size_t)(partTreeOffset + g) * numTaxa;
@@ -309,7 +443,12 @@ __device__ void scoreSplit(
             threadAccum += (ACC) nodeFreq[ni] * twoQI;   // weight by occurrence count
         }
 
-        __syncthreads();   // pA/pB reused next iteration; ensure node loop done
+        // Polytomy (d>3) nodes of this tree — reuse the SAME pA/pB/lgA/lgB.
+        if (pbeg != pend)
+            threadAccum += scorePolyNodes<ACC>(g, L, lgA, lgB, pA, pB,
+                polyTreeOffset, polyBoundOffset, polyBounds, polyFreq, tid, nthreads);
+
+        __syncthreads();   // pA/pB reused next iteration; ensure both loops done
     }
 
     // Block reduction of threadAccum → twoScores[s].
@@ -344,6 +483,10 @@ __global__ void computeWeightsKernel(
     const int* __restrict__ nodeFreq,
     const int* __restrict__ nodeOffset,
     const int* __restrict__ partLeafCount,
+    const int* __restrict__ polyTreeOffset,
+    const int* __restrict__ polyBoundOffset,
+    const int* __restrict__ polyBounds,
+    const int* __restrict__ polyFreq,
     const int* __restrict__ orderings,
     const int* __restrict__ invIndex,
     int curBatch,
@@ -365,6 +508,7 @@ __global__ void computeWeightsKernel(
         int* pB   = pA + prefixStride;
         for (int s = blockIdx.x; s < curBatch; s += gridDim.x) {
             scoreSplit<ACC>(s, splits, splitRangeMeta, rangeData, nodeData, nodeFreq, nodeOffset, partLeafCount,
+                       polyTreeOffset, polyBoundOffset, polyBounds, polyFreq,
                        orderings, invIndex, numPartTrees, partTreeOffset,
                        numTaxa, totalN, pA, pB, scan, tid, nthreads, twoScores);
         }
@@ -375,6 +519,7 @@ __global__ void computeWeightsKernel(
         int s = blockIdx.x;
         if (s < curBatch) {
             scoreSplit<ACC>(s, splits, splitRangeMeta, rangeData, nodeData, nodeFreq, nodeOffset, partLeafCount,
+                       polyTreeOffset, polyBoundOffset, polyBounds, polyFreq,
                        orderings, invIndex, numPartTrees, partTreeOffset,
                        numTaxa, totalN, pA, pB, scan, tid, nthreads, twoScores);
         }
@@ -396,6 +541,10 @@ __device__ void scoreSplitI128(
     const int* __restrict__ nodeFreq,
     const int* __restrict__ nodeOffset,
     const int* __restrict__ partLeafCount,
+    const int* __restrict__ polyTreeOffset,
+    const int* __restrict__ polyBoundOffset,
+    const int* __restrict__ polyBounds,
+    const int* __restrict__ polyFreq,
     const int* __restrict__ orderings,
     const int* __restrict__ invIndex,
     int numPartTrees, int partTreeOffset, int numTaxa, int totalN,
@@ -428,7 +577,9 @@ __device__ void scoreSplitI128(
     for (int g = 0; g < numPartTrees; g++) {
         int nbeg = nodeOffset[g];
         int nend = nodeOffset[g + 1];
-        if (nbeg == nend) continue;
+        int pbeg = polyTreeOffset[g];
+        int pend = polyTreeOffset[g + 1];
+        if (nbeg == nend && pbeg == pend) continue;
 
         int    L     = partLeafCount[g];
         size_t gBase = (size_t)(partTreeOffset + g) * numTaxa;
@@ -481,6 +632,12 @@ __device__ void scoreSplitI128(
                                    i128_mul_scalar(twoQI, (unsigned long long) nodeFreq[ni]));
         }
 
+        // Polytomy (d>3) nodes of this tree — reuse the SAME pA/pB/lgA/lgB.
+        if (pbeg != pend)
+            threadAccum = i128_add(threadAccum,
+                scorePolyNodesI128(g, L, lgA, lgB, pA, pB,
+                    polyTreeOffset, polyBoundOffset, polyBounds, polyFreq, tid, nthreads));
+
         __syncthreads();
     }
 
@@ -504,6 +661,10 @@ __global__ void computeWeightsKernelI128(
     const int* __restrict__ nodeFreq,
     const int* __restrict__ nodeOffset,
     const int* __restrict__ partLeafCount,
+    const int* __restrict__ polyTreeOffset,
+    const int* __restrict__ polyBoundOffset,
+    const int* __restrict__ polyBounds,
+    const int* __restrict__ polyFreq,
     const int* __restrict__ orderings,
     const int* __restrict__ invIndex,
     int curBatch,
@@ -525,6 +686,7 @@ __global__ void computeWeightsKernelI128(
         int* pB   = pA + prefixStride;
         for (int s = blockIdx.x; s < curBatch; s += gridDim.x) {
             scoreSplitI128(s, splits, splitRangeMeta, rangeData, nodeData, nodeFreq, nodeOffset, partLeafCount,
+                           polyTreeOffset, polyBoundOffset, polyBounds, polyFreq,
                            orderings, invIndex, numPartTrees, partTreeOffset,
                            numTaxa, totalN, pA, pB, scan, tid, nthreads, twoScores);
         }
@@ -535,6 +697,7 @@ __global__ void computeWeightsKernelI128(
         int s = blockIdx.x;
         if (s < curBatch) {
             scoreSplitI128(s, splits, splitRangeMeta, rangeData, nodeData, nodeFreq, nodeOffset, partLeafCount,
+                           polyTreeOffset, polyBoundOffset, polyBounds, polyFreq,
                            orderings, invIndex, numPartTrees, partTreeOffset,
                            numTaxa, totalN, pA, pB, scan, tid, nthreads, twoScores);
         }
@@ -626,6 +789,147 @@ __device__ int ssRowSum(
     return cComp ? (L_GT - core) : core;
 }
 
+// ---------------------------------------------------------------------------
+// Smaller-side polytomy (d>3) scoring — two-pass-with-rewalk (polytomy-design.md
+// §3.8.4d).  Pass 1 walks the d-1 child ranges (×2 for A,B) to accumulate the
+// global marginals; pass 2 re-walks them and applies the per-part O(d) formula —
+// reusing the IDENTICAL arithmetic as the prefix-sum/CPU paths (trivially correct
+// in LONG/DOUBLE/INT128).  Poly nodes are rare, so the extra walk is negligible.
+//
+// Smaller-side poly CSR:
+//   ssPolyMeta[3*pn] = {treeIdx(+partTreeOffset), L_GT, freq}
+//   ssPolyBoundOffset[pn]..[pn+1]   range into ssPolyBounds, length d
+//   ssPolyBounds[base + 0..d-1]     child i = [b[i],b[i+1]); part d-1 = complement
+// ---------------------------------------------------------------------------
+template<typename ACC>
+__device__ ACC ssScorePoly(
+    int loTree, int loLeft, int loRight, int loComp, int sizeA, int aRngOff, int aRngCnt,
+    int hiTree, int hiLeft, int hiRight, int hiComp, int sizeB, int bRngOff, int bRngCnt,
+    const int* __restrict__ rangeData,
+    const int* __restrict__ ssPolyMeta,
+    const int* __restrict__ ssPolyBoundOffset,
+    const int* __restrict__ ssPolyBounds,
+    const int* __restrict__ orderings,
+    const int* __restrict__ invIndex,
+    int numPolyParts, int numTaxa, int totalN)
+{
+    ACC twoScore = (ACC) 0;
+    for (int pn = 0; pn < numPolyParts; pn++) {
+        int tGT  = ssPolyMeta[3 * pn];
+        int L_GT = ssPolyMeta[3 * pn + 1];
+        int freq = ssPolyMeta[3 * pn + 2];
+        int base = ssPolyBoundOffset[pn];
+        int d    = ssPolyBoundOffset[pn + 1] - base;
+        int b0   = ssPolyBounds[base];
+        int bD   = ssPolyBounds[base + d - 1];
+
+        int lgA = (L_GT == totalN) ? sizeA
+            : ssRowSum(tGT, L_GT, loTree, loLeft, loRight, loComp, aRngOff, aRngCnt, rangeData, orderings, invIndex, numTaxa);
+        int lgB = (L_GT == totalN) ? sizeB
+            : ssRowSum(tGT, L_GT, hiTree, hiLeft, hiRight, hiComp, bRngOff, bRngCnt, rangeData, orderings, invIndex, numTaxa);
+
+        // Pass 1: marginals over all d parts (child parts walked once).
+        ACC Sa = 0, Sb = 0, Sc = 0, Sab = 0, Sac = 0, Sbc = 0;
+        int sumA = 0, sumB = 0;
+        for (int i = 0; i < d - 1; i++) {
+            int lo = ssPolyBounds[base + i], hi = ssPolyBounds[base + i + 1], sz = hi - lo;
+            int ai = ssIntersectSide(tGT, lo, hi, loTree, loLeft, loRight, loComp, sz, aRngOff, aRngCnt, rangeData, orderings, invIndex, numTaxa);
+            int bi = ssIntersectSide(tGT, lo, hi, hiTree, hiLeft, hiRight, hiComp, sz, bRngOff, bRngCnt, rangeData, orderings, invIndex, numTaxa);
+            int ci = sz - ai - bi;
+            Sa += ai; Sb += bi; Sc += ci;
+            Sab += (ACC) ai * bi; Sac += (ACC) ai * ci; Sbc += (ACC) bi * ci;
+            sumA += ai; sumB += bi;
+        }
+        int aC = lgA - sumA, bC = lgB - sumB, szC = L_GT - (bD - b0), cC = szC - aC - bC;
+        if (aC < 0 || bC < 0 || cC < 0) continue;
+        Sa += aC; Sb += bC; Sc += cC;
+        Sab += (ACC) aC * bC; Sac += (ACC) aC * cC; Sbc += (ACC) bC * cC;
+
+        // Pass 2: re-walk child ranges + O(d) formula (complement reused).
+        ACC twoQI = (ACC) 0;
+        for (int i = 0; i < d; i++) {
+            int ai, bi, ci;
+            if (i < d - 1) {
+                int lo = ssPolyBounds[base + i], hi = ssPolyBounds[base + i + 1], sz = hi - lo;
+                ai = ssIntersectSide(tGT, lo, hi, loTree, loLeft, loRight, loComp, sz, aRngOff, aRngCnt, rangeData, orderings, invIndex, numTaxa);
+                bi = ssIntersectSide(tGT, lo, hi, hiTree, hiLeft, hiRight, hiComp, sz, bRngOff, bRngCnt, rangeData, orderings, invIndex, numTaxa);
+                ci = sz - ai - bi;
+            } else { ai = aC; bi = bC; ci = cC; }
+            ACC A = ai, B = bi, C = ci;
+            twoQI += A * (A - 1) * ((Sb - B) * (Sc - C) - Sbc + B * C);
+            twoQI += B * (B - 1) * ((Sa - A) * (Sc - C) - Sac + A * C);
+            twoQI += C * (C - 1) * ((Sa - A) * (Sb - B) - Sab + A * B);
+        }
+        twoScore += (ACC) freq * twoQI;
+    }
+    return twoScore;
+}
+
+// INT128 twin of ssScorePoly.
+__device__ I128 ssScorePolyI128(
+    int loTree, int loLeft, int loRight, int loComp, int sizeA, int aRngOff, int aRngCnt,
+    int hiTree, int hiLeft, int hiRight, int hiComp, int sizeB, int bRngOff, int bRngCnt,
+    const int* __restrict__ rangeData,
+    const int* __restrict__ ssPolyMeta,
+    const int* __restrict__ ssPolyBoundOffset,
+    const int* __restrict__ ssPolyBounds,
+    const int* __restrict__ orderings,
+    const int* __restrict__ invIndex,
+    int numPolyParts, int numTaxa, int totalN)
+{
+    I128 twoScore = i128_zero();
+    for (int pn = 0; pn < numPolyParts; pn++) {
+        int tGT  = ssPolyMeta[3 * pn];
+        int L_GT = ssPolyMeta[3 * pn + 1];
+        int freq = ssPolyMeta[3 * pn + 2];
+        int base = ssPolyBoundOffset[pn];
+        int d    = ssPolyBoundOffset[pn + 1] - base;
+        int b0   = ssPolyBounds[base];
+        int bD   = ssPolyBounds[base + d - 1];
+
+        int lgA = (L_GT == totalN) ? sizeA
+            : ssRowSum(tGT, L_GT, loTree, loLeft, loRight, loComp, aRngOff, aRngCnt, rangeData, orderings, invIndex, numTaxa);
+        int lgB = (L_GT == totalN) ? sizeB
+            : ssRowSum(tGT, L_GT, hiTree, hiLeft, hiRight, hiComp, bRngOff, bRngCnt, rangeData, orderings, invIndex, numTaxa);
+
+        long long Sa = 0, Sb = 0, Sc = 0, Sab = 0, Sac = 0, Sbc = 0;
+        int sumA = 0, sumB = 0;
+        for (int i = 0; i < d - 1; i++) {
+            int lo = ssPolyBounds[base + i], hi = ssPolyBounds[base + i + 1], sz = hi - lo;
+            int ai = ssIntersectSide(tGT, lo, hi, loTree, loLeft, loRight, loComp, sz, aRngOff, aRngCnt, rangeData, orderings, invIndex, numTaxa);
+            int bi = ssIntersectSide(tGT, lo, hi, hiTree, hiLeft, hiRight, hiComp, sz, bRngOff, bRngCnt, rangeData, orderings, invIndex, numTaxa);
+            int ci = sz - ai - bi;
+            Sa += ai; Sb += bi; Sc += ci;
+            Sab += (long long) ai * bi; Sac += (long long) ai * ci; Sbc += (long long) bi * ci;
+            sumA += ai; sumB += bi;
+        }
+        int aC = lgA - sumA, bC = lgB - sumB, szC = L_GT - (bD - b0), cC = szC - aC - bC;
+        if (aC < 0 || bC < 0 || cC < 0) continue;
+        Sa += aC; Sb += bC; Sc += cC;
+        Sab += (long long) aC * bC; Sac += (long long) aC * cC; Sbc += (long long) bC * cC;
+
+        I128 twoQI = i128_zero();
+        for (int i = 0; i < d; i++) {
+            long long ai, bi, ci;
+            if (i < d - 1) {
+                int lo = ssPolyBounds[base + i], hi = ssPolyBounds[base + i + 1], sz = hi - lo;
+                ai = ssIntersectSide(tGT, lo, hi, loTree, loLeft, loRight, loComp, sz, aRngOff, aRngCnt, rangeData, orderings, invIndex, numTaxa);
+                bi = ssIntersectSide(tGT, lo, hi, hiTree, hiLeft, hiRight, hiComp, sz, bRngOff, bRngCnt, rangeData, orderings, invIndex, numTaxa);
+                ci = sz - ai - bi;
+            } else { ai = aC; bi = bC; ci = cC; }
+            long long brA = (Sb - bi) * (Sc - ci) - Sbc + bi * ci;
+            long long brB = (Sa - ai) * (Sc - ci) - Sac + ai * ci;
+            long long brC = (Sa - ai) * (Sb - bi) - Sab + ai * bi;
+            long long wA = ai * (ai - 1), wB = bi * (bi - 1), wC = ci * (ci - 1);
+            if (wA > 0 && brA > 0) twoQI = i128_add(twoQI, i128_mul_u64((unsigned long long) wA, (unsigned long long) brA));
+            if (wB > 0 && brB > 0) twoQI = i128_add(twoQI, i128_mul_u64((unsigned long long) wB, (unsigned long long) brB));
+            if (wC > 0 && brC > 0) twoQI = i128_add(twoQI, i128_mul_u64((unsigned long long) wC, (unsigned long long) brC));
+        }
+        twoScore = i128_add(twoScore, i128_mul_scalar(twoQI, (unsigned long long) freq));
+    }
+    return twoScore;
+}
+
 // One thread per split; loop all deduplicated tripartitions (parts, 9 ints each).
 template<typename ACC>
 __global__ void computeWeightsSmallerSideKernel(
@@ -633,10 +937,14 @@ __global__ void computeWeightsSmallerSideKernel(
     const int* __restrict__ splitRangeMeta, // curBatch * 4  [aOff,aCnt,bOff,bCnt]
     const int* __restrict__ rangeData,      // resident flat [lo,hi] pairs
     const int* __restrict__ parts,     // numParts  * 9
+    const int* __restrict__ ssPolyMeta,        // numPolyParts * 3 {treeIdx,L_GT,freq}
+    const int* __restrict__ ssPolyBoundOffset, // numPolyParts + 1
+    const int* __restrict__ ssPolyBounds,      // Σ d boundary positions
     const int* __restrict__ orderings, // numGpuTrees * numTaxa
     const int* __restrict__ invIndex,  // numGpuTrees * numTaxa
     int curBatch,
     int numParts,
+    int numPolyParts,
     int numTaxa,
     int totalN,
     long long* __restrict__ twoScores)
@@ -704,6 +1012,14 @@ __global__ void computeWeightsSmallerSideKernel(
         twoScore += (ACC) freq * twoQI;
     }
 
+    // Polytomy (d>3) parts — two-pass-rewalk O(d) QI.
+    if (numPolyParts > 0)
+        twoScore += ssScorePoly<ACC>(
+            loTree, loLeft, loRight, loComp, sizeA, aRngOff, aRngCnt,
+            hiTree, hiLeft, hiRight, hiComp, sizeB, bRngOff, bRngCnt,
+            rangeData, ssPolyMeta, ssPolyBoundOffset, ssPolyBounds,
+            orderings, invIndex, numPolyParts, numTaxa, totalN);
+
     storeTwoScore(twoScores, idx, twoScore);
 }
 
@@ -713,10 +1029,14 @@ __global__ void computeWeightsSmallerSideKernelI128(
     const int* __restrict__ splitRangeMeta,
     const int* __restrict__ rangeData,
     const int* __restrict__ parts,
+    const int* __restrict__ ssPolyMeta,
+    const int* __restrict__ ssPolyBoundOffset,
+    const int* __restrict__ ssPolyBounds,
     const int* __restrict__ orderings,
     const int* __restrict__ invIndex,
     int curBatch,
     int numParts,
+    int numPolyParts,
     int numTaxa,
     int totalN,
     long long* __restrict__ twoScores)
@@ -787,6 +1107,14 @@ __global__ void computeWeightsSmallerSideKernelI128(
         }
         twoScore = i128_add(twoScore, i128_mul_scalar(twoQI, (unsigned long long) freq));
     }
+
+    // Polytomy (d>3) parts — two-pass-rewalk O(d) QI (exact 128-bit).
+    if (numPolyParts > 0)
+        twoScore = i128_add(twoScore, ssScorePolyI128(
+            loTree, loLeft, loRight, loComp, sizeA, aRngOff, aRngCnt,
+            hiTree, hiLeft, hiRight, hiComp, sizeB, bRngOff, bRngCnt,
+            rangeData, ssPolyMeta, ssPolyBoundOffset, ssPolyBounds,
+            orderings, invIndex, numPolyParts, numTaxa, totalN));
 
     storeTwoScoreI128(twoScores, idx, twoScore);
 }
@@ -861,7 +1189,9 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsGPU(
     JNIEnv* env, jclass cls,
     jintArray jSplits, jintArray jSplitRangeMeta, jintArray jRangeData,
     jintArray jNodeData, jintArray jNodeFreq, jintArray jNodeOffset,
-    jintArray jPartLeafCount, jintArray jOrderings, jintArray jInvIndex,
+    jintArray jPartLeafCount,
+    jintArray jPolyTreeOffset, jintArray jPolyBoundOffset, jintArray jPolyBounds, jintArray jPolyFreq,
+    jintArray jOrderings, jintArray jInvIndex,
     jint numSplits, jint numPartTrees, jint partTreeOffset, jint maxLeafCount,
     jint numGpuTrees, jint numTaxa,
     jint batchSizeHint, jdouble vramFraction, jint scoreMode)
@@ -884,11 +1214,17 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsGPU(
     jint* hNodeFreq      = env->GetIntArrayElements(jNodeFreq,      NULL);
     jint* hNodeOffset    = env->GetIntArrayElements(jNodeOffset,    NULL);
     jint* hPartLeafCount = env->GetIntArrayElements(jPartLeafCount, NULL);
+    jint* hPolyTreeOffset= env->GetIntArrayElements(jPolyTreeOffset,NULL);
+    jint* hPolyBoundOffset=env->GetIntArrayElements(jPolyBoundOffset,NULL);
+    jint* hPolyBounds    = env->GetIntArrayElements(jPolyBounds,    NULL);
+    jint* hPolyFreq      = env->GetIntArrayElements(jPolyFreq,      NULL);
     jint* hOrderings     = env->GetIntArrayElements(jOrderings,     NULL);
     jint* hInvIndex      = env->GetIntArrayElements(jInvIndex,      NULL);
 
     jsize rangeDataLen = env->GetArrayLength(jRangeData);  // = 2 * (#multi-range ranges)
     jsize nodeDataLen = env->GetArrayLength(jNodeData);   // = totalNodes * 3
+    jsize polyBoundsLen   = env->GetArrayLength(jPolyBounds);   // = Σ degree over poly nodes
+    jsize numPolyNodes    = env->GetArrayLength(jPolyFreq);     // = #unique poly partitions
 
     // -------------------------------------------------------------------------
     // Adaptive mode selection: keep the fast shared-memory path whenever the two
@@ -932,6 +1268,7 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsGPU(
     // -------------------------------------------------------------------------
     int *dNodeData, *dNodeFreq, *dNodeOffset, *dPartLeafCount, *dOrderings, *dInvIndex;
     int *dRangeData;   // resident flat [lo,hi] pairs for multi-range split sides
+    int *dPolyTreeOffset, *dPolyBoundOffset, *dPolyBounds, *dPolyFreq;  // polytomy CSR
 
     size_t nodeDataSz   = (size_t)nodeDataLen          * sizeof(int);
     size_t nodeFreqSz   = (size_t)(nodeDataLen / 3)    * sizeof(int);   // numUnique entries
@@ -940,6 +1277,11 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsGPU(
     size_t orderingSz   = (size_t)numGpuTrees * numTaxa * sizeof(int);
     // Guard empty (no multi-range clusters): allocate ≥1 int so cudaMalloc/pointer is valid.
     size_t rangeDataSz  = (size_t)(rangeDataLen > 0 ? rangeDataLen : 1) * sizeof(int);
+    // Polytomy CSR sizes (all ≥1 for valid pointers; empty ⇒ kernel poly loop is a no-op).
+    size_t polyTreeOffSz   = (size_t)(numPartTrees + 1)                         * sizeof(int);
+    size_t polyBoundOffSz  = (size_t)(numPolyNodes + 1)                         * sizeof(int);
+    size_t polyBoundsSz    = (size_t)(polyBoundsLen > 0 ? polyBoundsLen : 1)    * sizeof(int);
+    size_t polyFreqSz      = (size_t)(numPolyNodes  > 0 ? numPolyNodes  : 1)    * sizeof(int);
 
     cudaMalloc(&dNodeData,      nodeDataSz);
     cudaMalloc(&dNodeFreq,      nodeFreqSz);
@@ -948,6 +1290,10 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsGPU(
     cudaMalloc(&dOrderings,     orderingSz);
     cudaMalloc(&dInvIndex,      orderingSz);
     cudaMalloc(&dRangeData,     rangeDataSz);
+    cudaMalloc(&dPolyTreeOffset,  polyTreeOffSz);
+    cudaMalloc(&dPolyBoundOffset, polyBoundOffSz);
+    cudaMalloc(&dPolyBounds,      polyBoundsSz);
+    cudaMalloc(&dPolyFreq,        polyFreqSz);
 
     cudaMemcpy(dNodeData,      hNodeData,      nodeDataSz,   cudaMemcpyHostToDevice);
     cudaMemcpy(dNodeFreq,      hNodeFreq,      nodeFreqSz,   cudaMemcpyHostToDevice);
@@ -957,6 +1303,12 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsGPU(
     cudaMemcpy(dInvIndex,      hInvIndex,      orderingSz,   cudaMemcpyHostToDevice);
     if (rangeDataLen > 0)
         cudaMemcpy(dRangeData, hRangeData, (size_t)rangeDataLen * sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(dPolyTreeOffset,  hPolyTreeOffset,  polyTreeOffSz,  cudaMemcpyHostToDevice);
+    cudaMemcpy(dPolyBoundOffset, hPolyBoundOffset, polyBoundOffSz, cudaMemcpyHostToDevice);
+    if (polyBoundsLen > 0)
+        cudaMemcpy(dPolyBounds, hPolyBounds, (size_t)polyBoundsLen * sizeof(int), cudaMemcpyHostToDevice);
+    if (numPolyNodes > 0)
+        cudaMemcpy(dPolyFreq,   hPolyFreq,   (size_t)numPolyNodes  * sizeof(int), cudaMemcpyHostToDevice);
 
     // Analytical VRAM budget: show exactly what is resident on-device
     {
@@ -1017,6 +1369,7 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsGPU(
             cudaFree(dNodeData); cudaFree(dNodeFreq); cudaFree(dNodeOffset);
             cudaFree(dPartLeafCount); cudaFree(dOrderings); cudaFree(dInvIndex);
             cudaFree(dRangeData);
+            cudaFree(dPolyTreeOffset); cudaFree(dPolyBoundOffset); cudaFree(dPolyBounds); cudaFree(dPolyFreq);
             env->ReleaseIntArrayElements(jSplits,        hSplits,        JNI_ABORT);
             env->ReleaseIntArrayElements(jSplitRangeMeta,hSplitRangeMeta,JNI_ABORT);
             env->ReleaseIntArrayElements(jRangeData,     hRangeData,     JNI_ABORT);
@@ -1024,6 +1377,10 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsGPU(
             env->ReleaseIntArrayElements(jNodeFreq,      hNodeFreq,      JNI_ABORT);
             env->ReleaseIntArrayElements(jNodeOffset,    hNodeOffset,    JNI_ABORT);
             env->ReleaseIntArrayElements(jPartLeafCount, hPartLeafCount, JNI_ABORT);
+            env->ReleaseIntArrayElements(jPolyTreeOffset, hPolyTreeOffset, JNI_ABORT);
+            env->ReleaseIntArrayElements(jPolyBoundOffset,hPolyBoundOffset,JNI_ABORT);
+            env->ReleaseIntArrayElements(jPolyBounds,    hPolyBounds,    JNI_ABORT);
+            env->ReleaseIntArrayElements(jPolyFreq,      hPolyFreq,      JNI_ABORT);
             env->ReleaseIntArrayElements(jOrderings,     hOrderings,     JNI_ABORT);
             env->ReleaseIntArrayElements(jInvIndex,      hInvIndex,      JNI_ABORT);
             return NULL;   // truly infeasible → Java CPU fallback
@@ -1093,6 +1450,7 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsGPU(
         cudaFree(dNodeData); cudaFree(dNodeFreq); cudaFree(dNodeOffset);
         cudaFree(dPartLeafCount); cudaFree(dOrderings); cudaFree(dInvIndex);
         cudaFree(dRangeData); if (dSplitRangeMeta) cudaFree(dSplitRangeMeta);
+        cudaFree(dPolyTreeOffset); cudaFree(dPolyBoundOffset); cudaFree(dPolyBounds); cudaFree(dPolyFreq);
         if (dPrefix) cudaFree(dPrefix);
         env->ReleaseIntArrayElements(jSplits,        hSplits,        JNI_ABORT);
         env->ReleaseIntArrayElements(jSplitRangeMeta,hSplitRangeMeta,JNI_ABORT);
@@ -1101,6 +1459,10 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsGPU(
         env->ReleaseIntArrayElements(jNodeFreq,      hNodeFreq,      JNI_ABORT);
         env->ReleaseIntArrayElements(jNodeOffset,    hNodeOffset,    JNI_ABORT);
         env->ReleaseIntArrayElements(jPartLeafCount, hPartLeafCount, JNI_ABORT);
+        env->ReleaseIntArrayElements(jPolyTreeOffset, hPolyTreeOffset, JNI_ABORT);
+        env->ReleaseIntArrayElements(jPolyBoundOffset,hPolyBoundOffset,JNI_ABORT);
+        env->ReleaseIntArrayElements(jPolyBounds,    hPolyBounds,    JNI_ABORT);
+        env->ReleaseIntArrayElements(jPolyFreq,      hPolyFreq,      JNI_ABORT);
         env->ReleaseIntArrayElements(jOrderings,     hOrderings,     JNI_ABORT);
         env->ReleaseIntArrayElements(jInvIndex,      hInvIndex,      JNI_ABORT);
         return NULL;
@@ -1152,17 +1514,20 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsGPU(
             // Fast path: one block per split; prefix arrays in shared memory.
             if (useI128)
                 computeWeightsKernelI128<false><<<curBatch, WB_BLOCK, sharedBytes>>>(
-                    dSplits, dSplitRangeMeta, dRangeData, dNodeData, dNodeFreq, dNodeOffset, dPartLeafCount, dOrderings, dInvIndex,
+                    dSplits, dSplitRangeMeta, dRangeData, dNodeData, dNodeFreq, dNodeOffset, dPartLeafCount,
+                    dPolyTreeOffset, dPolyBoundOffset, dPolyBounds, dPolyFreq, dOrderings, dInvIndex,
                     curBatch, numPartTrees, partTreeOffset, stride, numTaxa, numTaxa,
                     NULL, dTwoScores);
             else if (useDouble)
                 computeWeightsKernel<false, double><<<curBatch, WB_BLOCK, sharedBytes>>>(
-                    dSplits, dSplitRangeMeta, dRangeData, dNodeData, dNodeFreq, dNodeOffset, dPartLeafCount, dOrderings, dInvIndex,
+                    dSplits, dSplitRangeMeta, dRangeData, dNodeData, dNodeFreq, dNodeOffset, dPartLeafCount,
+                    dPolyTreeOffset, dPolyBoundOffset, dPolyBounds, dPolyFreq, dOrderings, dInvIndex,
                     curBatch, numPartTrees, partTreeOffset, stride, numTaxa, numTaxa,
                     NULL, dTwoScores);
             else
                 computeWeightsKernel<false, long long><<<curBatch, WB_BLOCK, sharedBytes>>>(
-                    dSplits, dSplitRangeMeta, dRangeData, dNodeData, dNodeFreq, dNodeOffset, dPartLeafCount, dOrderings, dInvIndex,
+                    dSplits, dSplitRangeMeta, dRangeData, dNodeData, dNodeFreq, dNodeOffset, dPartLeafCount,
+                    dPolyTreeOffset, dPolyBoundOffset, dPolyBounds, dPolyFreq, dOrderings, dInvIndex,
                     curBatch, numPartTrees, partTreeOffset, stride, numTaxa, numTaxa,
                     NULL, dTwoScores);
         } else {
@@ -1171,17 +1536,20 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsGPU(
             int gridDim = (curBatch < maxResident) ? curBatch : maxResident;
             if (useI128)
                 computeWeightsKernelI128<true><<<gridDim, WB_BLOCK, sharedBytes>>>(
-                    dSplits, dSplitRangeMeta, dRangeData, dNodeData, dNodeFreq, dNodeOffset, dPartLeafCount, dOrderings, dInvIndex,
+                    dSplits, dSplitRangeMeta, dRangeData, dNodeData, dNodeFreq, dNodeOffset, dPartLeafCount,
+                    dPolyTreeOffset, dPolyBoundOffset, dPolyBounds, dPolyFreq, dOrderings, dInvIndex,
                     curBatch, numPartTrees, partTreeOffset, stride, numTaxa, numTaxa,
                     dPrefix, dTwoScores);
             else if (useDouble)
                 computeWeightsKernel<true, double><<<gridDim, WB_BLOCK, sharedBytes>>>(
-                    dSplits, dSplitRangeMeta, dRangeData, dNodeData, dNodeFreq, dNodeOffset, dPartLeafCount, dOrderings, dInvIndex,
+                    dSplits, dSplitRangeMeta, dRangeData, dNodeData, dNodeFreq, dNodeOffset, dPartLeafCount,
+                    dPolyTreeOffset, dPolyBoundOffset, dPolyBounds, dPolyFreq, dOrderings, dInvIndex,
                     curBatch, numPartTrees, partTreeOffset, stride, numTaxa, numTaxa,
                     dPrefix, dTwoScores);
             else
                 computeWeightsKernel<true, long long><<<gridDim, WB_BLOCK, sharedBytes>>>(
-                    dSplits, dSplitRangeMeta, dRangeData, dNodeData, dNodeFreq, dNodeOffset, dPartLeafCount, dOrderings, dInvIndex,
+                    dSplits, dSplitRangeMeta, dRangeData, dNodeData, dNodeFreq, dNodeOffset, dPartLeafCount,
+                    dPolyTreeOffset, dPolyBoundOffset, dPolyBounds, dPolyFreq, dOrderings, dInvIndex,
                     curBatch, numPartTrees, partTreeOffset, stride, numTaxa, numTaxa,
                     dPrefix, dTwoScores);
         }
@@ -1245,6 +1613,10 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsGPU(
     cudaFree(dPartLeafCount);
     cudaFree(dOrderings);
     cudaFree(dInvIndex);
+    cudaFree(dPolyTreeOffset);
+    cudaFree(dPolyBoundOffset);
+    cudaFree(dPolyBounds);
+    cudaFree(dPolyFreq);
     if (dPrefix) cudaFree(dPrefix);
 
     env->ReleaseIntArrayElements(jSplits,        hSplits,        JNI_ABORT);
@@ -1254,6 +1626,10 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsGPU(
     env->ReleaseIntArrayElements(jNodeFreq,      hNodeFreq,      JNI_ABORT);
     env->ReleaseIntArrayElements(jNodeOffset,    hNodeOffset,    JNI_ABORT);
     env->ReleaseIntArrayElements(jPartLeafCount, hPartLeafCount, JNI_ABORT);
+    env->ReleaseIntArrayElements(jPolyTreeOffset, hPolyTreeOffset, JNI_ABORT);
+    env->ReleaseIntArrayElements(jPolyBoundOffset,hPolyBoundOffset,JNI_ABORT);
+    env->ReleaseIntArrayElements(jPolyBounds,    hPolyBounds,    JNI_ABORT);
+    env->ReleaseIntArrayElements(jPolyFreq,      hPolyFreq,      JNI_ABORT);
     env->ReleaseIntArrayElements(jOrderings,     hOrderings,     JNI_ABORT);
     env->ReleaseIntArrayElements(jInvIndex,      hInvIndex,      JNI_ABORT);
 
@@ -1267,8 +1643,10 @@ JNIEXPORT jlongArray JNICALL
 Java_astralx_gpu_GPUWeightCalculator_computeWeightsSmallerSideGPU(
     JNIEnv* env, jclass cls,
     jintArray jSplits, jintArray jSplitRangeMeta, jintArray jRangeData,
-    jintArray jParts, jintArray jOrderings, jintArray jInvIndex,
-    jint numSplits, jint numParts, jint numGpuTrees, jint numTaxa, jint totalN,
+    jintArray jParts,
+    jintArray jSsPolyMeta, jintArray jSsPolyBoundOffset, jintArray jSsPolyBounds,
+    jintArray jOrderings, jintArray jInvIndex,
+    jint numSplits, jint numParts, jint numPolyParts, jint numGpuTrees, jint numTaxa, jint totalN,
     jint batchSizeHint, jdouble vramFraction, jint scoreMode)
 {
     bool useDouble = (scoreMode == 1);
@@ -1282,25 +1660,41 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsSmallerSideGPU(
     jint* hSplitRangeMeta = env->GetIntArrayElements(jSplitRangeMeta, NULL);
     jint* hRangeData = env->GetIntArrayElements(jRangeData, NULL);
     jint* hParts     = env->GetIntArrayElements(jParts,     NULL);
+    jint* hSsPolyMeta       = env->GetIntArrayElements(jSsPolyMeta,       NULL);
+    jint* hSsPolyBoundOffset= env->GetIntArrayElements(jSsPolyBoundOffset,NULL);
+    jint* hSsPolyBounds     = env->GetIntArrayElements(jSsPolyBounds,     NULL);
     jint* hOrderings = env->GetIntArrayElements(jOrderings, NULL);
     jint* hInvIndex  = env->GetIntArrayElements(jInvIndex,  NULL);
-    jsize rangeDataLen = env->GetArrayLength(jRangeData);
+    jsize rangeDataLen   = env->GetArrayLength(jRangeData);
+    jsize ssPolyBoundsLen= env->GetArrayLength(jSsPolyBounds);
 
-    // --- Upload static data once (parts, orderings, invIndex, rangeData) ---
+    // --- Upload static data once (parts, poly CSR, orderings, invIndex, rangeData) ---
     int *dParts, *dOrderings, *dInvIndex, *dRangeData;
+    int *dSsPolyMeta, *dSsPolyBoundOffset, *dSsPolyBounds;
     size_t partsSz    = (size_t)numParts  * 9 * sizeof(int);
     size_t orderingSz = (size_t)numGpuTrees * numTaxa * sizeof(int);
     size_t rangeDataSz = (size_t)(rangeDataLen > 0 ? rangeDataLen : 1) * sizeof(int);
+    size_t ssPolyMetaSz   = (size_t)(numPolyParts > 0 ? numPolyParts * 3 : 1) * sizeof(int);
+    size_t ssPolyBoundOffSz = (size_t)(numPolyParts + 1) * sizeof(int);
+    size_t ssPolyBoundsSz   = (size_t)(ssPolyBoundsLen > 0 ? ssPolyBoundsLen : 1) * sizeof(int);
 
     cudaMalloc(&dParts,     partsSz);
     cudaMalloc(&dOrderings, orderingSz);
     cudaMalloc(&dInvIndex,  orderingSz);
     cudaMalloc(&dRangeData, rangeDataSz);
+    cudaMalloc(&dSsPolyMeta,       ssPolyMetaSz);
+    cudaMalloc(&dSsPolyBoundOffset,ssPolyBoundOffSz);
+    cudaMalloc(&dSsPolyBounds,     ssPolyBoundsSz);
     cudaMemcpy(dParts,     hParts,     partsSz,    cudaMemcpyHostToDevice);
     cudaMemcpy(dOrderings, hOrderings, orderingSz, cudaMemcpyHostToDevice);
     cudaMemcpy(dInvIndex,  hInvIndex,  orderingSz, cudaMemcpyHostToDevice);
     if (rangeDataLen > 0)
         cudaMemcpy(dRangeData, hRangeData, (size_t)rangeDataLen * sizeof(int), cudaMemcpyHostToDevice);
+    if (numPolyParts > 0) {
+        cudaMemcpy(dSsPolyMeta,   hSsPolyMeta,   (size_t)numPolyParts * 3 * sizeof(int), cudaMemcpyHostToDevice);
+        cudaMemcpy(dSsPolyBounds, hSsPolyBounds, (size_t)ssPolyBoundsLen  * sizeof(int), cudaMemcpyHostToDevice);
+    }
+    cudaMemcpy(dSsPolyBoundOffset, hSsPolyBoundOffset, ssPolyBoundOffSz, cudaMemcpyHostToDevice);
 
     {
         size_t staticTotal = partsSz + 2 * orderingSz;
@@ -1362,11 +1756,15 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsSmallerSideGPU(
     if (batchSize <= 0 || dSplits == NULL || dTwoScores == NULL) {
         fprintf(stderr, "[ASTRAL-X GPU] FATAL: cannot allocate GPU batch buffers\n");
         cudaFree(dParts); cudaFree(dOrderings); cudaFree(dInvIndex); cudaFree(dRangeData);
+        cudaFree(dSsPolyMeta); cudaFree(dSsPolyBoundOffset); cudaFree(dSsPolyBounds);
         if (dSplitRangeMeta) cudaFree(dSplitRangeMeta);
         env->ReleaseIntArrayElements(jSplits,    hSplits,    JNI_ABORT);
         env->ReleaseIntArrayElements(jSplitRangeMeta, hSplitRangeMeta, JNI_ABORT);
         env->ReleaseIntArrayElements(jRangeData, hRangeData, JNI_ABORT);
         env->ReleaseIntArrayElements(jParts,     hParts,     JNI_ABORT);
+        env->ReleaseIntArrayElements(jSsPolyMeta,       hSsPolyMeta,       JNI_ABORT);
+        env->ReleaseIntArrayElements(jSsPolyBoundOffset,hSsPolyBoundOffset,JNI_ABORT);
+        env->ReleaseIntArrayElements(jSsPolyBounds,     hSsPolyBounds,     JNI_ABORT);
         env->ReleaseIntArrayElements(jOrderings, hOrderings, JNI_ABORT);
         env->ReleaseIntArrayElements(jInvIndex,  hInvIndex,  JNI_ABORT);
         return NULL;
@@ -1393,16 +1791,19 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsSmallerSideGPU(
         int gridSize = (curBatch + blockSize - 1) / blockSize;
         if (useI128)
             computeWeightsSmallerSideKernelI128<<<gridSize, blockSize>>>(
-                dSplits, dSplitRangeMeta, dRangeData, dParts, dOrderings, dInvIndex,
-                curBatch, numParts, numTaxa, totalN, dTwoScores);
+                dSplits, dSplitRangeMeta, dRangeData, dParts,
+                dSsPolyMeta, dSsPolyBoundOffset, dSsPolyBounds, dOrderings, dInvIndex,
+                curBatch, numParts, numPolyParts, numTaxa, totalN, dTwoScores);
         else if (useDouble)
             computeWeightsSmallerSideKernel<double><<<gridSize, blockSize>>>(
-                dSplits, dSplitRangeMeta, dRangeData, dParts, dOrderings, dInvIndex,
-                curBatch, numParts, numTaxa, totalN, dTwoScores);
+                dSplits, dSplitRangeMeta, dRangeData, dParts,
+                dSsPolyMeta, dSsPolyBoundOffset, dSsPolyBounds, dOrderings, dInvIndex,
+                curBatch, numParts, numPolyParts, numTaxa, totalN, dTwoScores);
         else
             computeWeightsSmallerSideKernel<long long><<<gridSize, blockSize>>>(
-                dSplits, dSplitRangeMeta, dRangeData, dParts, dOrderings, dInvIndex,
-                curBatch, numParts, numTaxa, totalN, dTwoScores);
+                dSplits, dSplitRangeMeta, dRangeData, dParts,
+                dSsPolyMeta, dSsPolyBoundOffset, dSsPolyBounds, dOrderings, dInvIndex,
+                curBatch, numParts, numPolyParts, numTaxa, totalN, dTwoScores);
 
         cudaError_t err = cudaDeviceSynchronize();
         if (err != cudaSuccess) {
@@ -1448,11 +1849,17 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsSmallerSideGPU(
     cudaFree(dOrderings);
     cudaFree(dInvIndex);
     cudaFree(dRangeData);
+    cudaFree(dSsPolyMeta);
+    cudaFree(dSsPolyBoundOffset);
+    cudaFree(dSsPolyBounds);
 
     env->ReleaseIntArrayElements(jSplits,    hSplits,    JNI_ABORT);
     env->ReleaseIntArrayElements(jSplitRangeMeta, hSplitRangeMeta, JNI_ABORT);
     env->ReleaseIntArrayElements(jRangeData, hRangeData, JNI_ABORT);
     env->ReleaseIntArrayElements(jParts,     hParts,     JNI_ABORT);
+    env->ReleaseIntArrayElements(jSsPolyMeta,       hSsPolyMeta,       JNI_ABORT);
+    env->ReleaseIntArrayElements(jSsPolyBoundOffset,hSsPolyBoundOffset,JNI_ABORT);
+    env->ReleaseIntArrayElements(jSsPolyBounds,     hSsPolyBounds,     JNI_ABORT);
     env->ReleaseIntArrayElements(jOrderings, hOrderings, JNI_ABORT);
     env->ReleaseIntArrayElements(jInvIndex,  hInvIndex,  JNI_ABORT);
 

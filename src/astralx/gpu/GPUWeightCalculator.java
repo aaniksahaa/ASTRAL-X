@@ -89,6 +89,12 @@ public class GPUWeightCalculator {
         int[] nodeFreq,
         int[] nodeOffset,
         int[] partLeafCount,
+        // Polytomy (d>3) CSR — empty (polyTreeOffset all-zero, others length 0/1)
+        // when there are no polytomous partitions ⇒ kernel poly loop is a no-op.
+        int[] polyTreeOffset,   // numPartTrees+1: CSR row pointers (poly nodes bucketed by tree)
+        int[] polyBoundOffset,  // numPoly+1: range into polyBounds (length d) per poly node
+        int[] polyBounds,       // concatenated boundary lists b[0..d-1] (child i = [b[i],b[i+1]))
+        int[] polyFreq,         // numPoly: occurrence count per unique poly partition
         int[] orderings,
         int[] invIndex,
         int numSplits,
@@ -138,10 +144,15 @@ public class GPUWeightCalculator {
         int[] splitRangeMeta,   // numSplits*4: [aRngOff,aRngCnt,bRngOff,bRngCnt]; cnt 0 = single-range
         int[] rangeData,        // flat [lo,hi] pairs for multi-range split sides (resident)
         int[] parts,
+        // Polytomy (d>3) CSR — empty when no polytomous partitions.
+        int[] ssPolyMeta,       // numPolyParts*3: [treeIdx(+offset), L_GT, freq]
+        int[] ssPolyBoundOffset,// numPolyParts+1: range into ssPolyBounds (length d) per poly node
+        int[] ssPolyBounds,     // concatenated boundary lists b[0..d-1]
         int[] orderings,
         int[] invIndex,
         int numSplits,
         int numParts,
+        int numPolyParts,
         int numGpuTrees,
         int numTaxa,
         int totalN,

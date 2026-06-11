@@ -34,6 +34,10 @@ public class PartitionTable {
 
     private final Map<PartitionHash, Entry> table = new HashMap<>();
     private final int m;
+    private boolean hasPoly = false;   // true once any d>3 (polytomous) partition is stored
+
+    /** True iff any extracted partition is polytomous (d > 3). */
+    public boolean hasPolytomousPartitions() { return hasPoly; }
 
     // -------------------------------------------------------------------------
 
@@ -70,11 +74,48 @@ public class PartitionTable {
     private void extractNode(TreeNode node, int ti, int L,
                               PrefixHashArrays pref, int[] count) {
         if (node.isLeaf()) return;
-        extractNode(node.left,  ti, L, pref, count);
-        extractNode(node.right, ti, L, pref, count);
+        if (node.isPolytomous()) {
+            for (TreeNode child : node.children) extractNode(child, ti, L, pref, count);
+        } else {
+            extractNode(node.left,  ti, L, pref, count);
+            extractNode(node.right, ti, L, pref, count);
+        }
 
-        if (node.isRoot()) return;  // root gives bipartition with empty part3 -- skip
+        if (node.isRoot()) return;  // root gives bipartition with empty complement -- skip
 
+        // ── Polytomous node: d = k+1 partition (k child subtrees + complement) ──
+        if (node.isPolytomous()) {
+            int k = node.children.length;
+            int d = k + 1;
+            ClusterHash[] hashes = new ClusterHash[d];
+            int[] sizes      = new int[d];
+            int[] partStarts = new int[k];
+            int[] partEnds   = new int[k];
+            for (int i = 0; i < k; i++) {
+                TreeNode c = node.children[i];
+                int cs = c.rangeStart, ce = c.rangeEnd, szi = ce - cs;
+                partStarts[i] = cs; partEnds[i] = ce; sizes[i] = szi;
+                hashes[i] = buildHash(ti, cs, ce, false, szi, pref);
+            }
+            int szC = L - (node.rangeEnd - node.rangeStart);   // complement (Lg-relative)
+            if (szC == 0) return;                               // root only — already skipped
+            sizes[d - 1]  = szC;
+            hashes[d - 1] = buildHash(ti, node.rangeStart, node.rangeEnd, true, szC, pref);
+
+            PartitionHash ph = new PartitionHash(hashes);
+            Entry existing = table.get(ph);
+            if (existing != null) {
+                existing.frequency++;
+            } else {
+                Partition p = new Partition(hashes, sizes, partStarts, partEnds, ti);
+                table.put(ph, new Entry(ph, p));
+                hasPoly = true;
+            }
+            count[0]++;
+            return;
+        }
+
+        // ── Binary node (unchanged) ──
         int lStart = node.left.rangeStart,  lEnd = node.left.rangeEnd;
         int rStart = node.right.rangeStart, rEnd = node.right.rangeEnd;
         // part3 is the complement of node's full range [node.rangeStart, node.rangeEnd)
