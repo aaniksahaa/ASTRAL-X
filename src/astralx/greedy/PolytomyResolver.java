@@ -549,12 +549,21 @@ public final class PolytomyResolver {
             int gi = repAtPos[node.rangeStart];
             return (gi >= 0) ? (1 << gi) : 0;
         }
-        int leftBM  = walkCollect(node.left,  false, repAtPos, d, out);
-        int rightBM = walkCollect(node.right, false, repAtPos, d, out);
-        int bm = leftBM | rightBM;
-        // Skip binary root (matches the `isRoot && childCount == 2` skip in Utils.getBitsets)
+        int bm = 0, legit = 0;
+        if (node.isPolytomous()) {              // n-ary gene-tree node: union over all children
+            for (TreeNode c : node.children) {
+                int cbm = walkCollect(c, false, repAtPos, d, out);
+                bm |= cbm;
+                if (cbm != 0) legit++;
+            }
+        } else {
+            int leftBM  = walkCollect(node.left,  false, repAtPos, d, out);
+            int rightBM = walkCollect(node.right, false, repAtPos, d, out);
+            bm = leftBM | rightBM;
+            legit = (leftBM != 0 ? 1 : 0) + (rightBM != 0 ? 1 : 0);
+        }
+        // Skip root (matches the `isRoot` skip in Utils.getBitsets)
         if (isRoot) return bm;
-        int legit = (leftBM != 0 ? 1 : 0) + (rightBM != 0 ? 1 : 0);
         if (legit < 2) return bm;
         int sz = Integer.bitCount(bm);
         if (sz < 2 || sz >= d - 1) return bm;
@@ -886,12 +895,21 @@ public final class PolytomyResolver {
             if (gi >= 0) bm[gi >>> 6] |= (1L << (gi & 63));
             return bm;
         }
-        long[] leftBM  = walkCollectLong(node.left,  false, repAtPos, d, W, out);
-        long[] rightBM = walkCollectLong(node.right, false, repAtPos, d, W, out);
         long[] bm = new long[W];
-        for (int k = 0; k < W; k++) bm[k] = leftBM[k] | rightBM[k];
+        int legit = 0;
+        if (node.isPolytomous()) {               // n-ary gene-tree node
+            for (TreeNode c : node.children) {
+                long[] cbm = walkCollectLong(c, false, repAtPos, d, W, out);
+                for (int k = 0; k < W; k++) bm[k] |= cbm[k];
+                if (nonZeroL(cbm)) legit++;
+            }
+        } else {
+            long[] leftBM  = walkCollectLong(node.left,  false, repAtPos, d, W, out);
+            long[] rightBM = walkCollectLong(node.right, false, repAtPos, d, W, out);
+            for (int k = 0; k < W; k++) bm[k] = leftBM[k] | rightBM[k];
+            legit = (nonZeroL(leftBM) ? 1 : 0) + (nonZeroL(rightBM) ? 1 : 0);
+        }
         if (isRoot) return bm;
-        int legit = (nonZeroL(leftBM) ? 1 : 0) + (nonZeroL(rightBM) ? 1 : 0);
         if (legit < 2) return bm;
         int sz = popcountL(bm);
         if (sz < 2 || sz >= d - 1) return bm;

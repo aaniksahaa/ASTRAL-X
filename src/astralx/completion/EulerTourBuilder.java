@@ -240,6 +240,17 @@ public class EulerTourBuilder {
 
         if (node.isLeaf()) {
             firstOcc[node.taxonId] = pos;
+        } else if (node.isPolytomous()) {
+            // n-ary: enter, recurse child[0], then INTERMEDIATE + recurse child[i] for i≥1.
+            // The intermediate (depth of this node) between consecutive children preserves
+            // the RMQ-LCA property for any degree (polytomy-design.md / §HINT above).
+            TreeNode[] ch = node.children;
+            buildDFS(ch[0], depth + 1, depths, firstOcc, cursor);
+            for (int i = 1; i < ch.length; i++) {
+                int retPos = cursor[0]++;
+                depths[retPos] = (short) depth;
+                buildDFS(ch[i], depth + 1, depths, firstOcc, cursor);
+            }
         } else {
             buildDFS(node.left, depth + 1, depths, firstOcc, cursor);
             int retPos = cursor[0]++;
@@ -254,7 +265,15 @@ public class EulerTourBuilder {
      */
     private static int computeS(TreeNode node,
                                  java.util.IdentityHashMap<TreeNode, double[]> sf) {
-        int s = node.isLeaf() ? 1 : (computeS(node.left, sf) + computeS(node.right, sf));
+        int s;
+        if (node.isLeaf()) {
+            s = 1;
+        } else if (node.isPolytomous()) {
+            s = 0;
+            for (TreeNode c : node.children) s += computeS(c, sf);
+        } else {
+            s = computeS(node.left, sf) + computeS(node.right, sf);
+        }
         sf.put(node, new double[] { (double) s, 0.0 });
         return s;
     }
@@ -278,8 +297,12 @@ public class EulerTourBuilder {
         }
         entry[1] = F;
         if (!node.isLeaf()) {
-            computeF(node.left,  kt, s, F, sf);
-            computeF(node.right, kt, s, F, sf);
+            if (node.isPolytomous()) {
+                for (TreeNode c : node.children) computeF(c, kt, s, F, sf);
+            } else {
+                computeF(node.left,  kt, s, F, sf);
+                computeF(node.right, kt, s, F, sf);
+            }
         }
     }
 
@@ -310,6 +333,31 @@ public class EulerTourBuilder {
 
         if (node.isLeaf()) {
             // Payloads at leaf positions are placeholders (never selected).
+            return;
+        }
+
+        if (node.isPolytomous()) {
+            // n-ary: enter, recurse child[0]; for each i≥1, an INTERMEDIATE between
+            // child[i-1] and child[i] carries their (s,F), then recurse child[i].
+            // (The similarity bridge query is left-biased, so for n-ary nodes it
+            // selects one intermediate — an approximation, never a crash.)
+            TreeNode[] ch = node.children;
+            emitPayloads(ch[0], sf, eulerF,
+                         eulerLeftChildS, eulerLeftChildF,
+                         eulerRightChildS, eulerRightChildF, cursor);
+            for (int i = 1; i < ch.length; i++) {
+                int retPos = cursor[0]++;
+                eulerF[retPos] = entry[1];
+                double[] Lc = sf.get(ch[i - 1]);
+                double[] Rc = sf.get(ch[i]);
+                eulerLeftChildS [retPos] = (short) (int) Lc[0];
+                eulerLeftChildF [retPos] = Lc[1];
+                eulerRightChildS[retPos] = (short) (int) Rc[0];
+                eulerRightChildF[retPos] = Rc[1];
+                emitPayloads(ch[i], sf, eulerF,
+                             eulerLeftChildS, eulerLeftChildF,
+                             eulerRightChildS, eulerRightChildF, cursor);
+            }
             return;
         }
 
