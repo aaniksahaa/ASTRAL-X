@@ -260,6 +260,9 @@ public final class PolytomyResolver {
     public static final int STEPB_MAX               = 100;
     public static final int STEPB_IMPROVEMENT_REWARD = 2;
     public static final int STEPB_MIN_FREQ          = 5;
+    /** Quadratic NN-ball emission fires only for thresholdIndex < this (ASTRAL-MP
+     *  GREEDY_DIST_ADDITTION_LAST_THRESHOLD_INDX = 3): the loosest 3 thresholds. */
+    public static final int STEPB_QUADRATIC_MAX_THRESHOLD_INDEX = 3;
 
     /**
      * Step B — sampleAndResolve.  Runs {@link #STEPB_DEFAULT_RUNS} base rounds
@@ -296,7 +299,7 @@ public final class PolytomyResolver {
         int j = 0;
         while (j < STEPB_DEFAULT_RUNS + adaptBonus) {
             int beforeSize = buffer.size();
-            stepBRound(task, geneTrees, tours, buffer, numTaxa, rng, sim);
+            stepBRound(task, geneTrees, tours, buffer, numTaxa, rng, sim, j);
             int newThisRound = buffer.size() - beforeSize;
             totalNewSignatures += newThisRound;
             if (newThisRound >= STEPB_MIN_FREQ && adaptBonus < STEPB_MAX) {
@@ -332,7 +335,7 @@ public final class PolytomyResolver {
     private static void stepBRound(PolytomyTask task, List<Tree> geneTrees,
                                     EulerTourBuilder.TourData[] tours,
                                     EmissionBuffer buffer, int numTaxa, Random rng,
-                                    SimilarityMatrix sim) {
+                                    SimilarityMatrix sim, int roundIndex) {
         int d = task.numGroups;
         int[] aCons = task.tree.aCons();
         int allBits = (1 << d) - 1;
@@ -405,14 +408,25 @@ public final class PolytomyResolver {
         //              back via group ranges.  This matches ASTRAL-MP's
         //              {@code resolveByDistance} call from sampleAndResolve.
         if (sim != null) {
-            stepBResolveByDistance(task, reps, sim, numTaxa, buffer);
+            stepBResolveByDistance(task, reps, sim, numTaxa, buffer, roundIndex);
         }
     }
 
-    /** UPGMA on the d×d sampled-rep similarity matrix; emit dendrogram bipartitions. */
+    /**
+     * resolveByDistance — on the d×d induced similarity matrix over this round's
+     * sampled representatives (one taxon per arm; {@code inducedSim[i][j] =
+     * sim(rep_i, rep_j)}, the same submatrix ASTRAL-MP's {@code getInducedMatrix}
+     * builds).  Two families of emissions, mirroring ASTRAL-MP:
+     *   (a) the induced UPGMA tree's bipartitions ({@code inferTreeBitsets}); and
+     *   (b) the "quadratic" nearest-neighbour balls ({@code getQuadraticBitsets}) —
+     *       gated exactly like ASTRAL-MP: only for the loosest thresholds
+     *       ({@code thresholdIndex < STEPB_QUADRATIC_MAX_THRESHOLD_INDEX}) and the
+     *       non-bonus rounds ({@code roundIndex < STEPB_DEFAULT_RUNS}).
+     */
     private static void stepBResolveByDistance(PolytomyTask task, int[] reps,
                                                  SimilarityMatrix sim,
-                                                 int numTaxa, EmissionBuffer buffer) {
+                                                 int numTaxa, EmissionBuffer buffer,
+                                                 int roundIndex) {
         int d = task.numGroups;
         double[] inducedSim = new double[d * d];
         for (int i = 0; i < d; i++) {
@@ -426,8 +440,49 @@ public final class PolytomyResolver {
                 inducedSim[j * d + i] = s;
             }
         }
+        // (a) induced UPGMA tree
         Tree dendro = MiniUPGMA.build(inducedSim, d, /*treeIndex*/0);
         walkDendroAsRepBitmap(dendro.root, dendro.postorderArray, task, numTaxa, buffer);
+
+        // (b) quadratic nearest-neighbour balls (ASTRAL-MP getQuadraticBitsets), gated.
+        if (task.thresholdIndex < STEPB_QUADRATIC_MAX_THRESHOLD_INDEX
+                && roundIndex < STEPB_DEFAULT_RUNS) {
+            emitQuadraticBalls(task, reps, inducedSim, d, numTaxa, buffer);
+        }
+    }
+
+    /**
+     * ASTRAL-MP {@code getQuadraticBitsets} on the induced rep matrix: for each
+     * arm {@code i}, emit the nested "balls" {i}, {i+nearest}, {i+2 nearest}, …,
+     * where neighbours are ordered by descending similarity to {@code i} (ties by
+     * arm index — matching ASTRAL-MP's {@code -Float.compare} + index tie-break).
+     * Each ball (a subset of arms) is emitted via {@link #emitInducedSplit}, which
+     * expands it to the arm union (a multi-range cluster), size-filters the trivial
+     * balls, and dedups by signature. O(d² log d) per call; d ≤ 31.
+     */
+    private static void emitQuadraticBalls(PolytomyTask task, int[] reps,
+                                            double[] inducedSim, int d,
+                                            int numTaxa, EmissionBuffer buffer) {
+        // valid arm indices (skip absent arms)
+        Integer[] order = new Integer[d];
+        for (int i = 0; i < d; i++) {
+            if (reps[i] < 0) continue;
+            int rowBase = i * d;
+            int cnt = 0;
+            for (int j = 0; j < d; j++) if (j != i && reps[j] >= 0) order[cnt++] = j;
+            final int fi = i;
+            // nearest first: higher induced similarity to i, tie-break smaller index
+            java.util.Arrays.sort(order, 0, cnt, (a, b) -> {
+                int c = Double.compare(inducedSim[rowBase + b], inducedSim[rowBase + a]);
+                return (c != 0) ? c : Integer.compare(a, b);
+            });
+            int bm = 1 << fi;                       // ball rooted at arm i (i first)
+            emitInducedSplit(bm, task, numTaxa, buffer);
+            for (int k = 0; k < cnt; k++) {
+                bm |= (1 << order[k]);
+                emitInducedSplit(bm, task, numTaxa, buffer);
+            }
+        }
     }
 
     /** Walk dendrogram; for each non-root internal node, emit the rep-bitmap as a bipartition. */

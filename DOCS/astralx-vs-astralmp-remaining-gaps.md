@@ -34,7 +34,18 @@ Per polytomy, ASTRAL-MP does (WQDataCollection.java:1206–1260):
 
 ### The three concrete things ASTRAL-X omits here
 
-**D1 — Quadratic "nearest-neighbour ball" bitsets (default-on, not just SLOW).** — **likely #1 culprit**
+**D1 — Quadratic "nearest-neighbour ball" bitsets — ✅ IMPLEMENTED** (was likely #1 culprit).
+`PolytomyResolver.emitQuadraticBalls` now reproduces `getQuadraticBitsets` on the induced
+rep matrix: for each arm, the nested k-NN balls (rep-to-rep similarity, descending, index
+tie-break) → each expanded to an arm-union **multi-range cluster** via the validated
+`emitInducedSplit`. Gated exactly like ASTRAL-MP — `thresholdIndex < 3 && round < STEPB_DEFAULT_RUNS`
+(the `childCount ≤ polytomySizeLimit` clause is already enforced by the polytomy pool + the
+d≤31 cap). Reuses the `d×d` induced matrix already built in `stepBResolveByDistance` and the
+existing multi-range emission path, so generation is `O(d² log d)` per (polytomy, round),
+d≤31 — bounded and cheaper per candidate than ASTRAL-MP. Validated: 13/13 regression; all
+emissions (with the similarity matrix on, so the balls fire) pass size + ASTRAL-MP
+signature-fidelity checks; full GPU pipeline runs end-to-end with the enriched X.
+*Original description (for reference):*
 `resolveByDistance` adds `inducedMatrix.getQuadraticBitsets()` whenever
 `quadratic = (SLOW || (th < GREEDY_DIST_ADDITTION_LAST_THRESHOLD_INDX && j < GREEDY_ADDITION_DEFAULT_RUNS))
 && childCount ≤ polytomySizeLimit` (loop at :1245). With `GREEDY_DIST_ADDITTION_LAST_THRESHOLD_INDX = 3`,
