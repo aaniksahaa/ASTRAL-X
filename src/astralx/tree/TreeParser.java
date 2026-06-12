@@ -53,17 +53,26 @@ public class TreeParser {
         int n = registry.size();
         Logging.info("Registered %d unique taxa", n);
 
-        // Pass 2 – parse each tree
+        // Pass 2 – parse each tree.  rootingCounts[0] = #trees rooted from a 3-furcation
+        // (unrooted binary), [1] = #trees with a ≥4-furcation polytomy at the root.
+        // These are tallied (not logged per-tree — that floods on large inputs) and
+        // summarized once below.
         List<Tree> trees = new ArrayList<>(lines.size());
+        int[] rootingCounts = {0, 0};
         ProgressBar parseBar = new ProgressBar("Parsing trees", lines.size());
         for (int i = 0; i < lines.size(); i++) {
-            trees.add(parseNewick(lines.get(i), i, registry));
+            trees.add(parseNewick(lines.get(i), i, registry, rootingCounts));
             parseBar.update(i + 1);
         }
         parseBar.done();
 
         long ms = (System.nanoTime() - t0) / 1_000_000;
         Logging.info("Parsed %d gene trees in %d ms", trees.size(), ms);
+        if (rootingCounts[0] > 0 || rootingCounts[1] > 0) {
+            Logging.info("Rooted unrooted input at the root: %d tree(s) with a 3-furcation "
+                + "(unrooted binary), %d tree(s) with a ≥4-furcation polytomy — rooted arbitrarily "
+                + "(ASTRAL is rooting-agnostic).", rootingCounts[0], rootingCounts[1]);
+        }
 
         // Per-tree debug log -- cap at 5 trees to avoid flooding on large inputs
         if (Logging.isDebug()) {
@@ -139,7 +148,7 @@ public class TreeParser {
     /** Sentinel object pushed onto the stack to mark an open parenthesis. */
     private static final Object SENTINEL = new Object();
 
-    private static Tree parseNewick(String s, int treeIdx, TaxonRegistry reg) {
+    private static Tree parseNewick(String s, int treeIdx, TaxonRegistry reg, int[] rootingCounts) {
         int n = s.length(), totalTaxa = reg.size();
         Deque<Object> stack = new ArrayDeque<>();   // contains RawNode or SENTINEL
         int i = 0;
@@ -201,8 +210,8 @@ public class TreeParser {
             throw new RuntimeException("Tree " + treeIdx + ": root is a leaf");
         }
 
-        // Validate arity and root unrooted trees; convert RawNode → binary TreeNode
-        TreeNode root = validateAndConvert(rawRoot, treeIdx, true);
+        // Validate arity and root unrooted trees; convert RawNode → TreeNode
+        TreeNode root = validateAndConvert(rawRoot, treeIdx, true, rootingCounts);
 
         // Assign ranges and build postorderArray in one left-to-right DFS
         int[] postorderArray = new int[reg.size()]; // upper bound; trimmed below
@@ -234,7 +243,8 @@ public class TreeParser {
      *   isRoot=false, ≥3 children → polytomous internal node (children[] array).
      *   leaf                      → leaf node.
      */
-    private static TreeNode validateAndConvert(RawNode raw, int treeIdx, boolean isRoot) {
+    private static TreeNode validateAndConvert(RawNode raw, int treeIdx, boolean isRoot,
+                                               int[] rootingCounts) {
         if (raw.isLeaf()) {
             TreeNode leaf = new TreeNode();
             leaf.taxonId = raw.taxonId;
@@ -245,8 +255,8 @@ public class TreeParser {
 
         if (nc == 2) {
             TreeNode node = new TreeNode();
-            node.left  = validateAndConvert(raw.children.get(0), treeIdx, false);
-            node.right = validateAndConvert(raw.children.get(1), treeIdx, false);
+            node.left  = validateAndConvert(raw.children.get(0), treeIdx, false, rootingCounts);
+            node.right = validateAndConvert(raw.children.get(1), treeIdx, false, rootingCounts);
             node.left.parent  = node;
             node.right.parent = node;
             return node;
@@ -255,11 +265,11 @@ public class TreeParser {
             // Unrooted binary tree: 3-furcation at root.
             // Root by isolating children[0] as left and joining children[1]+children[2]
             // into a new binary right node.  Rooting-agnostic ⇒ any choice is fine.
-            Logging.info("Tree %d: unrooted input (3-furcation at root) — rooting arbitrarily", treeIdx);
+            rootingCounts[0]++;   // tallied; summarized once in parseGeneTrees (no per-tree log)
 
-            TreeNode c0 = validateAndConvert(raw.children.get(0), treeIdx, false);
-            TreeNode c1 = validateAndConvert(raw.children.get(1), treeIdx, false);
-            TreeNode c2 = validateAndConvert(raw.children.get(2), treeIdx, false);
+            TreeNode c0 = validateAndConvert(raw.children.get(0), treeIdx, false, rootingCounts);
+            TreeNode c1 = validateAndConvert(raw.children.get(1), treeIdx, false, rootingCounts);
+            TreeNode c2 = validateAndConvert(raw.children.get(2), treeIdx, false, rootingCounts);
 
             TreeNode inner = new TreeNode();
             inner.left  = c1;
@@ -278,15 +288,14 @@ public class TreeParser {
             // Unrooted polytomy at root (degree ≥ 4).  Isolate child[0] as the root's
             // left; the remaining nc-1 children form a polytomous right child whose
             // complement is exactly child[0] — recovering the full nc-way partition.
-            Logging.info("Tree %d: unrooted input (%d-furcation at root) — polytomy, rooting arbitrarily",
-                treeIdx, nc);
+            rootingCounts[1]++;   // tallied; summarized once in parseGeneTrees (no per-tree log)
 
-            TreeNode c0 = validateAndConvert(raw.children.get(0), treeIdx, false);
+            TreeNode c0 = validateAndConvert(raw.children.get(0), treeIdx, false, rootingCounts);
 
             TreeNode inner = new TreeNode();
             inner.children = new TreeNode[nc - 1];
             for (int j = 1; j < nc; j++) {
-                TreeNode cj = validateAndConvert(raw.children.get(j), treeIdx, false);
+                TreeNode cj = validateAndConvert(raw.children.get(j), treeIdx, false, rootingCounts);
                 inner.children[j - 1] = cj;
                 cj.parent = inner;
             }
@@ -305,7 +314,7 @@ public class TreeParser {
             TreeNode node = new TreeNode();
             node.children = new TreeNode[nc];
             for (int j = 0; j < nc; j++) {
-                TreeNode cj = validateAndConvert(raw.children.get(j), treeIdx, false);
+                TreeNode cj = validateAndConvert(raw.children.get(j), treeIdx, false, rootingCounts);
                 node.children[j] = cj;
                 cj.parent = node;
             }
