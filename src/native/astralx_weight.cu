@@ -59,7 +59,9 @@
  */
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <time.h>
+#include <unistd.h>
 #include <cuda_runtime.h>
 #include <jni.h>
 
@@ -496,7 +498,8 @@ __global__ void computeWeightsKernel(
     int numTaxa,
     int totalN,
     int* __restrict__ gPrefix,             // global prefix pool (GLOBAL only)
-    long long* __restrict__ twoScores)
+    long long* __restrict__ twoScores,
+    int* __restrict__ dProgress)           // splits-completed counter (host-polled)
 {
     extern __shared__ int smem[];
     int tid      = threadIdx.x;
@@ -511,6 +514,7 @@ __global__ void computeWeightsKernel(
                        polyTreeOffset, polyBoundOffset, polyBounds, polyFreq,
                        orderings, invIndex, numPartTrees, partTreeOffset,
                        numTaxa, totalN, pA, pB, scan, tid, nthreads, twoScores);
+            if (tid == 0 && dProgress) atomicAdd(dProgress, 1);   // one per finished split
         }
     } else {
         int* pA   = smem;
@@ -522,6 +526,7 @@ __global__ void computeWeightsKernel(
                        polyTreeOffset, polyBoundOffset, polyBounds, polyFreq,
                        orderings, invIndex, numPartTrees, partTreeOffset,
                        numTaxa, totalN, pA, pB, scan, tid, nthreads, twoScores);
+            if (tid == 0 && dProgress) atomicAdd(dProgress, 1);   // one per finished split
         }
     }
 }
@@ -674,7 +679,8 @@ __global__ void computeWeightsKernelI128(
     int numTaxa,
     int totalN,
     int* __restrict__ gPrefix,
-    long long* __restrict__ twoScores)
+    long long* __restrict__ twoScores,
+    int* __restrict__ dProgress)
 {
     extern __shared__ int smem[];
     int tid      = threadIdx.x;
@@ -689,6 +695,7 @@ __global__ void computeWeightsKernelI128(
                            polyTreeOffset, polyBoundOffset, polyBounds, polyFreq,
                            orderings, invIndex, numPartTrees, partTreeOffset,
                            numTaxa, totalN, pA, pB, scan, tid, nthreads, twoScores);
+            if (tid == 0 && dProgress) atomicAdd(dProgress, 1);
         }
     } else {
         int* pA   = smem;
@@ -700,6 +707,7 @@ __global__ void computeWeightsKernelI128(
                            polyTreeOffset, polyBoundOffset, polyBounds, polyFreq,
                            orderings, invIndex, numPartTrees, partTreeOffset,
                            numTaxa, totalN, pA, pB, scan, tid, nthreads, twoScores);
+            if (tid == 0 && dProgress) atomicAdd(dProgress, 1);
         }
     }
 }
@@ -947,7 +955,8 @@ __global__ void computeWeightsSmallerSideKernel(
     int numPolyParts,
     int numTaxa,
     int totalN,
-    long long* __restrict__ twoScores)
+    long long* __restrict__ twoScores,
+    int* __restrict__ dProgress)
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= curBatch) return;
@@ -1021,6 +1030,12 @@ __global__ void computeWeightsSmallerSideKernel(
             orderings, invIndex, numPolyParts, numTaxa, totalN);
 
     storeTwoScore(twoScores, idx, twoScore);
+
+    // Warp-aggregated progress bump: one atomic per warp (counts its active lanes).
+    if (dProgress) {
+        unsigned act = __activemask();
+        if ((threadIdx.x & 31) == (__ffs(act) - 1)) atomicAdd(dProgress, __popc(act));
+    }
 }
 
 // INT128 variant of the smaller-side kernel (one thread per split, exact 128-bit).
@@ -1039,7 +1054,8 @@ __global__ void computeWeightsSmallerSideKernelI128(
     int numPolyParts,
     int numTaxa,
     int totalN,
-    long long* __restrict__ twoScores)
+    long long* __restrict__ twoScores,
+    int* __restrict__ dProgress)
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= curBatch) return;
@@ -1117,6 +1133,12 @@ __global__ void computeWeightsSmallerSideKernelI128(
             orderings, invIndex, numPolyParts, numTaxa, totalN));
 
     storeTwoScoreI128(twoScores, idx, twoScore);
+
+    // Warp-aggregated progress bump: one atomic per warp (counts its active lanes).
+    if (dProgress) {
+        unsigned act = __activemask();
+        if ((threadIdx.x & 31) == (__ffs(act) - 1)) atomicAdd(dProgress, __popc(act));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1159,6 +1181,71 @@ static void wb_build_bar(char* buf, int done, int total) {
         }
     }
     buf[pos] = '\0';
+}
+
+// ---------------------------------------------------------------------------
+// Intra-kernel progress: poll a device counter while a kernel runs on kStream,
+// printing a time-paced single line.  The kernel bumps *dProgress once per split
+// it finishes (negligible cost, no change to grid/occupancy); we read it on a
+// SEPARATE stream so the poll never stalls the kernel (both must be non-default,
+// since the legacy default stream implicitly synchronizes with all streams).
+//
+// Cadence:  TTY  → carriage-return overwrite, every ~2 s (responsive, no scroll);
+//           non-TTY (piped/`tee`d log) → newline every PROGRESS_LOG_SEC (default
+//           300 s) so a multi-hour run logs only a handful of lines.
+// Override the interval with ASTRALX_GPU_PROGRESS_SEC=<seconds>.  Returns the
+// kernel's terminal cudaStreamQuery status (cudaSuccess once finished).
+// ---------------------------------------------------------------------------
+static cudaError_t wb_poll_progress(cudaStream_t kStream, cudaStream_t pollStream,
+                                    const int* dProgress, int* hPinned, int total,
+                                    const char* label) {
+    bool tty = isatty(fileno(stderr));
+    double interval = tty ? 2.0 : 300.0;
+    const char* ev = getenv("ASTRALX_GPU_PROGRESS_SEC");
+    if (ev) { double v = atof(ev); if (v > 0.0) interval = v; }
+
+    const char* GRN = wb_use_color() ? "\033[32m" : "";
+    const char* RST = wb_use_color() ? "\033[0m"  : "";
+    char bar[WB_BAR_W * 3 + 1];
+    double t0 = wb_now_sec();
+    double lastPrint = t0;
+    bool   printed = false;
+
+    while (true) {
+        cudaError_t q = cudaStreamQuery(kStream);
+        if (q != cudaErrorNotReady) {                 // finished (or error)
+            if (printed && tty) { fprintf(stderr, "\n"); fflush(stderr); }
+            return q;
+        }
+        struct timespec ts = { 0, 100L * 1000L * 1000L };  // 100 ms slice (responsive)
+        nanosleep(&ts, NULL);
+
+        double now = wb_now_sec();
+        if (now - t0 < interval || now - lastPrint < interval) continue;
+        lastPrint = now;
+
+        *hPinned = 0;
+        cudaMemcpyAsync(hPinned, dProgress, sizeof(int), cudaMemcpyDeviceToHost, pollStream);
+        cudaStreamSynchronize(pollStream);
+        int done = *hPinned;
+        if (done < 0) done = 0;
+        if (done > total) done = total;
+        double frac    = (total > 0) ? (double) done / total : 0.0;
+        double elapsed = now - t0;
+        double eta     = (frac > 1e-6) ? elapsed * (1.0 - frac) / frac : 0.0;
+        char eb[32], etb[32];
+        wb_fmt_duration(elapsed, eb, sizeof eb);
+        wb_fmt_duration(eta,     etb, sizeof etb);
+        wb_build_bar(bar, done, total);
+        if (tty)
+            fprintf(stderr, "\r  %s[GPU]%s %s  %s[%s]%s  %d/%d (%.1f%%)  %s elapsed · ETA %s    ",
+                    GRN, RST, label, GRN, bar, RST, done, total, frac * 100.0, eb, etb);
+        else
+            fprintf(stderr, "  [GPU] %s  %d/%d (%.1f%%)  %s elapsed · ETA %s\n",
+                    label, done, total, frac * 100.0, eb, etb);
+        fflush(stderr);
+        printed = true;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1488,6 +1575,16 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsGPU(
     // -------------------------------------------------------------------------
     long long* hTwoScores = new long long[(size_t)numSplits * scoresPerSplit]();   // zero-initialised
 
+    // Intra-kernel progress: a device splits-completed counter polled from the host.
+    // Kernel runs on wbStream; the counter is read on a SEPARATE pollStream (both
+    // non-default, so the poll never serializes with the kernel).
+    cudaStream_t wbStream = 0, pollStream = 0;
+    cudaStreamCreate(&wbStream);
+    cudaStreamCreate(&pollStream);
+    int* dProgress = NULL; int* hProgress = NULL;
+    cudaMalloc(&dProgress, sizeof(int));
+    cudaHostAlloc((void**)&hProgress, sizeof(int), cudaHostAllocDefault);
+
     // -------------------------------------------------------------------------
     // Batch loop: stream splits in, stream scores out
     // -------------------------------------------------------------------------
@@ -1510,51 +1607,61 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsGPU(
                    (size_t)curBatch * 4 * sizeof(int),
                    cudaMemcpyHostToDevice);
 
+        // Reset the progress counter on wbStream (ordered before the kernel below).
+        cudaMemsetAsync(dProgress, 0, sizeof(int), wbStream);
+
         if (useShared) {
             // Fast path: one block per split; prefix arrays in shared memory.
             if (useI128)
-                computeWeightsKernelI128<false><<<curBatch, WB_BLOCK, sharedBytes>>>(
+                computeWeightsKernelI128<false><<<curBatch, WB_BLOCK, sharedBytes, wbStream>>>(
                     dSplits, dSplitRangeMeta, dRangeData, dNodeData, dNodeFreq, dNodeOffset, dPartLeafCount,
                     dPolyTreeOffset, dPolyBoundOffset, dPolyBounds, dPolyFreq, dOrderings, dInvIndex,
                     curBatch, numPartTrees, partTreeOffset, stride, numTaxa, numTaxa,
-                    NULL, dTwoScores);
+                    NULL, dTwoScores, dProgress);
             else if (useDouble)
-                computeWeightsKernel<false, double><<<curBatch, WB_BLOCK, sharedBytes>>>(
+                computeWeightsKernel<false, double><<<curBatch, WB_BLOCK, sharedBytes, wbStream>>>(
                     dSplits, dSplitRangeMeta, dRangeData, dNodeData, dNodeFreq, dNodeOffset, dPartLeafCount,
                     dPolyTreeOffset, dPolyBoundOffset, dPolyBounds, dPolyFreq, dOrderings, dInvIndex,
                     curBatch, numPartTrees, partTreeOffset, stride, numTaxa, numTaxa,
-                    NULL, dTwoScores);
+                    NULL, dTwoScores, dProgress);
             else
-                computeWeightsKernel<false, long long><<<curBatch, WB_BLOCK, sharedBytes>>>(
+                computeWeightsKernel<false, long long><<<curBatch, WB_BLOCK, sharedBytes, wbStream>>>(
                     dSplits, dSplitRangeMeta, dRangeData, dNodeData, dNodeFreq, dNodeOffset, dPartLeafCount,
                     dPolyTreeOffset, dPolyBoundOffset, dPolyBounds, dPolyFreq, dOrderings, dInvIndex,
                     curBatch, numPartTrees, partTreeOffset, stride, numTaxa, numTaxa,
-                    NULL, dTwoScores);
+                    NULL, dTwoScores, dProgress);
         } else {
             // Large-L path: resident-capped grid grid-strides over splits;
             // prefix arrays in the bounded global pool (slot = blockIdx.x).
             int gridDim = (curBatch < maxResident) ? curBatch : maxResident;
             if (useI128)
-                computeWeightsKernelI128<true><<<gridDim, WB_BLOCK, sharedBytes>>>(
+                computeWeightsKernelI128<true><<<gridDim, WB_BLOCK, sharedBytes, wbStream>>>(
                     dSplits, dSplitRangeMeta, dRangeData, dNodeData, dNodeFreq, dNodeOffset, dPartLeafCount,
                     dPolyTreeOffset, dPolyBoundOffset, dPolyBounds, dPolyFreq, dOrderings, dInvIndex,
                     curBatch, numPartTrees, partTreeOffset, stride, numTaxa, numTaxa,
-                    dPrefix, dTwoScores);
+                    dPrefix, dTwoScores, dProgress);
             else if (useDouble)
-                computeWeightsKernel<true, double><<<gridDim, WB_BLOCK, sharedBytes>>>(
+                computeWeightsKernel<true, double><<<gridDim, WB_BLOCK, sharedBytes, wbStream>>>(
                     dSplits, dSplitRangeMeta, dRangeData, dNodeData, dNodeFreq, dNodeOffset, dPartLeafCount,
                     dPolyTreeOffset, dPolyBoundOffset, dPolyBounds, dPolyFreq, dOrderings, dInvIndex,
                     curBatch, numPartTrees, partTreeOffset, stride, numTaxa, numTaxa,
-                    dPrefix, dTwoScores);
+                    dPrefix, dTwoScores, dProgress);
             else
-                computeWeightsKernel<true, long long><<<gridDim, WB_BLOCK, sharedBytes>>>(
+                computeWeightsKernel<true, long long><<<gridDim, WB_BLOCK, sharedBytes, wbStream>>>(
                     dSplits, dSplitRangeMeta, dRangeData, dNodeData, dNodeFreq, dNodeOffset, dPartLeafCount,
                     dPolyTreeOffset, dPolyBoundOffset, dPolyBounds, dPolyFreq, dOrderings, dInvIndex,
                     curBatch, numPartTrees, partTreeOffset, stride, numTaxa, numTaxa,
-                    dPrefix, dTwoScores);
+                    dPrefix, dTwoScores, dProgress);
         }
 
-        cudaError_t err = cudaDeviceSynchronize();
+        // Poll the splits-completed counter while the kernel runs (time-paced,
+        // single-line), then make sure it has fully finished.
+        char wbLabel[64];
+        snprintf(wbLabel, sizeof wbLabel,
+                 (numBatches > 1) ? "weight batch %d/%d" : "weight", b + 1, numBatches);
+        cudaError_t err = wb_poll_progress(wbStream, pollStream, dProgress, hProgress, curBatch, wbLabel);
+        cudaError_t serr = cudaStreamSynchronize(wbStream);
+        if (err == cudaErrorNotReady || err == cudaSuccess) err = serr;
         if (err != cudaSuccess) {
             fprintf(stderr, "[ASTRAL-X GPU] kernel error (batch %d/%d): %s\n",
                     b + 1, numBatches, cudaGetErrorString(err));
@@ -1618,6 +1725,10 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsGPU(
     cudaFree(dPolyBounds);
     cudaFree(dPolyFreq);
     if (dPrefix) cudaFree(dPrefix);
+    cudaFree(dProgress);
+    cudaFreeHost(hProgress);
+    cudaStreamDestroy(wbStream);
+    cudaStreamDestroy(pollStream);
 
     env->ReleaseIntArrayElements(jSplits,        hSplits,        JNI_ABORT);
     env->ReleaseIntArrayElements(jSplitRangeMeta,hSplitRangeMeta,JNI_ABORT);
@@ -1772,6 +1883,14 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsSmallerSideGPU(
 
     long long* hTwoScores = new long long[(size_t)numSplits * scoresPerSplit]();
 
+    // Intra-kernel progress counter + dedicated streams (see prefix-sum path).
+    cudaStream_t wbStream = 0, pollStream = 0;
+    cudaStreamCreate(&wbStream);
+    cudaStreamCreate(&pollStream);
+    int* dProgress = NULL; int* hProgress = NULL;
+    cudaMalloc(&dProgress, sizeof(int));
+    cudaHostAlloc((void**)&hProgress, sizeof(int), cudaHostAllocDefault);
+
     int    blockSize  = WB_BLOCK;
     int    numBatches = (numSplits + batchSize - 1) / batchSize;
     double t_loop_start = wb_now_sec();
@@ -1788,24 +1907,31 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsSmallerSideGPU(
         cudaMemcpy(dSplitRangeMeta, hSplitRangeMeta + (size_t)offset * 4,
                    (size_t)curBatch * 4 * sizeof(int), cudaMemcpyHostToDevice);
 
+        cudaMemsetAsync(dProgress, 0, sizeof(int), wbStream);
+
         int gridSize = (curBatch + blockSize - 1) / blockSize;
         if (useI128)
-            computeWeightsSmallerSideKernelI128<<<gridSize, blockSize>>>(
+            computeWeightsSmallerSideKernelI128<<<gridSize, blockSize, 0, wbStream>>>(
                 dSplits, dSplitRangeMeta, dRangeData, dParts,
                 dSsPolyMeta, dSsPolyBoundOffset, dSsPolyBounds, dOrderings, dInvIndex,
-                curBatch, numParts, numPolyParts, numTaxa, totalN, dTwoScores);
+                curBatch, numParts, numPolyParts, numTaxa, totalN, dTwoScores, dProgress);
         else if (useDouble)
-            computeWeightsSmallerSideKernel<double><<<gridSize, blockSize>>>(
+            computeWeightsSmallerSideKernel<double><<<gridSize, blockSize, 0, wbStream>>>(
                 dSplits, dSplitRangeMeta, dRangeData, dParts,
                 dSsPolyMeta, dSsPolyBoundOffset, dSsPolyBounds, dOrderings, dInvIndex,
-                curBatch, numParts, numPolyParts, numTaxa, totalN, dTwoScores);
+                curBatch, numParts, numPolyParts, numTaxa, totalN, dTwoScores, dProgress);
         else
-            computeWeightsSmallerSideKernel<long long><<<gridSize, blockSize>>>(
+            computeWeightsSmallerSideKernel<long long><<<gridSize, blockSize, 0, wbStream>>>(
                 dSplits, dSplitRangeMeta, dRangeData, dParts,
                 dSsPolyMeta, dSsPolyBoundOffset, dSsPolyBounds, dOrderings, dInvIndex,
-                curBatch, numParts, numPolyParts, numTaxa, totalN, dTwoScores);
+                curBatch, numParts, numPolyParts, numTaxa, totalN, dTwoScores, dProgress);
 
-        cudaError_t err = cudaDeviceSynchronize();
+        char wbLabel[64];
+        snprintf(wbLabel, sizeof wbLabel,
+                 (numBatches > 1) ? "weight batch %d/%d" : "weight", b + 1, numBatches);
+        cudaError_t err = wb_poll_progress(wbStream, pollStream, dProgress, hProgress, curBatch, wbLabel);
+        cudaError_t serr = cudaStreamSynchronize(wbStream);
+        if (err == cudaErrorNotReady || err == cudaSuccess) err = serr;
         if (err != cudaSuccess) {
             fprintf(stderr, "[ASTRAL-X GPU] kernel error (batch %d/%d): %s\n",
                     b + 1, numBatches, cudaGetErrorString(err));
@@ -1852,6 +1978,10 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsSmallerSideGPU(
     cudaFree(dSsPolyMeta);
     cudaFree(dSsPolyBoundOffset);
     cudaFree(dSsPolyBounds);
+    cudaFree(dProgress);
+    cudaFreeHost(hProgress);
+    cudaStreamDestroy(wbStream);
+    cudaStreamDestroy(pollStream);
 
     env->ReleaseIntArrayElements(jSplits,    hSplits,    JNI_ABORT);
     env->ReleaseIntArrayElements(jSplitRangeMeta, hSplitRangeMeta, JNI_ABORT);

@@ -76,8 +76,15 @@ run_tc () {
     fi
 
     # ── Step 2: ASTRAL-X binary → actual score ────────────────────────────────
+    # Polytomous fixtures need FULL search to match the full-DP oracle (local search
+    # finds a valid but lower optimum on the richer polytomous candidate set).
+    local cmd=("${ASTRALX_CMD[@]}")
+    if [[ "$name" == *polytomy* && "$SEARCH_MODE" != "full" ]]; then
+        cmd=(java -Djava.library.path="$NATIVE_DIR" -cp "$BUILD_DIR" astralx.Main
+             $COMPUTE_MODE --search-mode full)
+    fi
     local astralx_out actual_score astralx_tree
-    if ! astralx_out="$("${ASTRALX_CMD[@]}" -i "$input" 2>&1)"; then
+    if ! astralx_out="$("${cmd[@]}" -i "$input" 2>&1)"; then
         printf "${RED}FAIL${NC}  ASTRAL-X crashed\n"
         echo "$astralx_out" | tail -5 | sed 's/^/    /'
         ((fail++)) || true
