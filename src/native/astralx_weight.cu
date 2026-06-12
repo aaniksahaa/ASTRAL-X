@@ -1193,15 +1193,14 @@ static void wb_build_bar(char* buf, int done, int total) {
 // Output: a single carriage-return-overwritten, colorized line (only the latest
 // update stays on screen; collapses on a terminal even through `tee`).  Coloured by
 // default ([GPU] green, count cyan, percent yellow); set NO_COLOR to disable.
-// Cadence default: ~2 s on a TTY, ~300 s otherwise; override precedence is
+// Cadence default: 10 s; override precedence is
 // --gpu-progress-interval > ASTRALX_GPU_PROGRESS_SEC > default.  Returns the kernel's
 // terminal cudaStreamQuery status (cudaSuccess once finished).
 // ---------------------------------------------------------------------------
 static cudaError_t wb_poll_progress(cudaStream_t kStream, cudaStream_t pollStream,
                                     const int* dProgress, int* hPinned, int total,
                                     const char* label, double flagSec) {
-    bool tty = isatty(fileno(stderr));
-    double interval = tty ? 2.0 : 300.0;                       // auto default
+    double interval = 10.0;                                    // default report cadence (s)
     const char* ev = getenv("ASTRALX_GPU_PROGRESS_SEC");       // env override
     if (ev) { double v = atof(ev); if (v > 0.0) interval = v; }
     if (flagSec > 0.0) interval = flagSec;                     // --gpu-progress-interval wins
