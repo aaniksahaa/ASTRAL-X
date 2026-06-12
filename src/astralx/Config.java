@@ -180,6 +180,13 @@ public class Config {
     public void setGpuNumBatches(int n)       { this.gpuNumBatches = Math.max(1, n); }
     public double getGpuVramFraction()            { return gpuVramFraction; }
     public void setGpuVramFraction(double f)      { this.gpuVramFraction = Math.max(0.01, Math.min(1.0, f)); }
+
+    // GPU weight-kernel progress-bar update interval (seconds).  -1 = auto (TTY ~2 s
+    // overwriting line; non-TTY ~300 s newline).  Precedence: this flag > env
+    // ASTRALX_GPU_PROGRESS_SEC > auto default.
+    private double gpuProgressIntervalSec = -1.0;
+    public double getGpuProgressIntervalSec()        { return gpuProgressIntervalSec; }
+    public void setGpuProgressIntervalSec(double s)  { this.gpuProgressIntervalSec = s; }
     public double getGpuVramControlFactor()       { return gpuVramControlFactor; }
     public boolean isGpuVramControlFactorSet()    { return gpuVramControlFactorSet; }
     public void setGpuVramControlFactor(double f) { this.gpuVramControlFactor = Math.max(0.001, Math.min(1.0, f)); this.gpuVramControlFactorSet = true; }

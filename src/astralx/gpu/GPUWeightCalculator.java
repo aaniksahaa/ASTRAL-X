@@ -105,7 +105,8 @@ public class GPUWeightCalculator {
         int numTaxa,
         int batchSizeHint,
         double vramFraction,
-        int scoreMode
+        int scoreMode,
+        double progressIntervalSec     // -1 = auto; else override the progress cadence
     );
 
     /**
@@ -158,7 +159,8 @@ public class GPUWeightCalculator {
         int totalN,
         int batchSizeHint,
         double vramFraction,
-        int scoreMode
+        int scoreMode,
+        double progressIntervalSec     // -1 = auto; else override the progress cadence
     );
 
     /**

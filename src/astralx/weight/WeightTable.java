@@ -377,7 +377,8 @@ public class WeightTable {
             orderings, invIndex,
             numSplits, numPartTrees, partTreeOffset, csr.maxLeafCount,
             numGpuTrees, n,
-            batchSizeHint, vramFraction, nativeScoreMode());
+            batchSizeHint, vramFraction, nativeScoreMode(),
+            Config.getInstance().getGpuProgressIntervalSec());
         long gpuMs = (System.nanoTime() - t1) / 1_000_000;
 
         splitsData = null; orderings = null; invIndex = null;   // let GC reclaim
@@ -498,7 +499,8 @@ public class WeightTable {
             splitsData, splitRangeMeta, rangeData, partsData,
             ssPolyMeta, ssPolyBoundOffset, ssPolyBounds, orderings, invIndex,
             numSplits, numParts, numPolyParts, numGpuTrees, n, n,
-            batchSizeHint, vramFraction, nativeScoreMode());
+            batchSizeHint, vramFraction, nativeScoreMode(),
+            Config.getInstance().getGpuProgressIntervalSec());
         long gpuMs = (System.nanoTime() - t1) / 1_000_000;
 
         splitsData = null; partsData = null; orderings = null; invIndex = null;   // let GC reclaim

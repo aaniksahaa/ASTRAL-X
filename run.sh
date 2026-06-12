@@ -50,6 +50,7 @@ Optional:
   --gpu-batch-size            GPU batch size (manual)
   --gpu-batches               Number of GPU batches (manual)
   --gpu-vram-occupancy-factor Fraction of free VRAM to use for batching (default: 0.75)
+  --gpu-progress-interval     GPU weight-kernel progress update interval, seconds (default: auto)
   --gpu-vram-control-factor   Resident-relative batch sizing override
   --gpu-dist-tile-size        Tile size B for GPU distance matrix kernel
   --verify-distance-matrix    Dump distance matrix and exit
@@ -108,7 +109,7 @@ while [[ $# -gt 0 ]]; do
       COMPUTE_MODE_SET=true
       shift
       ;;
-    --search-mode|-t|--threads|-m|--seeds|--weight-intersection-method|--gpu-batch-size|--gpu-batches|--gpu-vram-control-factor|--gpu-vram-occupancy-factor|--gpu-dp-state-space-construction-output-cap|--gpu-dist-tile-size|--dump-completed-gene-trees|--completion-method)
+    --search-mode|-t|--threads|-m|--seeds|--weight-intersection-method|--gpu-batch-size|--gpu-batches|--gpu-vram-control-factor|--gpu-vram-occupancy-factor|--gpu-progress-interval|--gpu-dp-state-space-construction-output-cap|--gpu-dist-tile-size|--dump-completed-gene-trees|--completion-method)
       PROGRAM_ARGS+=("$1" "$2")
       shift 2
       ;;

@@ -1198,11 +1198,12 @@ static void wb_build_bar(char* buf, int done, int total) {
 // ---------------------------------------------------------------------------
 static cudaError_t wb_poll_progress(cudaStream_t kStream, cudaStream_t pollStream,
                                     const int* dProgress, int* hPinned, int total,
-                                    const char* label) {
+                                    const char* label, double flagSec) {
     bool tty = isatty(fileno(stderr));
-    double interval = tty ? 2.0 : 300.0;
-    const char* ev = getenv("ASTRALX_GPU_PROGRESS_SEC");
+    double interval = tty ? 2.0 : 300.0;                       // auto default
+    const char* ev = getenv("ASTRALX_GPU_PROGRESS_SEC");       // env override
     if (ev) { double v = atof(ev); if (v > 0.0) interval = v; }
+    if (flagSec > 0.0) interval = flagSec;                     // --gpu-progress-interval wins
 
     const char* GRN = wb_use_color() ? "\033[32m" : "";
     const char* RST = wb_use_color() ? "\033[0m"  : "";
@@ -1281,7 +1282,7 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsGPU(
     jintArray jOrderings, jintArray jInvIndex,
     jint numSplits, jint numPartTrees, jint partTreeOffset, jint maxLeafCount,
     jint numGpuTrees, jint numTaxa,
-    jint batchSizeHint, jdouble vramFraction, jint scoreMode)
+    jint batchSizeHint, jdouble vramFraction, jint scoreMode, jdouble progressIntervalSec)
 {
     // scoreMode: 0 = LONG (exact int64), 1 = DOUBLE (bit-packed), 2 = INT128 (2 longs/split)
     bool useDouble = (scoreMode == 1);
@@ -1659,7 +1660,7 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsGPU(
         char wbLabel[64];
         snprintf(wbLabel, sizeof wbLabel,
                  (numBatches > 1) ? "weight batch %d/%d" : "weight", b + 1, numBatches);
-        cudaError_t err = wb_poll_progress(wbStream, pollStream, dProgress, hProgress, curBatch, wbLabel);
+        cudaError_t err = wb_poll_progress(wbStream, pollStream, dProgress, hProgress, curBatch, wbLabel, progressIntervalSec);
         cudaError_t serr = cudaStreamSynchronize(wbStream);
         if (err == cudaErrorNotReady || err == cudaSuccess) err = serr;
         if (err != cudaSuccess) {
@@ -1758,7 +1759,7 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsSmallerSideGPU(
     jintArray jSsPolyMeta, jintArray jSsPolyBoundOffset, jintArray jSsPolyBounds,
     jintArray jOrderings, jintArray jInvIndex,
     jint numSplits, jint numParts, jint numPolyParts, jint numGpuTrees, jint numTaxa, jint totalN,
-    jint batchSizeHint, jdouble vramFraction, jint scoreMode)
+    jint batchSizeHint, jdouble vramFraction, jint scoreMode, jdouble progressIntervalSec)
 {
     bool useDouble = (scoreMode == 1);
     bool useI128   = (scoreMode == 2);
@@ -1929,7 +1930,7 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsSmallerSideGPU(
         char wbLabel[64];
         snprintf(wbLabel, sizeof wbLabel,
                  (numBatches > 1) ? "weight batch %d/%d" : "weight", b + 1, numBatches);
-        cudaError_t err = wb_poll_progress(wbStream, pollStream, dProgress, hProgress, curBatch, wbLabel);
+        cudaError_t err = wb_poll_progress(wbStream, pollStream, dProgress, hProgress, curBatch, wbLabel, progressIntervalSec);
         cudaError_t serr = cudaStreamSynchronize(wbStream);
         if (err == cudaErrorNotReady || err == cudaSuccess) err = serr;
         if (err != cudaSuccess) {
