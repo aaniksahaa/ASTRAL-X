@@ -136,9 +136,11 @@ public final class MiniUPGMA {
             active[i]      = true;
         }
 
-        double[][] mat = new double[n][n];
-        for (int i = 0; i < n; i++)
-            for (int j = 0; j < n; j++) mat[i][j] = sim[i * n + j];
+        // Operate on the caller's flat `sim` array IN PLACE (mat[i][j] == sim[i*n+j]).
+        // This mutates `sim`; both call sites (Step A groupSim, Step B inducedSim)
+        // discard it afterward.  Avoids a second d×d matrix (the old `double[n][n]`
+        // copy) — bit-identical result, just no copy (DOCS/polytomy memory).
+        double[] mat = sim;
 
         int[] chain   = new int[n + 1];
         int   chainSz = 0;
@@ -151,13 +153,14 @@ public final class MiniUPGMA {
                 chain[chainSz++] = nextSeed;
             }
             int a = chain[chainSz - 1];
+            int aRow = a * n;
 
             // nearest neighbour of a: max similarity, tie-break smallest index
             int b = -1;
             double bestS = -Double.MAX_VALUE;
             for (int c = 0; c < n; c++) {
                 if (c == a || !active[c]) continue;
-                if (mat[a][c] > bestS) { bestS = mat[a][c]; b = c; }
+                if (mat[aRow + c] > bestS) { bestS = mat[aRow + c]; b = c; }
             }
 
             if (chainSz >= 2 && b == chain[chainSz - 2]) {
@@ -175,11 +178,12 @@ public final class MiniUPGMA {
 
                 weight[lo] = wLo + wHi;
                 active[hi] = false;
+                int loRow = lo * n, hiRow = hi * n;
                 for (int k = 0; k < n; k++) {
                     if (k == lo || !active[k]) continue;
-                    double newLoK = (mat[lo][k] * wLo + mat[hi][k] * wHi) / (wLo + wHi);
-                    mat[lo][k] = newLoK;
-                    mat[k][lo] = newLoK;
+                    double newLoK = (mat[loRow + k] * wLo + mat[hiRow + k] * wHi) / (wLo + wHi);
+                    mat[loRow + k] = newLoK;
+                    mat[k * n + lo] = newLoK;
                 }
                 remaining--;
             } else {

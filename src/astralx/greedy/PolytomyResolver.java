@@ -300,12 +300,17 @@ public final class PolytomyResolver {
         // d > 31 needs the long[]-bitmap path; only enabled by the lift-the-bar flag.
         if (d > 31 && !Config.getInstance().isStepBProcessLargePolytomies()) return 0;
 
+        // One reusable d×d induced-similarity buffer per task for resolveByDistance,
+        // shared across all rounds (avoids re-allocating a d²-double matrix every round —
+        // the remaining churn after hash-counts).  null for the int path (d≤31, tiny).
+        double[] simBuf = (d > 31) ? new double[d * d] : null;
+
         int totalNewSignatures = 0;
         int adaptBonus = 0;
         int j = 0;
         while (j < STEPB_DEFAULT_RUNS + adaptBonus) {
             int beforeSize = buffer.size();
-            stepBRound(task, geneTrees, tours, buffer, numTaxa, rng, sim, j);
+            stepBRound(task, geneTrees, tours, buffer, numTaxa, rng, sim, j, simBuf);
             int newThisRound = buffer.size() - beforeSize;
             totalNewSignatures += newThisRound;
             if (newThisRound >= STEPB_MIN_FREQ && adaptBonus < STEPB_MAX) {
@@ -341,11 +346,11 @@ public final class PolytomyResolver {
     private static void stepBRound(PolytomyTask task, List<Tree> geneTrees,
                                     EulerTourBuilder.TourData[] tours,
                                     EmissionBuffer buffer, int numTaxa, Random rng,
-                                    SimilarityMatrix sim, int roundIndex) {
+                                    SimilarityMatrix sim, int roundIndex, double[] simBuf) {
         int d = task.numGroups;
         // Large polytomy: rep-subsets no longer fit in an int → long[] path.
         if (d > 31) {
-            stepBRoundLong(task, geneTrees, tours, buffer, numTaxa, rng, sim, roundIndex);
+            stepBRoundLong(task, geneTrees, tours, buffer, numTaxa, rng, sim, roundIndex, simBuf);
             return;
         }
         int[] aCons = task.tree.aCons();
@@ -714,15 +719,126 @@ public final class PolytomyResolver {
         }
     }
 
+    // ── Memory-lean hash-based counting for the large (d>31) fast path ──────────
+    //
+    // Instead of storing a long[⌈d/64⌉] bitmap per distinct induced clade (the
+    // dominant RAM term for big polytomies), we identify each clade by a 128-bit
+    // (sum,xor) hash of its arm-group set — the SAME hashing principle ASTRAL-X uses
+    // for every cluster (ClusterHash); dedup reliability is the identical 2⁻¹²⁸ level.
+    // We keep only frequency + a compact provenance (treeIdx, [lo,hi] interval of the
+    // position-sorted reps that produced it) and a small per-tree grp[] cache, then
+    // materialize the bitmap just-in-time, one at a time, for the mini-greedy.
+    // (Tie-break among equal-frequency candidates becomes hash-order instead of
+    // bitmap-magnitude — a different but equal-quality emission set, within the same
+    // run-to-run nondeterminism Step B already has.  d≤31 int path is untouched.)
+
+    /** 128-bit set signature (sum,xor of per-group hashes) — the counts-map key. */
+    static final class CladeKey {
+        final long s, x;
+        CladeKey(long s, long x) { this.s = s; this.x = x; }
+        @Override public int hashCode() {
+            long h = s * 0x9E3779B97F4A7C15L ^ x; return (int) (h ^ (h >>> 32));
+        }
+        @Override public boolean equals(Object o) {
+            return (o instanceof CladeKey k) && k.s == s && k.x == x;
+        }
+        static int compare(CladeKey a, CladeKey b) {
+            int c = Long.compareUnsigned(a.s, b.s);
+            return (c != 0) ? c : Long.compareUnsigned(a.x, b.x);
+        }
+    }
+    /** Frequency + provenance to re-materialize the clade's rep bitmap on demand. */
+    static final class CladeEntry {
+        int freq; final int ti, lo, hi;
+        CladeEntry(int ti, int lo, int hi) { this.ti = ti; this.lo = lo; this.hi = hi; this.freq = 1; }
+    }
+
+    /** SplitMix64 finalizer — well-distributed per-group hash. */
+    private static long mix64(long z) {
+        z = (z ^ (z >>> 30)) * 0xBF58476D1CE4E5B9L;
+        z = (z ^ (z >>> 27)) * 0x94D049BB133111EBL;
+        return z ^ (z >>> 31);
+    }
+
+    /**
+     * Fast-path clade enumeration with HASH counting (no per-clade long[] bitmaps).
+     * Sorts the present reps, runs the SAME min-split induced-clade recursion as
+     * {@link #collectGeneTreeBitmapsFastLong}, but records each qualifying clade by a
+     * 128-bit (sum,xor) hash + (ti, interval) provenance into {@code counts}.
+     * @return the sorted grp[] (provenance source for this tree), or null if &lt;2 reps.
+     */
+    private static int[] collectCladesHash(Tree gt, EulerTourBuilder.TourData tour,
+            int[] reps, int d, long[] vg, int ti, long allSum, long allXor,
+            java.util.HashMap<CladeKey, CladeEntry> counts) {
+        int[] pos = new int[d], tax = new int[d], grp = new int[d];
+        int k = 0;
+        for (int gi = 0; gi < d; gi++) {
+            int r = reps[gi];
+            if (r < 0) continue;
+            int p = gt.positionMap[r];
+            if (p < 0) continue;
+            pos[k] = p; tax[k] = r; grp[k] = gi; k++;
+        }
+        if (k < 2) return null;
+        for (int i = 1; i < k; i++) {            // insertion sort by leaf position
+            int pp = pos[i], tt = tax[i], gg = grp[i], j = i - 1;
+            while (j >= 0 && pos[j] > pp) { pos[j+1]=pos[j]; tax[j+1]=tax[j]; grp[j+1]=grp[j]; j--; }
+            pos[j+1]=pp; tax[j+1]=tt; grp[j+1]=gg;
+        }
+        int[] sep = new int[k - 1];
+        for (int i = 0; i < k - 1; i++) sep[i] = lcaDepth(tour, tax[i], tax[i+1]);
+        int[] grpArr = java.util.Arrays.copyOf(grp, k);
+        long[] psum = new long[k + 1], pxor = new long[k + 1];
+        for (int i = 0; i < k; i++) { long h = vg[grpArr[i]]; psum[i+1] = psum[i] + h; pxor[i+1] = pxor[i] ^ h; }
+        emitCladesHash(0, k - 1, sep, psum, pxor, d, ti, allSum, allXor, counts);
+        return grpArr;
+    }
+
+    private static void emitCladesHash(int lo, int hi, int[] sep, long[] psum, long[] pxor,
+            int d, int ti, long allSum, long allXor, java.util.HashMap<CladeKey, CladeEntry> counts) {
+        if (lo == hi) return;                    // singleton — not an emitted clade
+        int m = lo, minDepth = sep[lo];
+        for (int i = lo + 1; i <= hi - 1; i++) if (sep[i] < minDepth) { minDepth = sep[i]; m = i; }
+        emitCladesHash(lo, m, sep, psum, pxor, d, ti, allSum, allXor, counts);
+        emitCladesHash(m + 1, hi, sep, psum, pxor, d, ti, allSum, allXor, counts);
+        int sz = hi - lo + 1;                    // reps are distinct groups ⇒ popcount = interval length
+        if (minDepth != 0 && sz >= 2 && sz <= d - 2) {
+            long sum = psum[hi + 1] - psum[lo];
+            long xor = pxor[hi + 1] ^ pxor[lo];
+            CladeKey key = new CladeKey(sum, xor);
+            CladeEntry e = counts.get(key);
+            if (e != null) { e.freq++; return; }
+            CladeEntry ce = counts.get(new CladeKey(allSum - sum, allXor ^ xor));  // complement
+            if (ce != null) { ce.freq++; return; }
+            counts.put(key, new CladeEntry(ti, lo, hi));
+        }
+    }
+
+    /** Re-materialize a clade's rep bitmap into {@code buf} from its provenance. */
+    private static void materializeClade(long[] buf, int W, int[] grp, int lo, int hi) {
+        java.util.Arrays.fill(buf, 0, W, 0L);
+        for (int p = lo; p <= hi; p++) { int g = grp[p]; buf[g >>> 6] |= (1L << (g & 63)); }
+    }
+
+    /** Shared Step-B round tail: emit accepted clusters, D2 leftover, resolveByDistance. */
+    private static void finishRoundLong(MiniGreedyBuilderLong mg, boolean anyAccepted,
+            PolytomyTask task, int numTaxa, EmissionBuffer buffer, Random rng,
+            SimilarityMatrix sim, int[] reps, int W, double[] simBuf) {
+        mg.forEachAcceptedInternal(bm -> emitInducedSplitLong(bm, task, numTaxa, buffer));
+        if (Config.getInstance().isStepBRandomLeftoverResolution() && anyAccepted) {
+            mg.resolveLeftoverPolytomiesRandomly(rng,
+                bm -> emitInducedSplitLong(bm, task, numTaxa, buffer));
+        }
+        if (sim != null) stepBResolveByDistanceLong(task, reps, sim, numTaxa, buffer, W, simBuf);
+    }
+
     private static void stepBRoundLong(PolytomyTask task, List<Tree> geneTrees,
                                        EulerTourBuilder.TourData[] tours,
                                        EmissionBuffer buffer, int numTaxa, Random rng,
-                                       SimilarityMatrix sim, int roundIndex) {
+                                       SimilarityMatrix sim, int roundIndex, double[] simBuf) {
         int d = task.numGroups;
         int W = (d + 63) >>> 6;
         int[] aCons = task.tree.aCons();
-        long[] allBits = new long[W];
-        for (int b = 0; b < d; b++) allBits[b >>> 6] |= (1L << (b & 63));
 
         // ── (1) one random rep per group (identical logic to the int path) ──
         int[] reps = new int[d];
@@ -739,58 +855,80 @@ public final class PolytomyResolver {
             reps[gi] = aCons[pos];
         }
 
-        // ── (2)+(3) collect induced bipartition counts (complement-deduped) ──
-        java.util.HashMap<BitKey, Integer> counts = new java.util.HashMap<>();
-        java.util.ArrayList<long[]> perTree = new java.util.ArrayList<>(8);
-        for (int ti = 0; ti < geneTrees.size(); ti++) {
-            Tree gt = geneTrees.get(ti);
-            if (tours != null) collectGeneTreeBitmapsFastLong(gt, tours[ti], reps, d, W, perTree);
-            else               collectGeneTreeBitmapsLong(gt, reps, d, W, perTree);
-            for (long[] bm : perTree) {
-                BitKey key = new BitKey(bm);
-                Integer cur = counts.get(key);
-                if (cur != null) { counts.put(key, cur + 1); continue; }
-                long[] comp = new long[W];
-                for (int k = 0; k < W; k++) comp[k] = allBits[k] ^ bm[k];
-                BitKey ckey = new BitKey(comp);
-                Integer cc = counts.get(ckey);
-                if (cc != null) { counts.put(ckey, cc + 1); continue; }
-                counts.put(key, 1);
-            }
-        }
-        if (counts.isEmpty()) return;
-
-        // ── (4) sort by freq desc; deterministic tie-break by bitmap order ──
-        List<java.util.Map.Entry<BitKey, Integer>> sorted =
-            new ArrayList<>(counts.entrySet());
-        sorted.sort((a, b) -> {
-            int c = Integer.compare(b.getValue(), a.getValue());
-            return (c != 0) ? c : BitKey.compare(a.getKey(), b.getKey());
-        });
-
-        // ── (5) mini-greedy laminar build (long[] variant) ──────────────────
+        // ── (2)–(5) collect induced bipartitions, sort by freq, mini-greedy build ──
         MiniGreedyBuilderLong mg = new MiniGreedyBuilderLong(d);
         boolean anyAccepted = false;
-        for (var e : sorted) anyAccepted |= mg.tryInsert(e.getKey().w);
 
-        // ── (6) emit accepted clusters ──────────────────────────────────────
-        mg.forEachAcceptedInternal(bm -> emitInducedSplitLong(bm, task, numTaxa, buffer));
-
-        // ── (6b) D2 random leftover resolution (opt-in, round accepted ≥1) ──
-        if (Config.getInstance().isStepBRandomLeftoverResolution() && anyAccepted) {
-            mg.resolveLeftoverPolytomiesRandomly(rng,
-                bm -> emitInducedSplitLong(bm, task, numTaxa, buffer));
+        if (tours != null) {
+            // FAST path: 128-bit hash counting + JIT bitmap materialization (memory-lean).
+            long[] vg = new long[d];
+            long allSum = 0, allXor = 0;
+            for (int g = 0; g < d; g++) {
+                long h = mix64((g + 1) * 0x9E3779B97F4A7C15L);
+                vg[g] = h; allSum += h; allXor ^= h;
+            }
+            int nT = geneTrees.size();
+            int[][] grpCache = new int[nT][];
+            java.util.HashMap<CladeKey, CladeEntry> counts = new java.util.HashMap<>();
+            for (int ti = 0; ti < nT; ti++) {
+                grpCache[ti] = collectCladesHash(geneTrees.get(ti), tours[ti], reps, d, vg,
+                                                 ti, allSum, allXor, counts);
+            }
+            if (counts.isEmpty()) return;
+            List<java.util.Map.Entry<CladeKey, CladeEntry>> sorted =
+                new ArrayList<>(counts.entrySet());
+            sorted.sort((a, b) -> {
+                int c = Integer.compare(b.getValue().freq, a.getValue().freq);
+                return (c != 0) ? c : CladeKey.compare(a.getKey(), b.getKey());
+            });
+            long[] buf = new long[W];
+            for (var e : sorted) {
+                CladeEntry ce = e.getValue();
+                materializeClade(buf, W, grpCache[ce.ti], ce.lo, ce.hi);
+                anyAccepted |= mg.tryInsert(buf);
+            }
+        } else {
+            // REFERENCE (non-fast) path: exact long[] bitmap counting.
+            long[] allBits = new long[W];
+            for (int b = 0; b < d; b++) allBits[b >>> 6] |= (1L << (b & 63));
+            java.util.HashMap<BitKey, Integer> counts = new java.util.HashMap<>();
+            java.util.ArrayList<long[]> perTree = new java.util.ArrayList<>(8);
+            for (int ti = 0; ti < geneTrees.size(); ti++) {
+                collectGeneTreeBitmapsLong(geneTrees.get(ti), reps, d, W, perTree);
+                for (long[] bm : perTree) {
+                    BitKey key = new BitKey(bm);
+                    Integer cur = counts.get(key);
+                    if (cur != null) { counts.put(key, cur + 1); continue; }
+                    long[] comp = new long[W];
+                    for (int k = 0; k < W; k++) comp[k] = allBits[k] ^ bm[k];
+                    BitKey ckey = new BitKey(comp);
+                    Integer cc = counts.get(ckey);
+                    if (cc != null) { counts.put(ckey, cc + 1); continue; }
+                    counts.put(key, 1);
+                }
+            }
+            if (counts.isEmpty()) return;
+            List<java.util.Map.Entry<BitKey, Integer>> sorted =
+                new ArrayList<>(counts.entrySet());
+            sorted.sort((a, b) -> {
+                int c = Integer.compare(b.getValue(), a.getValue());
+                return (c != 0) ? c : BitKey.compare(a.getKey(), b.getKey());
+            });
+            for (var e : sorted) anyAccepted |= mg.tryInsert(e.getKey().w);
         }
 
-        // ── (7) resolveByDistance: UPGMA on d×d induced reps (no quadratic) ──
-        if (sim != null) stepBResolveByDistanceLong(task, reps, sim, numTaxa, buffer, W);
+        // ── (6)+(7) emit accepted, D2 leftover, resolveByDistance (shared tail) ──
+        finishRoundLong(mg, anyAccepted, task, numTaxa, buffer, rng, sim, reps, W, simBuf);
     }
 
     private static void stepBResolveByDistanceLong(PolytomyTask task, int[] reps,
                                                    SimilarityMatrix sim, int numTaxa,
-                                                   EmissionBuffer buffer, int W) {
+                                                   EmissionBuffer buffer, int W, double[] simBuf) {
         int d = task.numGroups;
-        double[] inducedSim = new double[d * d];
+        // Reuse the per-task buffer (zero-filled here; only i<j and j>i entries are
+        // written below, so stale values from a prior round must be cleared first).
+        double[] inducedSim = (simBuf != null) ? simBuf : new double[d * d];
+        java.util.Arrays.fill(inducedSim, 0, d * d, 0.0);
         for (int i = 0; i < d; i++) {
             int ri = reps[i];
             if (ri < 0) continue;
