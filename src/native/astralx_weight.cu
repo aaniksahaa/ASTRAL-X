@@ -1190,11 +1190,12 @@ static void wb_build_bar(char* buf, int done, int total) {
 // SEPARATE stream so the poll never stalls the kernel (both must be non-default,
 // since the legacy default stream implicitly synchronizes with all streams).
 //
-// Cadence:  TTY  → carriage-return overwrite, every ~2 s (responsive, no scroll);
-//           non-TTY (piped/`tee`d log) → newline every PROGRESS_LOG_SEC (default
-//           300 s) so a multi-hour run logs only a handful of lines.
-// Override the interval with ASTRALX_GPU_PROGRESS_SEC=<seconds>.  Returns the
-// kernel's terminal cudaStreamQuery status (cudaSuccess once finished).
+// Output: a single carriage-return-overwritten, colorized line (only the latest
+// update stays on screen; collapses on a terminal even through `tee`).  Coloured by
+// default ([GPU] green, count cyan, percent yellow); set NO_COLOR to disable.
+// Cadence default: ~2 s on a TTY, ~300 s otherwise; override precedence is
+// --gpu-progress-interval > ASTRALX_GPU_PROGRESS_SEC > default.  Returns the kernel's
+// terminal cudaStreamQuery status (cudaSuccess once finished).
 // ---------------------------------------------------------------------------
 static cudaError_t wb_poll_progress(cudaStream_t kStream, cudaStream_t pollStream,
                                     const int* dProgress, int* hPinned, int total,
@@ -1205,8 +1206,12 @@ static cudaError_t wb_poll_progress(cudaStream_t kStream, cudaStream_t pollStrea
     if (ev) { double v = atof(ev); if (v > 0.0) interval = v; }
     if (flagSec > 0.0) interval = flagSec;                     // --gpu-progress-interval wins
 
-    const char* GRN = wb_use_color() ? "\033[32m" : "";
-    const char* RST = wb_use_color() ? "\033[0m"  : "";
+    bool col = (getenv("NO_COLOR") == NULL);     // progress is colorized by default
+    const char* GRN = col ? "\033[32m" : "";     // [GPU] + bar
+    const char* CYN = col ? "\033[36m" : "";     // done/total
+    const char* YEL = col ? "\033[33m" : "";     // percent
+    const char* DIM = col ? "\033[2m"  : "";     // elapsed / ETA
+    const char* RST = col ? "\033[0m"  : "";
     char bar[WB_BAR_W * 3 + 1];
     double t0 = wb_now_sec();
     double lastPrint = t0;
@@ -1215,7 +1220,7 @@ static cudaError_t wb_poll_progress(cudaStream_t kStream, cudaStream_t pollStrea
     while (true) {
         cudaError_t q = cudaStreamQuery(kStream);
         if (q != cudaErrorNotReady) {                 // finished (or error)
-            if (printed && tty) { fprintf(stderr, "\n"); fflush(stderr); }
+            if (printed) { fprintf(stderr, "\n"); fflush(stderr); }   // finalize the line
             return q;
         }
         struct timespec ts = { 0, 100L * 1000L * 1000L };  // 100 ms slice (responsive)
@@ -1238,12 +1243,13 @@ static cudaError_t wb_poll_progress(cudaStream_t kStream, cudaStream_t pollStrea
         wb_fmt_duration(elapsed, eb, sizeof eb);
         wb_fmt_duration(eta,     etb, sizeof etb);
         wb_build_bar(bar, done, total);
-        if (tty)
-            fprintf(stderr, "\r  %s[GPU]%s %s  %s[%s]%s  %d/%d (%.1f%%)  %s elapsed · ETA %s    ",
-                    GRN, RST, label, GRN, bar, RST, done, total, frac * 100.0, eb, etb);
-        else
-            fprintf(stderr, "  [GPU] %s  %d/%d (%.1f%%)  %s elapsed · ETA %s\n",
-                    label, done, total, frac * 100.0, eb, etb);
+        // Single carriage-return-overwritten line (keeps only the latest update on
+        // screen — collapses cleanly on a terminal, even through `tee`).
+        fprintf(stderr,
+                "\r  %s[GPU]%s %s  %s[%s]%s  %s%d/%d%s (%s%.1f%%%s)  %s%s elapsed · ETA %s%s    ",
+                GRN, RST, label, GRN, bar, RST,
+                CYN, done, total, RST, YEL, frac * 100.0, RST,
+                DIM, eb, etb, RST);
         fflush(stderr);
         printed = true;
     }
