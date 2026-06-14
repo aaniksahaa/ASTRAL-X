@@ -384,6 +384,10 @@ done
 
 ./collect-stats-simulated.sh --simphy-dir ./simphy --out /tmp/astralx-simulated-stats.csv
 
+./run-bulk-simulated.sh \
+  --method astralx \
+  --num-replicates 3 \
+  --opts-list "--search-mode local --weight-intersection-method smaller-side-traversal"
 
 ###############################################################################
 # Bulk simulated sweeps
