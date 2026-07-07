@@ -265,6 +265,30 @@ csv_escape() {
     printf '%s' "$raw"
 }
 
+strip_trivial_opts_for_csv() {
+    local raw="$1"
+    local -a tokens=()
+    local -a kept=()
+    local token
+
+    if [[ -z "${raw// }" ]]; then
+      printf ''
+      return
+    fi
+
+    read -r -a tokens <<< "$raw"
+    for token in "${tokens[@]}"; do
+      case "$token" in
+        -v|-vv|-vvv|-q|--quiet|--verbose)
+          continue
+          ;;
+      esac
+      kept+=("$token")
+    done
+
+    printf '%s' "${kept[*]}"
+}
+
 sanitize_setting_part() {
     local value="$1"
     value="${value// /-}"
@@ -481,8 +505,10 @@ run_algorithm_and_write_stats() {
     local TEMP_WRAPPER_STATS_TO_DELETE=""
     local METHOD_OPTS_RAW
     METHOD_OPTS_RAW="$(method_opts_for_algorithm "$ALGORITHM")"
+    local METHOD_OPTS_CSV_RAW
+    METHOD_OPTS_CSV_RAW="$(strip_trivial_opts_for_csv "$METHOD_OPTS_RAW")"
     local METHOD_OPTS_ESCAPED
-    METHOD_OPTS_ESCAPED="$(csv_escape "$METHOD_OPTS_RAW")"
+    METHOD_OPTS_ESCAPED="$(csv_escape "$METHOD_OPTS_CSV_RAW")"
     local SETTING_NAME
     SETTING_NAME="$(build_setting_name_from_opts "$METHOD_OPTS_RAW")"
     if [[ "$ALGORITHM" == "astralx" ]]; then
