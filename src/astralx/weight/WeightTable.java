@@ -138,7 +138,20 @@ public class WeightTable {
         // path), and both kernels sum the intersection over a side's ranges
         // (DOCS/multi-range-cluster-design.md §5.2/§5.3). No CPU correction needed.
 
-        if (useGPU) {
+        Config.WeightIntersectionMethod method = Config.getInstance().getWeightIntersectionMethod();
+        boolean bitset = (method == Config.WeightIntersectionMethod.BITSET);
+
+        if (useGPU && bitset) {
+            boolean ok = computeScoresGPUBitset(splitList, partTable, clusterTable,
+                                                clusterTrees, partTrees,
+                                                scoreArray, scoreArrayD, scoreArrayI);
+            if (!ok) {
+                Logging.info("GPU bitset weight path infeasible, falling back to CPU bitset");
+                computeScoresCPUBitset(splitList, partTable, clusterTable,
+                                       clusterTrees, partTrees,
+                                       scoreArray, scoreArrayD, scoreArrayI);
+            }
+        } else if (useGPU) {
             Config cfg = Config.getInstance();
             boolean smallerSide = (cfg.getWeightIntersectionMethod()
                                    == Config.WeightIntersectionMethod.SMALLER_SIDE_TRAVERSAL);
@@ -224,8 +237,13 @@ public class WeightTable {
             if (Config.getInstance().getComputeMode() == Config.ComputeMode.GPU) {
                 Logging.info("GPU library not available, falling back to CPU");
             }
-            computeScoresCPU(splitList, partTable.entries(), clusterTable,
-                             clusterTrees, partTrees, scoreArray, scoreArrayD, scoreArrayI);
+            if (bitset) {
+                computeScoresCPUBitset(splitList, partTable, clusterTable,
+                                       clusterTrees, partTrees, scoreArray, scoreArrayD, scoreArrayI);
+            } else {
+                computeScoresCPU(splitList, partTable.entries(), clusterTable,
+                                 clusterTrees, partTrees, scoreArray, scoreArrayD, scoreArrayI);
+            }
         }
 
         long ms;
@@ -747,6 +765,435 @@ public class WeightTable {
         csr.polyBounds      = polyBounds;
         csr.polyFreq        = polyFreq;
         return csr;
+    }
+
+    // -------------------------------------------------------------------------
+    // BITSET path (low-taxa fast option; CPU + GPU).
+    //
+    // Every cluster and every gene-tree part is materialized ONCE as a global-taxon
+    // bitset of W = ceil(n/64) 64-bit words.  Each core intersection |X ∩ Y| is then
+    // popcount(X & Y) over W words — O(1) for small n, and independent of which tree
+    // either set came from (both are keyed by global taxon id, so there is no
+    // cross-tree coordinate walk and no orderings/invIndex in the score loop).  The
+    // 3×3 derivation, poly formula, and QI math are the EXACT same helpers the other
+    // methods use, so scores are bit-identical.  Best when n is small and the gene
+    // count is large; the per-intersection cost grows with W as n grows.
+    // -------------------------------------------------------------------------
+
+    /**
+     * Precomputed global-taxon bitsets for the whole weight computation.
+     *
+     * A "cluster pool" holds one deduplicated bitset per distinct candidate-cluster
+     * (cid 0 is a reserved all-zero, size-0 empty cluster used for splits whose side
+     * is absent from the ClusterTable — those score 0, matching the range paths).
+     * Parts are split into binary (M1,M2 bitsets) and polytomous (a CSR of child
+     * bitsets); each gene tree carries a "present taxa" (Lg) bitset for the
+     * incomplete-tree row sums.
+     */
+    private static final class BitsetData {
+        int      W;                 // 64-bit words per set = ceil(n/64)
+        int      numClusters;
+        long[]   clusterBits;       // numClusters * W
+        int[]    splitCid;          // numSplits * 4  [aCid, bCid, aSize, bSize]
+        int      numBin;
+        long[]   partM1, partM2;    // numBin * W  each
+        int[]    partMeta;          // numBin * 5  [lgTree, sz1, sz2, sz3, freq]
+        int      numPartTrees;
+        long[]   geneLgBits;        // numPartTrees * W  (present-taxa mask per gene tree)
+        int      numPoly;
+        int[]    polyMeta;          // numPoly * 5  [lgTree, d, lastSize, freq, L_GT]
+        int[]    polyChildOffset;   // numPoly + 1  CSR row pointers
+        long[]   polyChildBits;     // totalChildren * W
+        int[]    polyChildSize;     // totalChildren
+    }
+
+    /** Set bits for the taxa in postorder range [lo,hi) of tree t into arr[base..base+W). */
+    private static void setRangeBits(long[] arr, int base, Tree t, int lo, int hi) {
+        int[] po = t.postorderArray;
+        for (int pos = lo; pos < hi; pos++) {
+            int tax = po[pos];
+            arr[base + (tax >>> 6)] |= 1L << (tax & 63);
+        }
+    }
+
+    /** Write one cluster's global-taxon bitset into arr[base..base+W) (complement-aware). */
+    private void buildClusterBitsInto(long[] arr, int base, Cluster c, List<Tree> clusterTrees, int W) {
+        Tree t = clusterTrees.get(c.treeIndex);
+        if (c.isMultiRange()) {
+            for (int j = 0; j < c.los.length; j++) setRangeBits(arr, base, t, c.los[j], c.his[j]);
+        } else {
+            setRangeBits(arr, base, t, c.left, c.right);
+        }
+        if (c.complement) {                       // A = S \ range, complement over ALL n taxa
+            for (int k = 0; k < W; k++) arr[base + k] = ~arr[base + k];
+            int rem = n & 63;
+            if (rem != 0) arr[base + W - 1] &= (1L << rem) - 1;   // clear bits ≥ n in the top word
+        }
+    }
+
+    /**
+     * Materialize all cluster/part/Lg bitsets once; shared by the CPU and GPU bitset paths.
+     *
+     * Each bitset occupies a disjoint slice of its output array, so the three fills are
+     * done in parallel across threads.  Only the cluster-id assignment (a HashMap dedup)
+     * is sequential; the actual cluster bitset construction is then parallel.
+     */
+    private BitsetData buildBitsetData(List<BipartitionSplit> splitList,
+                                       PartitionTable partTable, ClusterTable clusterTable,
+                                       List<Tree> clusterTrees, List<Tree> partTrees) {
+        int W = (n + 63) >>> 6;
+        int numSplits = splitList.size();
+        int numPartTrees = partTrees.size();
+
+        // --- Cluster pool: phase 1 sequential id assignment (dedup by ClusterHash) ---
+        // cid 0 = empty cluster (all-zero, size 0): splits whose side is absent score 0.
+        Map<ClusterHash, Integer> cidMap = new HashMap<>();
+        List<Cluster> clusterExemplars = new ArrayList<>();
+        clusterExemplars.add(null);               // cid 0 → empty
+        int[] splitCid = new int[numSplits * 4];
+        ClusterHash[] side = new ClusterHash[2];
+        for (int i = 0; i < numSplits; i++) {
+            BipartitionSplit sp = splitList.get(i);
+            side[0] = sp.lo; side[1] = sp.hi;
+            for (int s = 0; s < 2; s++) {
+                ClusterTable.Entry e = clusterTable.get(side[s]);
+                int cid = 0, sz = 0;
+                if (e != null) {
+                    Integer id = cidMap.get(side[s]);
+                    if (id == null) {
+                        id = clusterExemplars.size();
+                        clusterExemplars.add(e.exemplar);
+                        cidMap.put(side[s], id);
+                    }
+                    cid = id; sz = e.exemplar.size;
+                }
+                splitCid[i * 4 + s]     = cid;
+                splitCid[i * 4 + 2 + s] = sz;
+            }
+        }
+        int numClusters = clusterExemplars.size();
+        if ((long) numClusters * W > Integer.MAX_VALUE)
+            throw new IllegalStateException("Bitset cluster pool too large for a single long[]");
+        // Phase 2: parallel fill of the deduplicated cluster bitsets (disjoint slices).
+        long[] clusterBits = new long[numClusters * W];
+        Threading.processRangeParallel(numClusters, cid -> {
+            if (cid == 0) return;                 // cid 0 stays all-zero
+            buildClusterBitsInto(clusterBits, cid * W, clusterExemplars.get(cid), clusterTrees, W);
+        });
+
+        // --- Per gene-tree present-taxa (Lg) bitsets (parallel over trees) ---
+        if ((long) numPartTrees * W > Integer.MAX_VALUE)
+            throw new IllegalStateException("Bitset gene-tree Lg pool too large for a single long[]");
+        long[] geneLgBits = new long[numPartTrees * W];
+        Threading.processRangeParallel(numPartTrees, g -> {
+            Tree t = partTrees.get(g);
+            setRangeBits(geneLgBits, g * W, t, 0, t.leafCount);
+        });
+
+        // --- Part bitsets: split entries into binary / poly, prefix the poly child cursor,
+        //     then fill each group in parallel (each part owns a disjoint slice). ---
+        List<PartitionTable.Entry> binEntries  = new ArrayList<>();
+        List<PartitionTable.Entry> polyEntries = new ArrayList<>();
+        for (PartitionTable.Entry e : partTable.entries()) {
+            if (e.exemplar.d == 3) binEntries.add(e);
+            else                   polyEntries.add(e);
+        }
+        int numBin = binEntries.size(), numPoly = polyEntries.size();
+        int[] polyChildOffset = new int[numPoly + 1];
+        for (int pi = 0; pi < numPoly; pi++)
+            polyChildOffset[pi + 1] = polyChildOffset[pi] + (polyEntries.get(pi).exemplar.d - 1);
+        long childTotal = polyChildOffset[numPoly];
+        if ((long) numBin * W > Integer.MAX_VALUE || childTotal * W > Integer.MAX_VALUE)
+            throw new IllegalStateException("Bitset part pool too large for a single long[]");
+
+        long[] partM1 = new long[numBin * W];
+        long[] partM2 = new long[numBin * W];
+        int[]  partMeta = new int[numBin * 5];
+        int[]  polyMeta = new int[numPoly * 5];
+        long[] polyChildBits = new long[(int) childTotal * W];
+        int[]  polyChildSize = new int[(int) childTotal];
+
+        Threading.processRangeParallel(numBin, bi -> {
+            PartitionTable.Entry e = binEntries.get(bi);
+            Partition p = e.exemplar;
+            Tree tGT = partTrees.get(p.treeIndex);
+            setRangeBits(partM1, bi * W, tGT, p.leftStart,  p.leftEnd);
+            setRangeBits(partM2, bi * W, tGT, p.rightStart, p.rightEnd);
+            int m = bi * 5;
+            partMeta[m]     = p.treeIndex;
+            partMeta[m + 1] = p.size1;
+            partMeta[m + 2] = p.size2;
+            partMeta[m + 3] = p.size3;
+            partMeta[m + 4] = e.frequency;
+        });
+        Threading.processRangeParallel(numPoly, pi -> {
+            PartitionTable.Entry e = polyEntries.get(pi);
+            Partition p = e.exemplar;
+            Tree tGT = partTrees.get(p.treeIndex);
+            int d = p.d, childCur = polyChildOffset[pi];
+            for (int c = 0; c < d - 1; c++) {
+                setRangeBits(polyChildBits, (childCur + c) * W, tGT, p.partStarts[c], p.partEnds[c]);
+                polyChildSize[childCur + c] = p.sizes[c];
+            }
+            int m = pi * 5;
+            polyMeta[m]     = p.treeIndex;
+            polyMeta[m + 1] = d;
+            polyMeta[m + 2] = p.sizes[d - 1];      // complement (last) part size
+            polyMeta[m + 3] = e.frequency;
+            polyMeta[m + 4] = tGT.leafCount;       // L_GT
+        });
+
+        BitsetData bd = new BitsetData();
+        bd.W = W;
+        bd.numClusters = numClusters;
+        bd.clusterBits = clusterBits;
+        bd.splitCid = splitCid;
+        bd.numBin = numBin;
+        bd.partM1 = partM1;
+        bd.partM2 = partM2;
+        bd.partMeta = partMeta;
+        bd.numPartTrees = numPartTrees;
+        bd.geneLgBits = geneLgBits;
+        bd.numPoly = numPoly;
+        bd.polyMeta = polyMeta;
+        bd.polyChildOffset = polyChildOffset;
+        bd.polyChildBits = polyChildBits;
+        bd.polyChildSize = polyChildSize;
+        return bd;
+    }
+
+    /** popcount( X[xBase..] & Y[yBase..] ) over W words. */
+    private static int popAnd(long[] x, int xBase, long[] y, int yBase, int W) {
+        int c = 0;
+        for (int k = 0; k < W; k++) c += Long.bitCount(x[xBase + k] & y[yBase + k]);
+        return c;
+    }
+
+    // --- CPU bitset scorers (mirror computeScore / D / I; reuse the same QI helpers) ---
+
+    private long computeScoreBitset(int i, BitsetData bd, int totalN) {
+        int W = bd.W;
+        int aCid = bd.splitCid[i * 4], bCid = bd.splitCid[i * 4 + 1];
+        int aSize = bd.splitCid[i * 4 + 2], bSize = bd.splitCid[i * 4 + 3];
+        if (totalN - aSize - bSize < 0) return 0L;
+        int aB = aCid * W, bB = bCid * W;
+        long twoScore = 0L;
+
+        for (int j = 0; j < bd.numBin; j++) {
+            int mW = j * W, m = j * 5;
+            int a0 = popAnd(bd.clusterBits, aB, bd.partM1, mW, W);
+            int a1 = popAnd(bd.clusterBits, aB, bd.partM2, mW, W);
+            int b0 = popAnd(bd.clusterBits, bB, bd.partM1, mW, W);
+            int b1 = popAnd(bd.clusterBits, bB, bd.partM2, mW, W);
+            int lgTree = bd.partMeta[m], sz1 = bd.partMeta[m + 1], sz2 = bd.partMeta[m + 2],
+                sz3 = bd.partMeta[m + 3], freq = bd.partMeta[m + 4];
+            int L_GT = sz1 + sz2 + sz3, lgA, lgB;
+            if (L_GT == totalN) { lgA = aSize; lgB = bSize; }
+            else { int lb = lgTree * W;
+                   lgA = popAnd(bd.clusterBits, aB, bd.geneLgBits, lb, W);
+                   lgB = popAnd(bd.clusterBits, bB, bd.geneLgBits, lb, W); }
+            int a2 = lgA - a0 - a1, b2 = lgB - b0 - b1;
+            int c0 = sz1 - a0 - b0, c1 = sz2 - a1 - b1, c2 = sz3 - a2 - b2;
+            if (a2 < 0 || b2 < 0 || c0 < 0 || c1 < 0 || c2 < 0) continue;
+            twoScore += (long) freq * computeTwoQI(a0, a1, a2, b0, b1, b2, c0, c1, c2);
+        }
+        for (int pn = 0; pn < bd.numPoly; pn++) {
+            int m = pn * 5;
+            int lgTree = bd.polyMeta[m], d = bd.polyMeta[m + 1], lastSize = bd.polyMeta[m + 2],
+                freq = bd.polyMeta[m + 3], L_GT = bd.polyMeta[m + 4];
+            int[][] parts = polyPartsBitset(bd, pn, d, lastSize, L_GT, totalN, aB, bB, aSize, bSize);
+            if (parts == null) continue;
+            twoScore += (long) freq * polyTwoQILong(parts[0], parts[1], parts[2], d);
+        }
+        return twoScore / 2;
+    }
+
+    private double computeScoreBitsetD(int i, BitsetData bd, int totalN) {
+        int W = bd.W;
+        int aCid = bd.splitCid[i * 4], bCid = bd.splitCid[i * 4 + 1];
+        int aSize = bd.splitCid[i * 4 + 2], bSize = bd.splitCid[i * 4 + 3];
+        if (totalN - aSize - bSize < 0) return 0.0;
+        int aB = aCid * W, bB = bCid * W;
+        double twoScore = 0.0;
+
+        for (int j = 0; j < bd.numBin; j++) {
+            int mW = j * W, m = j * 5;
+            int a0 = popAnd(bd.clusterBits, aB, bd.partM1, mW, W);
+            int a1 = popAnd(bd.clusterBits, aB, bd.partM2, mW, W);
+            int b0 = popAnd(bd.clusterBits, bB, bd.partM1, mW, W);
+            int b1 = popAnd(bd.clusterBits, bB, bd.partM2, mW, W);
+            int lgTree = bd.partMeta[m], sz1 = bd.partMeta[m + 1], sz2 = bd.partMeta[m + 2],
+                sz3 = bd.partMeta[m + 3], freq = bd.partMeta[m + 4];
+            int L_GT = sz1 + sz2 + sz3, lgA, lgB;
+            if (L_GT == totalN) { lgA = aSize; lgB = bSize; }
+            else { int lb = lgTree * W;
+                   lgA = popAnd(bd.clusterBits, aB, bd.geneLgBits, lb, W);
+                   lgB = popAnd(bd.clusterBits, bB, bd.geneLgBits, lb, W); }
+            int a2 = lgA - a0 - a1, b2 = lgB - b0 - b1;
+            int c0 = sz1 - a0 - b0, c1 = sz2 - a1 - b1, c2 = sz3 - a2 - b2;
+            if (a2 < 0 || b2 < 0 || c0 < 0 || c1 < 0 || c2 < 0) continue;
+            twoScore += (double) freq * computeTwoQIDouble(a0, a1, a2, b0, b1, b2, c0, c1, c2);
+        }
+        for (int pn = 0; pn < bd.numPoly; pn++) {
+            int m = pn * 5;
+            int d = bd.polyMeta[m + 1], lastSize = bd.polyMeta[m + 2],
+                freq = bd.polyMeta[m + 3], L_GT = bd.polyMeta[m + 4];
+            int[][] parts = polyPartsBitset(bd, pn, d, lastSize, L_GT, totalN, aB, bB, aSize, bSize);
+            if (parts == null) continue;
+            twoScore += (double) freq * polyTwoQIDouble(parts[0], parts[1], parts[2], d);
+        }
+        return twoScore / 2.0;
+    }
+
+    private Int128 computeScoreBitsetI(int i, BitsetData bd, int totalN) {
+        int W = bd.W;
+        int aCid = bd.splitCid[i * 4], bCid = bd.splitCid[i * 4 + 1];
+        int aSize = bd.splitCid[i * 4 + 2], bSize = bd.splitCid[i * 4 + 3];
+        if (totalN - aSize - bSize < 0) return Int128.ZERO;
+        int aB = aCid * W, bB = bCid * W;
+        Int128 twoScore = Int128.ZERO;
+
+        for (int j = 0; j < bd.numBin; j++) {
+            int mW = j * W, m = j * 5;
+            int a0 = popAnd(bd.clusterBits, aB, bd.partM1, mW, W);
+            int a1 = popAnd(bd.clusterBits, aB, bd.partM2, mW, W);
+            int b0 = popAnd(bd.clusterBits, bB, bd.partM1, mW, W);
+            int b1 = popAnd(bd.clusterBits, bB, bd.partM2, mW, W);
+            int lgTree = bd.partMeta[m], sz1 = bd.partMeta[m + 1], sz2 = bd.partMeta[m + 2],
+                sz3 = bd.partMeta[m + 3], freq = bd.partMeta[m + 4];
+            int L_GT = sz1 + sz2 + sz3, lgA, lgB;
+            if (L_GT == totalN) { lgA = aSize; lgB = bSize; }
+            else { int lb = lgTree * W;
+                   lgA = popAnd(bd.clusterBits, aB, bd.geneLgBits, lb, W);
+                   lgB = popAnd(bd.clusterBits, bB, bd.geneLgBits, lb, W); }
+            int a2 = lgA - a0 - a1, b2 = lgB - b0 - b1;
+            int c0 = sz1 - a0 - b0, c1 = sz2 - a1 - b1, c2 = sz3 - a2 - b2;
+            if (a2 < 0 || b2 < 0 || c0 < 0 || c1 < 0 || c2 < 0) continue;
+            twoScore = twoScore.add(computeTwoQIInt128(a0, a1, a2, b0, b1, b2, c0, c1, c2).mulScalar(freq));
+        }
+        for (int pn = 0; pn < bd.numPoly; pn++) {
+            int m = pn * 5;
+            int d = bd.polyMeta[m + 1], lastSize = bd.polyMeta[m + 2],
+                freq = bd.polyMeta[m + 3], L_GT = bd.polyMeta[m + 4];
+            int[][] parts = polyPartsBitset(bd, pn, d, lastSize, L_GT, totalN, aB, bB, aSize, bSize);
+            if (parts == null) continue;
+            twoScore = twoScore.add(polyTwoQIInt128(parts[0], parts[1], parts[2], d).mulScalar(freq));
+        }
+        return twoScore.halve();
+    }
+
+    /**
+     * Bitset analogue of {@link #polyParts}: build the d×3 matrix for a polytomous
+     * part from precomputed child bitsets.  Returns null on an incomplete-tree row
+     * mismatch (negative complement part), matching the range path.
+     */
+    private int[][] polyPartsBitset(BitsetData bd, int pn, int d, int lastSize, int L_GT,
+                                    int totalN, int aB, int bB, int aSize, int bSize) {
+        int W = bd.W;
+        int cbeg = bd.polyChildOffset[pn];
+        int[] a = new int[d], b = new int[d], c = new int[d];
+        int sumA = 0, sumB = 0;
+        for (int ci = 0; ci < d - 1; ci++) {
+            int mW = (cbeg + ci) * W, szi = bd.polyChildSize[cbeg + ci];
+            int ai = popAnd(bd.clusterBits, aB, bd.polyChildBits, mW, W);
+            int bi = popAnd(bd.clusterBits, bB, bd.polyChildBits, mW, W);
+            int cci = szi - ai - bi;
+            if (cci < 0) return null;
+            a[ci] = ai; b[ci] = bi; c[ci] = cci;
+            sumA += ai; sumB += bi;
+        }
+        int lgTree = bd.polyMeta[pn * 5];
+        int lgA, lgB;
+        if (L_GT == totalN) { lgA = aSize; lgB = bSize; }
+        else { int lb = lgTree * W;
+               lgA = popAnd(bd.clusterBits, aB, bd.geneLgBits, lb, W);
+               lgB = popAnd(bd.clusterBits, bB, bd.geneLgBits, lb, W); }
+        int aC = lgA - sumA, bC = lgB - sumB, cC = lastSize - aC - bC;
+        if (aC < 0 || bC < 0 || cC < 0) return null;
+        a[d - 1] = aC; b[d - 1] = bC; c[d - 1] = cC;
+        return new int[][]{ a, b, c };
+    }
+
+    /** CPU bitset path: build bitsets once, then score splits in parallel. */
+    private void computeScoresCPUBitset(List<BipartitionSplit> splitList,
+                                        PartitionTable partTable, ClusterTable clusterTable,
+                                        List<Tree> clusterTrees, List<Tree> partTrees,
+                                        long[] scoreArray, double[] scoreArrayD, Int128[] scoreArrayI) {
+        BitsetData bd = buildBitsetData(splitList, partTable, clusterTable, clusterTrees, partTrees);
+        int numSplits = splitList.size();
+        int totalN = n;
+        Logging.info("Weight table: CPU path (bitset)  splits=%d  W=%d  clusters=%d  bin=%d  poly=%d  trees=%d",
+            numSplits, bd.W, bd.numClusters, bd.numBin, bd.numPoly, bd.numPartTrees);
+        java.util.concurrent.atomic.AtomicInteger wDone = new java.util.concurrent.atomic.AtomicInteger(0);
+        ProgressBar wBar = new ProgressBar("Scoring splits (CPU bitset)", numSplits);
+        Threading.processRangeParallel(numSplits, idx -> {
+            if (useInt128)      scoreArrayI[idx] = computeScoreBitsetI(idx, bd, totalN);
+            else if (useDouble) scoreArrayD[idx] = computeScoreBitsetD(idx, bd, totalN);
+            else                scoreArray[idx]  = computeScoreBitset(idx, bd, totalN);
+            wBar.update(wDone.incrementAndGet());
+        });
+        wBar.done();
+    }
+
+    /** GPU bitset path: build bitsets once, resolve batch size, call the native kernel. */
+    private boolean computeScoresGPUBitset(List<BipartitionSplit> splitList,
+                                           PartitionTable partTable, ClusterTable clusterTable,
+                                           List<Tree> clusterTrees, List<Tree> partTrees,
+                                           long[] scoreArray, double[] scoreArrayD, Int128[] scoreArrayI) {
+        Config cfg = Config.getInstance();
+        BitsetData bd = buildBitsetData(splitList, partTable, clusterTable, clusterTrees, partTrees);
+        int numSplits = splitList.size();
+
+        // Resident device memory (for vram-control-factor sizing + logging only).
+        long residentMem = 8L * (bd.clusterBits.length + bd.partM1.length + bd.partM2.length
+                                 + bd.geneLgBits.length + bd.polyChildBits.length)
+                         + 4L * (bd.partMeta.length + bd.polyMeta.length
+                                 + bd.polyChildOffset.length + bd.polyChildSize.length);
+        long perSplit = 4L * Integer.BYTES + (useInt128 ? 2L : 1L) * Long.BYTES;   // 4 ints in + score out
+
+        // Batch-size hint — same priority as the other GPU paths.
+        int batchSizeHint; String batchDesc;
+        if (!cfg.isGpuBatch()) {
+            batchSizeHint = -1; batchDesc = "off (single launch)";
+        } else if (cfg.getGpuNumBatches() > 0) {
+            int N = cfg.getGpuNumBatches();
+            batchSizeHint = (numSplits + N - 1) / N;
+            batchDesc = N + " batches → batchSize=" + batchSizeHint;
+        } else if (cfg.getGpuBatchSize() > 0) {
+            batchSizeHint = cfg.getGpuBatchSize();
+            batchDesc = "explicit batchSize=" + batchSizeHint;
+        } else if (cfg.isGpuVramControlFactorSet()) {
+            double F = cfg.getGpuVramControlFactor();
+            long batchMem = (long) (F * residentMem);
+            batchSizeHint = (int) Math.max(1, Math.min(numSplits, batchMem / perSplit));
+            batchDesc = String.format("vram-control-factor=%.3f  resident=%.1f MB  batch→%d",
+                F, residentMem / 1e6, (numSplits + batchSizeHint - 1) / Math.max(1, batchSizeHint));
+        } else {
+            batchSizeHint = 0;
+            batchDesc = String.format("auto (free-VRAM adaptive, occupancy=%.0f%%)",
+                cfg.getGpuVramFraction() * 100);
+        }
+
+        Logging.info("Weight table: GPU path (bitset)  splits=%d  W=%d  clusters=%d  bin=%d  poly=%d  trees=%d  resident=%.1f MB  batching=%s",
+            numSplits, bd.W, bd.numClusters, bd.numBin, bd.numPoly, bd.numPartTrees,
+            residentMem / 1e6, batchDesc);
+
+        long t1 = System.nanoTime();
+        long[] twoScores = GPUWeightCalculator.computeWeightsBitsetGPU(
+            bd.splitCid, bd.clusterBits, bd.partM1, bd.partM2, bd.partMeta, bd.geneLgBits,
+            bd.polyMeta, bd.polyChildOffset, bd.polyChildBits, bd.polyChildSize,
+            numSplits, bd.numClusters, bd.numBin, bd.numPoly, bd.numPartTrees, bd.W, n,
+            batchSizeHint, cfg.getGpuVramFraction(), nativeScoreMode(),
+            cfg.getGpuProgressIntervalSec());
+        long gpuMs = (System.nanoTime() - t1) / 1_000_000;
+
+        if (twoScores == null) {
+            Logging.info("  GPU bitset kernel returned null after %d ms (infeasible)", gpuMs);
+            return false;
+        }
+        Logging.info("  GPU bitset kernel returned in %d ms", gpuMs);
+        unpackTwoScores(twoScores, scoreArray, scoreArrayD, scoreArrayI, numSplits);
+        return true;
     }
 
     // -------------------------------------------------------------------------

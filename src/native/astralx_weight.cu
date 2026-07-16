@@ -1141,6 +1141,266 @@ __global__ void computeWeightsSmallerSideKernelI128(
     }
 }
 
+// ===========================================================================
+// BITSET path (low-taxa fast option).
+//
+// Every cluster and every gene-tree part is a global-taxon bitset of W = ceil(n/64)
+// 64-bit words.  One thread per split loads its A/B cluster bitsets from the resident
+// pool (indexed by a per-split cluster id) and, for each part, computes each core
+// intersection as popcount(A & M) over W words.  No orderings/invIndex/prefix arrays
+// are used in the score loop.  The 3×3 derivation, poly two-pass formula, and QI math
+// are identical to the other kernels, so scores are bit-identical.
+//
+// Layouts:
+//   splits[idx*4]        = {aCid, bCid, aSize, bSize}   (per-batch, streamed)
+//   clusterBits[cid*W]   = W-word global-taxon set       (resident; cid 0 = empty)
+//   partM1/partM2[j*W]   = binary part child bitsets      (resident)
+//   partMeta[j*5]        = {lgTree, sz1, sz2, sz3, freq}
+//   geneLgBits[g*W]      = gene-tree present-taxa mask     (resident)
+//   polyMeta[pn*5]       = {lgTree, d, lastSize, freq, L_GT}
+//   polyChildOffset[pn]  = CSR row pointer into polyChildBits/polyChildSize
+//   polyChildBits[c*W]   = poly child bitset;  polyChildSize[c] = |child|
+// ===========================================================================
+
+__device__ inline int bs_popAnd(const unsigned long long* __restrict__ x,
+                                 const unsigned long long* __restrict__ y, int W) {
+    int c = 0;
+    for (int k = 0; k < W; k++) c += __popcll(x[k] & y[k]);
+    return c;
+}
+
+template<typename ACC>
+__global__ void computeWeightsBitsetKernel(
+    const int* __restrict__ splits,                       // curBatch * 4
+    const unsigned long long* __restrict__ clusterBits,
+    const unsigned long long* __restrict__ partM1,
+    const unsigned long long* __restrict__ partM2,
+    const int* __restrict__ partMeta,                     // numParts * 5
+    const unsigned long long* __restrict__ geneLgBits,
+    const int* __restrict__ polyMeta,                     // numPoly * 5
+    const int* __restrict__ polyChildOffset,              // numPoly + 1
+    const unsigned long long* __restrict__ polyChildBits,
+    const int* __restrict__ polyChildSize,
+    int curBatch, int numParts, int numPoly, int W, int totalN,
+    long long* __restrict__ twoScores, int* __restrict__ dProgress)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= curBatch) return;
+
+    const int* sp = splits + (size_t)idx * 4;
+    int aCid = sp[0], bCid = sp[1], aSize = sp[2], bSize = sp[3];
+    if (totalN - aSize - bSize < 0) { twoScores[idx] = 0LL; return; }
+
+    const unsigned long long* A = clusterBits + (size_t)aCid * W;
+    const unsigned long long* B = clusterBits + (size_t)bCid * W;
+
+    const int PI[6] = {0, 0, 1, 1, 2, 2};
+    const int PJ[6] = {1, 2, 0, 2, 0, 1};
+    const int PK[6] = {2, 1, 2, 0, 1, 0};
+
+    ACC twoScore = (ACC) 0;
+
+    for (int j = 0; j < numParts; j++) {
+        const unsigned long long* M1 = partM1 + (size_t)j * W;
+        const unsigned long long* M2 = partM2 + (size_t)j * W;
+        const int* pm = partMeta + (size_t)j * 5;
+        int lgTree = pm[0], sz1 = pm[1], sz2 = pm[2], sz3 = pm[3], freq = pm[4];
+
+        int a0 = bs_popAnd(A, M1, W);
+        int a1 = bs_popAnd(A, M2, W);
+        int b0 = bs_popAnd(B, M1, W);
+        int b1 = bs_popAnd(B, M2, W);
+
+        int L_GT = sz1 + sz2 + sz3, lgA, lgB;
+        if (L_GT == totalN) { lgA = aSize; lgB = bSize; }
+        else { const unsigned long long* Lg = geneLgBits + (size_t)lgTree * W;
+               lgA = bs_popAnd(A, Lg, W); lgB = bs_popAnd(B, Lg, W); }
+
+        int a2 = lgA - a0 - a1, b2 = lgB - b0 - b1;
+        int c0 = sz1 - a0 - b0, c1 = sz2 - a1 - b1, c2 = sz3 - a2 - b2;
+        if (a2 < 0 || b2 < 0 || c0 < 0 || c1 < 0 || c2 < 0) continue;
+
+        ACC a[3] = {(ACC)a0, (ACC)a1, (ACC)a2};
+        ACC b[3] = {(ACC)b0, (ACC)b1, (ACC)b2};
+        ACC c[3] = {(ACC)c0, (ACC)c1, (ACC)c2};
+        ACC twoQI = (ACC) 0;
+        #pragma unroll
+        for (int p = 0; p < 6; p++) {
+            ACC ai = a[PI[p]], bj = b[PJ[p]], ck = c[PK[p]];
+            ACC su = ai + bj + ck - 3;
+            if (su > 0) twoQI += ai * bj * ck * su;
+        }
+        twoScore += (ACC) freq * twoQI;
+    }
+
+    // Polytomy (d>3) parts — two-pass-rewalk O(d) QI (reuses A/B bitsets).
+    for (int pn = 0; pn < numPoly; pn++) {
+        const int* pm = polyMeta + (size_t)pn * 5;
+        int lgTree = pm[0], d = pm[1], lastSize = pm[2], freq = pm[3], L_GT = pm[4];
+        int cbeg = polyChildOffset[pn];
+
+        ACC Sa = 0, Sb = 0, Sc = 0, Sab = 0, Sac = 0, Sbc = 0;
+        int sumA = 0, sumB = 0;
+        for (int i = 0; i < d - 1; i++) {
+            const unsigned long long* Mi = polyChildBits + (size_t)(cbeg + i) * W;
+            int szi = polyChildSize[cbeg + i];
+            int ai = bs_popAnd(A, Mi, W), bi = bs_popAnd(B, Mi, W), ci = szi - ai - bi;
+            Sa += ai; Sb += bi; Sc += ci;
+            Sab += (ACC) ai * bi; Sac += (ACC) ai * ci; Sbc += (ACC) bi * ci;
+            sumA += ai; sumB += bi;
+        }
+        int lgA, lgB;
+        if (L_GT == totalN) { lgA = aSize; lgB = bSize; }
+        else { const unsigned long long* Lg = geneLgBits + (size_t)lgTree * W;
+               lgA = bs_popAnd(A, Lg, W); lgB = bs_popAnd(B, Lg, W); }
+        int aC = lgA - sumA, bC = lgB - sumB, cC = lastSize - aC - bC;
+        if (aC < 0 || bC < 0 || cC < 0) continue;
+        Sa += aC; Sb += bC; Sc += cC;
+        Sab += (ACC) aC * bC; Sac += (ACC) aC * cC; Sbc += (ACC) bC * cC;
+
+        ACC twoQI = (ACC) 0;
+        for (int i = 0; i < d; i++) {
+            ACC ai, bi, ci;
+            if (i < d - 1) {
+                const unsigned long long* Mi = polyChildBits + (size_t)(cbeg + i) * W;
+                int szi = polyChildSize[cbeg + i];
+                int aii = bs_popAnd(A, Mi, W), bii = bs_popAnd(B, Mi, W);
+                ai = aii; bi = bii; ci = szi - aii - bii;
+            } else { ai = aC; bi = bC; ci = cC; }
+            twoQI += ai * (ai - 1) * ((Sb - bi) * (Sc - ci) - Sbc + bi * ci);
+            twoQI += bi * (bi - 1) * ((Sa - ai) * (Sc - ci) - Sac + ai * ci);
+            twoQI += ci * (ci - 1) * ((Sa - ai) * (Sb - bi) - Sab + ai * bi);
+        }
+        twoScore += (ACC) freq * twoQI;
+    }
+
+    storeTwoScore(twoScores, idx, twoScore);
+
+    if (dProgress) {
+        unsigned act = __activemask();
+        if ((threadIdx.x & 31) == (__ffs(act) - 1)) atomicAdd(dProgress, __popc(act));
+    }
+}
+
+// INT128 twin of the bitset kernel (one thread per split, exact 128-bit).
+__global__ void computeWeightsBitsetKernelI128(
+    const int* __restrict__ splits,
+    const unsigned long long* __restrict__ clusterBits,
+    const unsigned long long* __restrict__ partM1,
+    const unsigned long long* __restrict__ partM2,
+    const int* __restrict__ partMeta,
+    const unsigned long long* __restrict__ geneLgBits,
+    const int* __restrict__ polyMeta,
+    const int* __restrict__ polyChildOffset,
+    const unsigned long long* __restrict__ polyChildBits,
+    const int* __restrict__ polyChildSize,
+    int curBatch, int numParts, int numPoly, int W, int totalN,
+    long long* __restrict__ twoScores, int* __restrict__ dProgress)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= curBatch) return;
+
+    const int* sp = splits + (size_t)idx * 4;
+    int aCid = sp[0], bCid = sp[1], aSize = sp[2], bSize = sp[3];
+    if (totalN - aSize - bSize < 0) { storeTwoScoreI128(twoScores, idx, i128_zero()); return; }
+
+    const unsigned long long* A = clusterBits + (size_t)aCid * W;
+    const unsigned long long* B = clusterBits + (size_t)bCid * W;
+
+    const int PI[6] = {0, 0, 1, 1, 2, 2};
+    const int PJ[6] = {1, 2, 0, 2, 0, 1};
+    const int PK[6] = {2, 1, 2, 0, 1, 0};
+
+    I128 twoScore = i128_zero();
+
+    for (int j = 0; j < numParts; j++) {
+        const unsigned long long* M1 = partM1 + (size_t)j * W;
+        const unsigned long long* M2 = partM2 + (size_t)j * W;
+        const int* pm = partMeta + (size_t)j * 5;
+        int lgTree = pm[0], sz1 = pm[1], sz2 = pm[2], sz3 = pm[3], freq = pm[4];
+
+        int a0 = bs_popAnd(A, M1, W);
+        int a1 = bs_popAnd(A, M2, W);
+        int b0 = bs_popAnd(B, M1, W);
+        int b1 = bs_popAnd(B, M2, W);
+
+        int L_GT = sz1 + sz2 + sz3, lgA, lgB;
+        if (L_GT == totalN) { lgA = aSize; lgB = bSize; }
+        else { const unsigned long long* Lg = geneLgBits + (size_t)lgTree * W;
+               lgA = bs_popAnd(A, Lg, W); lgB = bs_popAnd(B, Lg, W); }
+
+        int a2 = lgA - a0 - a1, b2 = lgB - b0 - b1;
+        int c0 = sz1 - a0 - b0, c1 = sz2 - a1 - b1, c2 = sz3 - a2 - b2;
+        if (a2 < 0 || b2 < 0 || c0 < 0 || c1 < 0 || c2 < 0) continue;
+
+        long long a[3] = {a0, a1, a2};
+        long long b[3] = {b0, b1, b2};
+        long long c[3] = {c0, c1, c2};
+        I128 twoQI = i128_zero();
+        #pragma unroll
+        for (int p = 0; p < 6; p++) {
+            long long ai = a[PI[p]], bj = b[PJ[p]], ck = c[PK[p]];
+            long long su = ai + bj + ck - 3;
+            if (su > 0) {
+                long long abc = ai * bj * ck;
+                twoQI = i128_add(twoQI, i128_mul_u64((unsigned long long) abc, (unsigned long long) su));
+            }
+        }
+        twoScore = i128_add(twoScore, i128_mul_scalar(twoQI, (unsigned long long) freq));
+    }
+
+    for (int pn = 0; pn < numPoly; pn++) {
+        const int* pm = polyMeta + (size_t)pn * 5;
+        int lgTree = pm[0], d = pm[1], lastSize = pm[2], freq = pm[3], L_GT = pm[4];
+        int cbeg = polyChildOffset[pn];
+
+        long long Sa = 0, Sb = 0, Sc = 0, Sab = 0, Sac = 0, Sbc = 0;
+        int sumA = 0, sumB = 0;
+        for (int i = 0; i < d - 1; i++) {
+            const unsigned long long* Mi = polyChildBits + (size_t)(cbeg + i) * W;
+            int szi = polyChildSize[cbeg + i];
+            int ai = bs_popAnd(A, Mi, W), bi = bs_popAnd(B, Mi, W), ci = szi - ai - bi;
+            Sa += ai; Sb += bi; Sc += ci;
+            Sab += (long long) ai * bi; Sac += (long long) ai * ci; Sbc += (long long) bi * ci;
+            sumA += ai; sumB += bi;
+        }
+        int lgA, lgB;
+        if (L_GT == totalN) { lgA = aSize; lgB = bSize; }
+        else { const unsigned long long* Lg = geneLgBits + (size_t)lgTree * W;
+               lgA = bs_popAnd(A, Lg, W); lgB = bs_popAnd(B, Lg, W); }
+        int aC = lgA - sumA, bC = lgB - sumB, cC = lastSize - aC - bC;
+        if (aC < 0 || bC < 0 || cC < 0) continue;
+        Sa += aC; Sb += bC; Sc += cC;
+        Sab += (long long) aC * bC; Sac += (long long) aC * cC; Sbc += (long long) bC * cC;
+
+        I128 twoQI = i128_zero();
+        for (int i = 0; i < d; i++) {
+            long long ai, bi, ci;
+            if (i < d - 1) {
+                const unsigned long long* Mi = polyChildBits + (size_t)(cbeg + i) * W;
+                int szi = polyChildSize[cbeg + i];
+                int aii = bs_popAnd(A, Mi, W), bii = bs_popAnd(B, Mi, W);
+                ai = aii; bi = bii; ci = szi - aii - bii;
+            } else { ai = aC; bi = bC; ci = cC; }
+            long long brA = (Sb - bi) * (Sc - ci) - Sbc + bi * ci;
+            long long brB = (Sa - ai) * (Sc - ci) - Sac + ai * ci;
+            long long brC = (Sa - ai) * (Sb - bi) - Sab + ai * bi;
+            long long wA = ai * (ai - 1), wB = bi * (bi - 1), wC = ci * (ci - 1);
+            if (wA > 0 && brA > 0) twoQI = i128_add(twoQI, i128_mul_u64((unsigned long long) wA, (unsigned long long) brA));
+            if (wB > 0 && brB > 0) twoQI = i128_add(twoQI, i128_mul_u64((unsigned long long) wB, (unsigned long long) brB));
+            if (wC > 0 && brC > 0) twoQI = i128_add(twoQI, i128_mul_u64((unsigned long long) wC, (unsigned long long) brC));
+        }
+        twoScore = i128_add(twoScore, i128_mul_scalar(twoQI, (unsigned long long) freq));
+    }
+
+    storeTwoScoreI128(twoScores, idx, twoScore);
+
+    if (dProgress) {
+        unsigned act = __activemask();
+        if ((threadIdx.x & 31) == (__ffs(act) - 1)) atomicAdd(dProgress, __popc(act));
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Progress-bar helpers (host-side, used in the batch loop)
 // ---------------------------------------------------------------------------
@@ -1998,6 +2258,264 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsSmallerSideGPU(
     env->ReleaseIntArrayElements(jSsPolyBounds,     hSsPolyBounds,     JNI_ABORT);
     env->ReleaseIntArrayElements(jOrderings, hOrderings, JNI_ABORT);
     env->ReleaseIntArrayElements(jInvIndex,  hInvIndex,  JNI_ABORT);
+
+    return result;
+}
+
+JNIEXPORT jlongArray JNICALL
+Java_astralx_gpu_GPUWeightCalculator_computeWeightsBitsetGPU(
+    JNIEnv* env, jclass cls,
+    jintArray jSplits,
+    jlongArray jClusterBits,
+    jlongArray jPartM1, jlongArray jPartM2,
+    jintArray jPartMeta,
+    jlongArray jGeneLgBits,
+    jintArray jPolyMeta, jintArray jPolyChildOffset,
+    jlongArray jPolyChildBits, jintArray jPolyChildSize,
+    jint numSplits, jint numClusters, jint numParts, jint numPoly, jint numPartTrees,
+    jint wordsPerSet, jint numTaxa,
+    jint batchSizeHint, jdouble vramFraction, jint scoreMode, jdouble progressIntervalSec)
+{
+    bool useDouble = (scoreMode == 1);
+    bool useI128   = (scoreMode == 2);
+    int  scoresPerSplit = useI128 ? 2 : 1;
+    int  W = wordsPerSet;
+    int  totalN = numTaxa;
+    fprintf(stderr, "[ASTRAL-X GPU] weight accumulator: %s  (bitset, W=%d words)\n",
+            useI128   ? "INT128 (exact 128-bit integer)"
+          : useDouble ? "DOUBLE (64-bit float, overflow-safe)"
+                      : "LONG (exact 64-bit integer)", W);
+
+    jint*  hSplits         = env->GetIntArrayElements(jSplits, NULL);
+    jlong* hClusterBits    = env->GetLongArrayElements(jClusterBits, NULL);
+    jlong* hPartM1         = env->GetLongArrayElements(jPartM1, NULL);
+    jlong* hPartM2         = env->GetLongArrayElements(jPartM2, NULL);
+    jint*  hPartMeta       = env->GetIntArrayElements(jPartMeta, NULL);
+    jlong* hGeneLgBits     = env->GetLongArrayElements(jGeneLgBits, NULL);
+    jint*  hPolyMeta       = env->GetIntArrayElements(jPolyMeta, NULL);
+    jint*  hPolyChildOffset= env->GetIntArrayElements(jPolyChildOffset, NULL);
+    jlong* hPolyChildBits  = env->GetLongArrayElements(jPolyChildBits, NULL);
+    jint*  hPolyChildSize  = env->GetIntArrayElements(jPolyChildSize, NULL);
+
+    size_t clusterLen   = (size_t) env->GetArrayLength(jClusterBits);
+    size_t partM1Len    = (size_t) env->GetArrayLength(jPartM1);
+    size_t partM2Len    = (size_t) env->GetArrayLength(jPartM2);
+    size_t partMetaLen  = (size_t) env->GetArrayLength(jPartMeta);
+    size_t geneLgLen    = (size_t) env->GetArrayLength(jGeneLgBits);
+    size_t polyMetaLen  = (size_t) env->GetArrayLength(jPolyMeta);
+    size_t polyOffLen   = (size_t) env->GetArrayLength(jPolyChildOffset);
+    size_t polyCBitsLen = (size_t) env->GetArrayLength(jPolyChildBits);
+    size_t polyCSizeLen = (size_t) env->GetArrayLength(jPolyChildSize);
+
+    // --- Upload resident data once ---
+    unsigned long long *dClusterBits, *dPartM1, *dPartM2, *dGeneLgBits, *dPolyChildBits;
+    int *dPartMeta, *dPolyMeta, *dPolyChildOffset, *dPolyChildSize;
+    #define MB_(n) ((size_t)((n) > 0 ? (n) : 1))
+    size_t clusterSz = MB_(clusterLen)   * sizeof(unsigned long long);
+    size_t pm1Sz     = MB_(partM1Len)    * sizeof(unsigned long long);
+    size_t pm2Sz     = MB_(partM2Len)    * sizeof(unsigned long long);
+    size_t geneSz    = MB_(geneLgLen)    * sizeof(unsigned long long);
+    size_t pcbSz     = MB_(polyCBitsLen) * sizeof(unsigned long long);
+    size_t pMetaSz   = MB_(partMetaLen)  * sizeof(int);
+    size_t polyMetaSz= MB_(polyMetaLen)  * sizeof(int);
+    size_t polyOffSz = MB_(polyOffLen)   * sizeof(int);
+    size_t polyCSzSz = MB_(polyCSizeLen) * sizeof(int);
+
+    cudaMalloc(&dClusterBits,     clusterSz);
+    cudaMalloc(&dPartM1,          pm1Sz);
+    cudaMalloc(&dPartM2,          pm2Sz);
+    cudaMalloc(&dGeneLgBits,      geneSz);
+    cudaMalloc(&dPolyChildBits,   pcbSz);
+    cudaMalloc(&dPartMeta,        pMetaSz);
+    cudaMalloc(&dPolyMeta,        polyMetaSz);
+    cudaMalloc(&dPolyChildOffset, polyOffSz);
+    cudaMalloc(&dPolyChildSize,   polyCSzSz);
+
+    if (clusterLen)   cudaMemcpy(dClusterBits,   hClusterBits,   clusterLen  * sizeof(unsigned long long), cudaMemcpyHostToDevice);
+    if (partM1Len)    cudaMemcpy(dPartM1,        hPartM1,        partM1Len   * sizeof(unsigned long long), cudaMemcpyHostToDevice);
+    if (partM2Len)    cudaMemcpy(dPartM2,        hPartM2,        partM2Len   * sizeof(unsigned long long), cudaMemcpyHostToDevice);
+    if (geneLgLen)    cudaMemcpy(dGeneLgBits,    hGeneLgBits,    geneLgLen   * sizeof(unsigned long long), cudaMemcpyHostToDevice);
+    if (polyCBitsLen) cudaMemcpy(dPolyChildBits, hPolyChildBits, polyCBitsLen* sizeof(unsigned long long), cudaMemcpyHostToDevice);
+    if (partMetaLen)  cudaMemcpy(dPartMeta,      hPartMeta,      partMetaLen * sizeof(int), cudaMemcpyHostToDevice);
+    if (polyMetaLen)  cudaMemcpy(dPolyMeta,      hPolyMeta,      polyMetaLen * sizeof(int), cudaMemcpyHostToDevice);
+    if (polyOffLen)   cudaMemcpy(dPolyChildOffset,hPolyChildOffset,polyOffLen* sizeof(int), cudaMemcpyHostToDevice);
+    if (polyCSizeLen) cudaMemcpy(dPolyChildSize, hPolyChildSize, polyCSizeLen* sizeof(int), cudaMemcpyHostToDevice);
+    #undef MB_
+
+    {
+        size_t residentTotal = clusterSz + pm1Sz + pm2Sz + geneSz + pcbSz
+                             + pMetaSz + polyMetaSz + polyOffSz + polyCSzSz;
+        size_t freeAfterStatic = 0, totalVRAM = 0;
+        cudaMemGetInfo(&freeAfterStatic, &totalVRAM);
+        fprintf(stderr,
+            "[ASTRAL-X GPU] weight resident data uploaded (bitset, W=%d):\n"
+            "  clusterBits : %6.1f MB  (%d clusters × %d words)\n"
+            "  partM1+M2   : %6.1f MB  (%d binary parts)\n"
+            "  geneLgBits  : %6.1f MB  (%d gene trees)\n"
+            "  polyChild   : %6.1f MB  (%d poly parts)\n"
+            "  ─────────────────────\n"
+            "  resident total : %6.1f MB   (VRAM free after: %.1f MB / %.1f MB)\n",
+            W, clusterSz / 1e6, numClusters, W, (pm1Sz + pm2Sz) / 1e6, numParts,
+            geneSz / 1e6, numPartTrees, pcbSz / 1e6, numPoly,
+            residentTotal / 1e6, freeAfterStatic / 1e6, totalVRAM / 1e6);
+        fflush(stderr);
+    }
+
+    // --- Determine batch size (per-split: 16 B in + 8/16 B out) ---
+    int batchSize;
+    if (batchSizeHint == -1) {
+        batchSize = numSplits;
+        fprintf(stderr, "[ASTRAL-X GPU] batching disabled — single launch, %d splits\n", numSplits);
+    } else if (batchSizeHint > 0) {
+        batchSize = (batchSizeHint < numSplits) ? batchSizeHint : numSplits;
+        fprintf(stderr, "[ASTRAL-X GPU] manual batch size: %d  (numSplits=%d)\n", batchSize, numSplits);
+    } else {
+        size_t freeVRAM = 0, totalVRAM = 0;
+        cudaMemGetInfo(&freeVRAM, &totalVRAM);
+        size_t usable = (size_t)((double)freeVRAM * (double)vramFraction);
+        size_t perSplitBytes = 4 * sizeof(int) + scoresPerSplit * sizeof(long long);
+        long long autoSize = (long long)(usable / perSplitBytes);
+        if (autoSize < 1) autoSize = 1;
+        if (autoSize > (long long)numSplits) autoSize = (long long)numSplits;
+        batchSize = (int)autoSize;
+        fprintf(stderr,
+            "[ASTRAL-X GPU] adaptive batch: freeVRAM=%.2f GB, occupancy=%.0f%%, usable=%.2f GB, "
+            "perSplit=%zu B → batchSize=%d  (numSplits=%d, numBatches=%d)\n",
+            freeVRAM / 1e9, (double)vramFraction * 100.0, usable / 1e9,
+            perSplitBytes, batchSize, numSplits, (numSplits + batchSize - 1) / batchSize);
+    }
+
+    int*       dSplits    = NULL;
+    long long* dTwoScores = NULL;
+    while (batchSize > 0) {
+        size_t splitBufSz = (size_t)batchSize * 4 * sizeof(int);
+        size_t scoreBufSz = (size_t)batchSize * scoresPerSplit * sizeof(long long);
+        cudaError_t e1 = cudaMalloc(&dSplits,    splitBufSz);
+        cudaError_t e2 = cudaMalloc(&dTwoScores, scoreBufSz);
+        if (e1 == cudaSuccess && e2 == cudaSuccess) break;
+        if (dSplits)    { cudaFree(dSplits);    dSplits    = NULL; }
+        if (dTwoScores) { cudaFree(dTwoScores); dTwoScores = NULL; }
+        batchSize /= 2;
+        fprintf(stderr, "[ASTRAL-X GPU] cudaMalloc failed, retrying with batchSize=%d\n", batchSize);
+    }
+    if (batchSize <= 0 || dSplits == NULL || dTwoScores == NULL) {
+        fprintf(stderr, "[ASTRAL-X GPU] FATAL: cannot allocate GPU batch buffers (bitset)\n");
+        cudaFree(dClusterBits); cudaFree(dPartM1); cudaFree(dPartM2); cudaFree(dGeneLgBits);
+        cudaFree(dPolyChildBits); cudaFree(dPartMeta); cudaFree(dPolyMeta);
+        cudaFree(dPolyChildOffset); cudaFree(dPolyChildSize);
+        env->ReleaseIntArrayElements(jSplits, hSplits, JNI_ABORT);
+        env->ReleaseLongArrayElements(jClusterBits, hClusterBits, JNI_ABORT);
+        env->ReleaseLongArrayElements(jPartM1, hPartM1, JNI_ABORT);
+        env->ReleaseLongArrayElements(jPartM2, hPartM2, JNI_ABORT);
+        env->ReleaseIntArrayElements(jPartMeta, hPartMeta, JNI_ABORT);
+        env->ReleaseLongArrayElements(jGeneLgBits, hGeneLgBits, JNI_ABORT);
+        env->ReleaseIntArrayElements(jPolyMeta, hPolyMeta, JNI_ABORT);
+        env->ReleaseIntArrayElements(jPolyChildOffset, hPolyChildOffset, JNI_ABORT);
+        env->ReleaseLongArrayElements(jPolyChildBits, hPolyChildBits, JNI_ABORT);
+        env->ReleaseIntArrayElements(jPolyChildSize, hPolyChildSize, JNI_ABORT);
+        return NULL;
+    }
+
+    long long* hTwoScores = new long long[(size_t)numSplits * scoresPerSplit]();
+
+    cudaStream_t wbStream = 0, pollStream = 0;
+    cudaStreamCreate(&wbStream);
+    cudaStreamCreate(&pollStream);
+    int* dProgress = NULL; int* hProgress = NULL;
+    cudaMalloc(&dProgress, sizeof(int));
+    cudaHostAlloc((void**)&hProgress, sizeof(int), cudaHostAllocDefault);
+
+    int    blockSize  = WB_BLOCK;
+    int    numBatches = (numSplits + batchSize - 1) / batchSize;
+    double t_loop_start = wb_now_sec();
+    const char* GRN = wb_use_color() ? "\033[32m" : "";
+    const char* RST = wb_use_color() ? "\033[0m"  : "";
+    char   bar_buf[WB_BAR_W * 3 + 1];
+
+    for (int b = 0; b < numBatches; b++) {
+        int offset   = b * batchSize;
+        int curBatch = (offset + batchSize <= numSplits) ? batchSize : (numSplits - offset);
+
+        cudaMemcpy(dSplits, hSplits + (size_t)offset * 4,
+                   (size_t)curBatch * 4 * sizeof(int), cudaMemcpyHostToDevice);
+        cudaMemsetAsync(dProgress, 0, sizeof(int), wbStream);
+
+        int gridSize = (curBatch + blockSize - 1) / blockSize;
+        if (useI128)
+            computeWeightsBitsetKernelI128<<<gridSize, blockSize, 0, wbStream>>>(
+                dSplits, dClusterBits, dPartM1, dPartM2, dPartMeta, dGeneLgBits,
+                dPolyMeta, dPolyChildOffset, dPolyChildBits, dPolyChildSize,
+                curBatch, numParts, numPoly, W, totalN, dTwoScores, dProgress);
+        else if (useDouble)
+            computeWeightsBitsetKernel<double><<<gridSize, blockSize, 0, wbStream>>>(
+                dSplits, dClusterBits, dPartM1, dPartM2, dPartMeta, dGeneLgBits,
+                dPolyMeta, dPolyChildOffset, dPolyChildBits, dPolyChildSize,
+                curBatch, numParts, numPoly, W, totalN, dTwoScores, dProgress);
+        else
+            computeWeightsBitsetKernel<long long><<<gridSize, blockSize, 0, wbStream>>>(
+                dSplits, dClusterBits, dPartM1, dPartM2, dPartMeta, dGeneLgBits,
+                dPolyMeta, dPolyChildOffset, dPolyChildBits, dPolyChildSize,
+                curBatch, numParts, numPoly, W, totalN, dTwoScores, dProgress);
+
+        char wbLabel[64];
+        snprintf(wbLabel, sizeof wbLabel,
+                 (numBatches > 1) ? "weight batch %d/%d" : "weight", b + 1, numBatches);
+        cudaError_t err = wb_poll_progress(wbStream, pollStream, dProgress, hProgress, curBatch, wbLabel, progressIntervalSec);
+        cudaError_t serr = cudaStreamSynchronize(wbStream);
+        if (err == cudaErrorNotReady || err == cudaSuccess) err = serr;
+        if (err != cudaSuccess) {
+            fprintf(stderr, "[ASTRAL-X GPU] kernel error (bitset batch %d/%d): %s\n",
+                    b + 1, numBatches, cudaGetErrorString(err));
+        }
+
+        cudaMemcpy(hTwoScores + (size_t)offset * scoresPerSplit, dTwoScores,
+                   (size_t)curBatch * scoresPerSplit * sizeof(long long), cudaMemcpyDeviceToHost);
+
+        if (numBatches > 1) {
+            double elapsed  = wb_now_sec() - t_loop_start;
+            double avg_sec  = elapsed / (b + 1);
+            int    rem      = numBatches - (b + 1);
+            double pct      = 100.0 * (b + 1) / numBatches;
+            wb_build_bar(bar_buf, b + 1, numBatches);
+            if (rem == 0) {
+                char dur_buf[32];
+                wb_fmt_duration(elapsed, dur_buf, sizeof(dur_buf));
+                fprintf(stderr,
+                    "\r  %s[GPU]%s weight  %s[%s]%s  %d/%d  100%%  done in %s                    \n",
+                    GRN, RST, GRN, bar_buf, RST, numBatches, numBatches, dur_buf);
+            } else {
+                char eta_buf[32];
+                wb_fmt_duration(avg_sec * rem, eta_buf, sizeof(eta_buf));
+                fprintf(stderr,
+                    "\r  %s[GPU]%s weight  %s[%s]%s  %d/%d  %5.1f%%  %.2fs/batch  ETA: %-8s",
+                    GRN, RST, GRN, bar_buf, RST, b + 1, numBatches, pct, avg_sec, eta_buf);
+            }
+            fflush(stderr);
+        }
+    }
+
+    jsize outLen = (jsize)((size_t)numSplits * scoresPerSplit);
+    jlongArray result = env->NewLongArray(outLen);
+    env->SetLongArrayRegion(result, 0, outLen, (jlong*)hTwoScores);
+
+    delete[] hTwoScores;
+    cudaFree(dSplits); cudaFree(dTwoScores);
+    cudaFree(dClusterBits); cudaFree(dPartM1); cudaFree(dPartM2); cudaFree(dGeneLgBits);
+    cudaFree(dPolyChildBits); cudaFree(dPartMeta); cudaFree(dPolyMeta);
+    cudaFree(dPolyChildOffset); cudaFree(dPolyChildSize);
+    cudaFree(dProgress); cudaFreeHost(hProgress);
+    cudaStreamDestroy(wbStream); cudaStreamDestroy(pollStream);
+
+    env->ReleaseIntArrayElements(jSplits, hSplits, JNI_ABORT);
+    env->ReleaseLongArrayElements(jClusterBits, hClusterBits, JNI_ABORT);
+    env->ReleaseLongArrayElements(jPartM1, hPartM1, JNI_ABORT);
+    env->ReleaseLongArrayElements(jPartM2, hPartM2, JNI_ABORT);
+    env->ReleaseIntArrayElements(jPartMeta, hPartMeta, JNI_ABORT);
+    env->ReleaseLongArrayElements(jGeneLgBits, hGeneLgBits, JNI_ABORT);
+    env->ReleaseIntArrayElements(jPolyMeta, hPolyMeta, JNI_ABORT);
+    env->ReleaseIntArrayElements(jPolyChildOffset, hPolyChildOffset, JNI_ABORT);
+    env->ReleaseLongArrayElements(jPolyChildBits, hPolyChildBits, JNI_ABORT);
+    env->ReleaseIntArrayElements(jPolyChildSize, hPolyChildSize, JNI_ABORT);
 
     return result;
 }

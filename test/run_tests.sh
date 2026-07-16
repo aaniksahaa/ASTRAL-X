@@ -47,8 +47,13 @@ NC='\033[0m'
 pass=0
 fail=0
 
+# Optional: pass extra ASTRAL-X flags via WEIGHT_METHOD env, e.g.
+#   WEIGHT_METHOD=bitset bash test/run_tests.sh --gpu
+EXTRA_OPTS=()
+[[ -n "${WEIGHT_METHOD:-}" ]] && EXTRA_OPTS=(--weight-intersection-method "$WEIGHT_METHOD")
+
 ASTRALX_CMD=(java -Djava.library.path="$NATIVE_DIR" -cp "$BUILD_DIR" astralx.Main
-             $COMPUTE_MODE --search-mode "$SEARCH_MODE")
+             $COMPUTE_MODE --search-mode "$SEARCH_MODE" "${EXTRA_OPTS[@]}")
 
 run_tc () {
     local input="$1"
@@ -81,7 +86,7 @@ run_tc () {
     local cmd=("${ASTRALX_CMD[@]}")
     if [[ "$name" == *polytomy* && "$SEARCH_MODE" != "full" ]]; then
         cmd=(java -Djava.library.path="$NATIVE_DIR" -cp "$BUILD_DIR" astralx.Main
-             $COMPUTE_MODE --search-mode full)
+             $COMPUTE_MODE --search-mode full "${EXTRA_OPTS[@]}")
     fi
     local astralx_out actual_score astralx_tree
     if ! astralx_out="$("${cmd[@]}" -i "$input" 2>&1)"; then

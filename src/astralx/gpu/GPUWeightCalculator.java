@@ -164,6 +164,67 @@ public class GPUWeightCalculator {
     );
 
     /**
+     * Bitset weight calculation (low-taxa fast path).
+     *
+     * Every cluster and every gene-tree part is materialized on the host as a
+     * global-taxon bitset of W = ceil(numTaxa/64) 64-bit words.  One CUDA thread
+     * per split loads its A/B cluster bitsets (indexed by a per-split cluster id
+     * into the resident cluster pool) and, for each unique part, computes each core
+     * intersection as popcount(A & M) over W words — no orderings/invIndex or prefix
+     * arrays are used in the kernel.  The 3×3 derivation and QI formula are identical
+     * to the other two methods, so scores are bit-identical.
+     *
+     * Resident (uploaded once): clusterBits, partM1/partM2 + partMeta, geneLgBits,
+     * poly CSR.  Per-batch (streamed like the other paths): splits (4 ints/split) +
+     * scores.  The batching / VRAM logic matches computeWeightsSmallerSideGPU.
+     *
+     * @param splits        curBatch source: numSplits × 4  [aCid, bCid, aSize, bSize]
+     * @param clusterBits   numClusters × W  longs (global-taxon bitsets; cid 0 = empty)
+     * @param partM1        numParts × W  longs (binary part M1 bitset)
+     * @param partM2        numParts × W  longs (binary part M2 bitset)
+     * @param partMeta      numParts × 5  ints  [lgTree, sz1, sz2, sz3, freq]
+     * @param geneLgBits    numPartTrees × W  longs (per gene-tree present-taxa bitset)
+     * @param polyMeta      numPoly × 5  ints  [lgTree, d, lastSize, freq, L_GT]
+     * @param polyChildOffset numPoly + 1  CSR row pointers into polyChildBits/Size
+     * @param polyChildBits Σ(d-1) × W  longs (child part bitsets)
+     * @param polyChildSize Σ(d-1)  ints (child part sizes)
+     * @param numSplits     number of candidate splits
+     * @param numClusters   number of distinct cluster bitsets in the pool
+     * @param numParts      number of unique binary (d==3) parts
+     * @param numPoly       number of unique polytomous (d>3) parts
+     * @param numPartTrees  number of gene trees (geneLgBits row count)
+     * @param wordsPerSet   W = ceil(numTaxa/64)
+     * @param numTaxa       total taxon count (= totalN for sizeC)
+     * @param batchSizeHint 0=auto, -1=no batching, >0=exact batch size
+     * @param vramFraction  fraction of free VRAM to use when batchSizeHint==0
+     * @param scoreMode     0=LONG, 1=DOUBLE (bit pattern), 2=INT128 (low,high pair)
+     * @return for LONG/DOUBLE: long[numSplits]; for INT128: long[2*numSplits]; or null on failure
+     */
+    public static native long[] computeWeightsBitsetGPU(
+        int[]  splits,
+        long[] clusterBits,
+        long[] partM1,
+        long[] partM2,
+        int[]  partMeta,
+        long[] geneLgBits,
+        int[]  polyMeta,
+        int[]  polyChildOffset,
+        long[] polyChildBits,
+        int[]  polyChildSize,
+        int numSplits,
+        int numClusters,
+        int numParts,
+        int numPoly,
+        int numPartTrees,
+        int wordsPerSet,
+        int numTaxa,
+        int batchSizeHint,
+        double vramFraction,
+        int scoreMode,
+        double progressIntervalSec
+    );
+
+    /**
      * Query GPU free and total VRAM via cudaMemGetInfo.
      * Returns long[2] = {freeMiB, totalMiB}, or null if unavailable.
      */

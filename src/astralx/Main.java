@@ -380,9 +380,11 @@ public class Main {
                             cfg.setWeightIntersectionMethod(Config.WeightIntersectionMethod.PREFIX_SUM);
                         case "smaller-side-traversal", "smaller-side", "smallerside", "legacy" ->
                             cfg.setWeightIntersectionMethod(Config.WeightIntersectionMethod.SMALLER_SIDE_TRAVERSAL);
+                        case "bitset", "bitsets", "bit-set" ->
+                            cfg.setWeightIntersectionMethod(Config.WeightIntersectionMethod.BITSET);
                         default -> {
                             System.err.println("Unknown --weight-intersection-method: " + args[i]
-                                + "  (expected: prefix-sum | smaller-side-traversal)");
+                                + "  (expected: prefix-sum | smaller-side-traversal | bitset)");
                             return false;
                         }
                     }

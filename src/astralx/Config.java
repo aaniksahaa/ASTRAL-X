@@ -22,8 +22,16 @@ public class Config {
      *                            smaller side of every intersection element-by-element.
      *                            No prefix sums are built at all (no per-thread state),
      *                            saving that memory.
+     *   BITSET                 — low-taxa fast path. Every cluster and gene-tree part is
+     *                            materialized once as a global-taxon bitset (W = ceil(n/64)
+     *                            64-bit words); each core intersection is popcount(A & M)
+     *                            over W words — O(1) for small n. One thread per split; no
+     *                            orderings/invIndex or prefix arrays needed in the kernel.
+     *                            Best when n is small and gene-tree count is large; the win
+     *                            shrinks as W grows (n ≳ a few hundred). Same QI math and
+     *                            bit-identical scores to the other two methods.
      */
-    public enum WeightIntersectionMethod { PREFIX_SUM, SMALLER_SIDE_TRAVERSAL }
+    public enum WeightIntersectionMethod { PREFIX_SUM, SMALLER_SIDE_TRAVERSAL, BITSET }
 
     /**
      * Numeric type used for weight scores when the taxon set is large enough that
