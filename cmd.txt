@@ -64,6 +64,18 @@
   --opts "--search-mode full -vv --autocomplete-incomplete-gene-trees" \
   --reference-species-tree data/avian-48/avian14k_astral.tre
 
+
+
+
+# complete full
+./run-astralx-with-monitor.sh \
+  -i data/avian-48/avian-14k-og-strca.tre \
+  -o data/avian-48/out-astralx-avian-48-complete-full.tre \
+  --opts "--search-mode full -vv --autocomplete-incomplete-gene-trees --weight-intersection-method smaller-side-traversal" \
+  --reference-species-tree data/avian-48/avian14k_astral.tre
+
+
+
 # incomplete local
 ./run-astralx-with-monitor.sh \
   -i data/avian-48/avian-14k-og-strca.tre \
@@ -496,9 +508,18 @@ data/10k-astral-dataset/10k-simphy/R1/astralx_outputs/estimated/search-mode_loca
 ## QUARTET SCORING 
 
 
-./run.sh -i gene_trees.tre --score-species-tree species_tree.tre --cpu
+./run.sh -i gene_trees.tre --score-species-tree species_tree.tre --gpu
 
-./run.sh -i all_gt_bs_rooted_37.tre --score-species-tree out-37-astralx.tre --cpu
+./run.sh -i all_gt_bs_rooted_37.tre --score-species-tree out-37-astralx.tre --gpu
+
+
+./run.sh -i data/all_gt_angio.tre --score-species-tree data/s_tree_angio.tre --gpu
+
+
+./run.sh -i data/avian-363/63430.gene.trees --score-species-tree data/avian-363/ref-paper-st-63K.tre --gpu
+
+
+./run.sh -i data/avian-48/avian-14k-og-strca.tre --score-species-tree data/avian-48/avian14k_astral.tre --gpu
 
 
 
