@@ -428,6 +428,9 @@ done
   --opts-list "--search-mode full -vv --autocomplete-incomplete-gene-trees --consensus-experimental --stepb-quadratic-nn-balls --stepb-random-leftover-resolution --stepb-process-large-polytomies"
 
 
+./run-bulk-standard.sh \
+  --method astral
+
 
 
 # All configured standard folders with one setting
@@ -487,3 +490,12 @@ simphy/data/t_100_g_100_sb_0.000001_spmin_100000_spmax_200000/R1/astralx_outputs
 # A10K
 data/10k-astral-dataset/10k-simphy/R1/astralx_outputs/estimated/search-mode_full/stat-astralx.csv
 data/10k-astral-dataset/10k-simphy/R1/astralx_outputs/estimated/search-mode_local/stat-astralx.csv
+
+
+
+## QUARTET SCORING 
+
+
+./run.sh -i gene_trees.tre --score-species-tree species_tree.tre --cpu
+
+./run.sh -i all_gt_bs_rooted_37.tre --score-species-tree out-37-astralx.tre --cpu

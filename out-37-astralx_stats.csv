@@ -1,2 +1,2 @@
 algorithm,input_file,output_file,running_time_s,max_cpu_mb,max_gpu_mb,optimal_quartet_score,rf_rate,exit_code
-astral-x,all_gt_bs_rooted_37.tre,out-37-astralx.tre,1.666,337.586,106.496,23458838,NA,0
+astral-x,all_gt_bs_rooted_37.tre,out-37-astralx.tre,2.386,271.977,109.568,23458838,0.0294,0

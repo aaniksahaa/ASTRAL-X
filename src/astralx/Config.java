@@ -41,6 +41,7 @@ public class Config {
 
     private String inputFile;
     private String outputFile;
+    private String scoreSpeciesTreeFile;
     private ComputeMode computeMode = ComputeMode.CPU;
     private int threadCount = Runtime.getRuntime().availableProcessors();
     private int numHashSeeds = 2;
@@ -154,6 +155,9 @@ public class Config {
     public void setInputFile(String f){ this.inputFile = f; }
     public String getOutputFile()     { return outputFile; }
     public void setOutputFile(String f){ this.outputFile = f; }
+    public String getScoreSpeciesTreeFile()      { return scoreSpeciesTreeFile; }
+    public void setScoreSpeciesTreeFile(String f){ this.scoreSpeciesTreeFile = f; }
+    public boolean isScoreOnly()       { return scoreSpeciesTreeFile != null; }
     public ComputeMode getComputeMode()        { return computeMode; }
     public void setComputeMode(ComputeMode m)  { this.computeMode = m; }
     public int getThreadCount()               { return threadCount; }

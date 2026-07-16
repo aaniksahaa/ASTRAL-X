@@ -10,9 +10,16 @@
 
 set -euo pipefail
 
+# Preserve coloured Java output when score-only mode pipes through tee for
+# notification parsing. Banner still honours NO_COLOR over FORCE_COLOR.
+if [[ -t 1 || -t 2 ]]; then
+  export FORCE_COLOR="${FORCE_COLOR:-1}"
+fi
+
 ASTRALX_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_DIR="${ASTRALX_ROOT}/build"
 NATIVE_DIR="${ASTRALX_ROOT}/native"
+NTFY_CHANNEL_NAME="${NTFY_CHANNEL_NAME:-anik-phylo-asx}"
 
 GREEN='\033[0;32m'
 RED='\033[0;31m'
@@ -21,11 +28,13 @@ NC='\033[0m'
 
 INPUT_FILE=""
 OUTPUT_FILE=""
+SCORE_SPECIES_TREE=""
 XMS="${ASTRALX_XMS:-4g}"
 XMX="${ASTRALX_XMX:-128g}"
 BUILD_FIRST=true
 PROGRAM_ARGS=()
 COMPUTE_MODE_SET=false
+NO_NOTIFY=false
 
 print_help() {
   cat <<EOF
@@ -38,6 +47,8 @@ Required:
 
 Optional:
   --output, -o       Output species tree file
+  --score-species-tree, --species-tree, --score, -c
+                     Score the supplied species tree and exit
   --cpu              Force CPU mode
   --gpu              Force GPU mode
   --search-mode      local | full
@@ -65,6 +76,7 @@ Optional:
   --xms SIZE         Java min heap (default: ${XMS})
   --xmx SIZE         Java max heap (default: ${XMX})
   --no-build         Skip build.sh before running
+  --no-notify, -nn   Disable ntfy notification for score-only mode
   --help, -h         Show this message
 
 Compatibility:
@@ -109,6 +121,11 @@ while [[ $# -gt 0 ]]; do
       COMPUTE_MODE_SET=true
       shift
       ;;
+    --score-species-tree|--species-tree|--score|-c)
+      SCORE_SPECIES_TREE="$2"
+      PROGRAM_ARGS+=("$1" "$2")
+      shift 2
+      ;;
     --search-mode|-t|--threads|-m|--seeds|--weight-intersection-method|--gpu-batch-size|--gpu-batches|--gpu-vram-control-factor|--gpu-vram-occupancy-factor|--gpu-progress-interval|--gpu-dp-state-space-construction-output-cap|--gpu-dist-tile-size|--dump-completed-gene-trees|--completion-method)
       PROGRAM_ARGS+=("$1" "$2")
       shift 2
@@ -127,6 +144,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --no-build)
       BUILD_FIRST=false
+      shift
+      ;;
+    --no-notify|-nn)
+      NO_NOTIFY=true
       shift
       ;;
     -h|--help)
@@ -155,6 +176,14 @@ fi
 if [[ -n "$OUTPUT_FILE" ]]; then
   mkdir -p "$(dirname "$OUTPUT_FILE")"
   OUTPUT_FILE="$(realpath "$OUTPUT_FILE")"
+fi
+
+if [[ -n "$SCORE_SPECIES_TREE" ]]; then
+  SCORE_SPECIES_TREE="$(realpath "$SCORE_SPECIES_TREE")"
+  if [[ ! -f "$SCORE_SPECIES_TREE" ]]; then
+    echo -e "${RED}Error: species tree file '$SCORE_SPECIES_TREE' does not exist.${NC}"
+    exit 1
+  fi
 fi
 
 if [[ "$BUILD_FIRST" == true ]]; then
@@ -186,11 +215,52 @@ echo "Input:       $INPUT_FILE"
 if [[ -n "$OUTPUT_FILE" ]]; then
   echo "Output:      $OUTPUT_FILE"
 fi
+if [[ -n "$SCORE_SPECIES_TREE" ]]; then
+  echo "Score tree:  $SCORE_SPECIES_TREE"
+fi
 echo "Build dir:   $BUILD_DIR"
 echo "Native dir:  $NATIVE_DIR"
 echo "GPU ready:   $gpu_available"
 echo "Java heap:   -Xms${XMS} -Xmx${XMX}"
 echo
+
+if [[ -n "$SCORE_SPECIES_TREE" ]]; then
+  TMP_LOG="$(mktemp /tmp/astralx_score_only.XXXXXX.log)"
+  cleanup_score_log() { rm -f "$TMP_LOG"; }
+  trap cleanup_score_log EXIT
+
+  set +e
+  java \
+    -Xms"${XMS}" -Xmx"${XMX}" \
+    -Djava.library.path="${NATIVE_DIR}" \
+    -cp "${BUILD_DIR}" \
+    astralx.Main \
+    "${PROGRAM_ARGS[@]}" 2>&1 | tee "$TMP_LOG"
+  EXIT_CODE=${PIPESTATUS[0]}
+  set -e
+
+  SCORE_VALUE="NA"
+  SCORE_LINE="$(grep -E 'QUARTET_SCORE:' "$TMP_LOG" | tail -n1 || true)"
+  if [[ -n "$SCORE_LINE" ]]; then
+    SCORE_VALUE="$(echo "$SCORE_LINE" | awk -F: '{gsub(/^[ \t]+/,"",$2); print $2}' | awk '{print $1}')"
+  fi
+
+  if [[ "$NO_NOTIFY" == false ]] && command -v curl >/dev/null 2>&1; then
+    STATUS_TEXT="$(if [[ $EXIT_CODE -eq 0 ]]; then echo "completed"; else echo "failed (exit $EXIT_CODE)"; fi)"
+    NOTIFY_BODY="ASTRAL-X score-only ${STATUS_TEXT}
+
+Quartet score: ${SCORE_VALUE}
+Input: $(basename "$INPUT_FILE")
+Species tree: $(basename "$SCORE_SPECIES_TREE")"
+    if [[ -n "$OUTPUT_FILE" ]]; then
+      NOTIFY_BODY+="
+Output: $(basename "$OUTPUT_FILE")"
+    fi
+    curl -s -d "$NOTIFY_BODY" "https://ntfy.sh/${NTFY_CHANNEL_NAME}" >/dev/null 2>&1 || true
+  fi
+
+  exit "$EXIT_CODE"
+fi
 
 exec java \
   -Xms"${XMS}" -Xmx"${XMX}" \

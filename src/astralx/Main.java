@@ -185,6 +185,11 @@ public class Main {
             // match those derived from the gene-tree prefix arrays (cross-source
             // signature parity, design §7.2 / verification §13.5).
 
+            if (cfg.isScoreOnly()) {
+                runScoreOnly(cfg, registry, originalTrees, prefParts, hasher);
+                return;
+            }
+
             // ── Phase 3: Cluster extraction -> X (from COMPLETED trees) ──────
             long t3 = PhaseLogger.begin("Phase 3  Cluster extraction", false);
             ClusterTable clusterTable = new ClusterTable(trees, pref, registry.size());
@@ -355,6 +360,10 @@ public class Main {
             switch (args[i]) {
                 case "-i","--input"    -> { if (++i>=args.length) return false; cfg.setInputFile(args[i]); }
                 case "-o","--output"   -> { if (++i>=args.length) return false; cfg.setOutputFile(args[i]); }
+                case "-c", "--score", "--species-tree", "--score-species-tree" -> {
+                    if (++i>=args.length) return false;
+                    cfg.setScoreSpeciesTreeFile(args[i]);
+                }
                 case "-t","--threads"  -> { if (++i>=args.length) return false; cfg.setThreadCount(Integer.parseInt(args[i])); }
                 case "--cpu"           -> cfg.setComputeMode(Config.ComputeMode.CPU);
                 case "--gpu"           -> cfg.setComputeMode(Config.ComputeMode.GPU);
@@ -610,8 +619,57 @@ public class Main {
     private static void printUsage() {
         System.err.println("ASTRAL-X v" + VERSION);
         System.err.println("Usage: astralx -i <input.tre> [-o <out>] [options]");
+        System.err.println("       astralx -i <gene_trees.tre> --score-species-tree <species.tre>");
         System.err.println("  --verify-parse   dump Phase-1 output and exit");
         System.err.println("  --verify-hash    dump Phase-2 output and exit");
+        System.err.println("  -c, --score, --species-tree <tree>  score supplied species tree and exit");
         System.err.println("  -v/-vv/-vvv      verbosity levels");
+    }
+
+    private static void runScoreOnly(Config cfg, TaxonRegistry registry,
+                                     List<Tree> geneTrees, PrefixHashArrays genePref,
+                                     TaxonHasher hasher) throws IOException {
+        Logging.info("Mode: SCORE-ONLY (score supplied species tree; no species-tree inference)");
+        if (cfg.getComputeMode() == Config.ComputeMode.GPU) {
+            Logging.info("Score-only mode currently uses the CPU weight path");
+            cfg.setComputeMode(Config.ComputeMode.CPU);
+        }
+
+        long ts = PhaseLogger.begin("Score mode  Parse supplied species tree", false);
+        Tree speciesTree = TreeParser.parseSpeciesTree(cfg.getScoreSpeciesTreeFile(), registry);
+        List<Tree> speciesTrees = java.util.List.of(speciesTree);
+        PhaseLogger.end("Score mode  Parse supplied species tree", ts, false);
+
+        long tp = PhaseLogger.begin("Score mode  Species-tree hashing", false);
+        PrefixHashArrays speciesPref = new PrefixHashArrays(speciesTrees, hasher);
+        PhaseLogger.end("Score mode  Species-tree hashing", tp, false);
+
+        long tc = PhaseLogger.begin("Score mode  Species-tree clusters", false);
+        ClusterTable speciesClusters = new ClusterTable(speciesTrees, speciesPref, registry.size());
+        PhaseLogger.end("Score mode  Species-tree clusters", tc, false);
+
+        long tg = PhaseLogger.begin("Score mode  Gene-tree tripartitions", false);
+        PartitionTable genePartitions = new PartitionTable(geneTrees, genePref);
+        PhaseLogger.end("Score mode  Gene-tree tripartitions", tg, false);
+
+        long td = PhaseLogger.begin("Score mode  Fixed-tree DP transitions", false);
+        DPTable speciesDP = new DPTable(speciesTrees, speciesPref, speciesClusters);
+        PhaseLogger.end("Score mode  Fixed-tree DP transitions", td, false);
+
+        long tw = PhaseLogger.begin("Score mode  Weight calculation", false);
+        WeightTable weightTable = new WeightTable(speciesDP, genePartitions, speciesClusters,
+                                                  speciesTrees, geneTrees);
+        PhaseLogger.end("Score mode  Weight calculation", tw, false);
+
+        Inference scorer = new Inference();
+        String score = scorer.scoreFixedTree(speciesDP, weightTable);
+        String line = "QUARTET_SCORE: " + score;
+        System.out.println(line);
+        if (cfg.getOutputFile() != null) {
+            try (PrintStream out = new PrintStream(new FileOutputStream(cfg.getOutputFile()))) {
+                out.println(line);
+            }
+            Logging.info("Quartet score written to %s", cfg.getOutputFile());
+        }
     }
 }

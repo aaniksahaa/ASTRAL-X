@@ -71,6 +71,34 @@ public class Inference {
         return newick;
     }
 
+    /**
+     * Score the fixed tree represented by {@code dpTable}; no tree reconstruction
+     * or inferred species tree output is produced.
+     *
+     * @return formatted raw quartet score
+     */
+    public String scoreFixedTree(DPTable dpTable, WeightTable weightTable) {
+        long t0 = System.nanoTime();
+        ClusterHash root = dpTable.getRootHash();
+
+        if (weightTable.isInt128()) {
+            Int128 totalScore = solveI(root, dpTable, weightTable);
+            long ms = (System.nanoTime() - t0) / 1_000_000;
+            Logging.info("Score-only: quartet score = %s  [int128]  (%d ms)", totalScore, ms);
+            return totalScore.toString();
+        } else if (weightTable.isDouble()) {
+            double totalScore = solveD(root, dpTable, weightTable);
+            long ms = (System.nanoTime() - t0) / 1_000_000;
+            Logging.info("Score-only: quartet score = %.0f  [double]  (%d ms)", totalScore, ms);
+            return String.format("%.0f", totalScore);
+        } else {
+            long totalScore = solve(root, dpTable, weightTable);
+            long ms = (System.nanoTime() - t0) / 1_000_000;
+            Logging.info("Score-only: quartet score = %d  [long]  (%d ms)", totalScore, ms);
+            return Long.toString(totalScore);
+        }
+    }
+
     // -------------------------------------------------------------------------
     // DP
     // -------------------------------------------------------------------------

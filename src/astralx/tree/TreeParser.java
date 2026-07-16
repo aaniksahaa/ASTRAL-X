@@ -90,6 +90,44 @@ public class TreeParser {
         return trees;
     }
 
+    /**
+     * Parse one supplied species tree against an already-locked gene-tree taxon
+     * registry. The tree must contain exactly the same taxa as the gene-tree
+     * input; unknown, missing, or duplicate taxa are rejected.
+     */
+    public static Tree parseSpeciesTree(String inputFile,
+                                        TaxonRegistry registry) throws IOException {
+        if (!registry.isLocked()) {
+            throw new IllegalArgumentException("Species-tree parsing requires a locked taxon registry");
+        }
+
+        List<String> lines = new ArrayList<>();
+        try (BufferedReader br = new BufferedReader(new FileReader(inputFile))) {
+            String ln;
+            while ((ln = br.readLine()) != null) {
+                ln = ln.trim();
+                if (!ln.isEmpty()) lines.add(ln);
+            }
+        }
+        if (lines.isEmpty()) {
+            throw new IllegalArgumentException("Species tree file is empty: " + inputFile);
+        }
+        if (lines.size() != 1) {
+            throw new IllegalArgumentException("Species tree file must contain exactly one Newick tree: " + inputFile);
+        }
+
+        int[] rootingCounts = {0, 0};
+        Tree tree = parseNewick(lines.get(0), 0, registry, rootingCounts);
+        validateCompleteTaxonSet(tree, registry, inputFile);
+        Logging.info("Parsed supplied species tree: %d leaves", tree.leafCount);
+        if (rootingCounts[0] > 0 || rootingCounts[1] > 0) {
+            Logging.info("Rooted supplied unrooted species tree at the root "
+                + "(%d binary 3-furcation, %d polytomy root).",
+                rootingCounts[0], rootingCounts[1]);
+        }
+        return tree;
+    }
+
     // -------------------------------------------------------------------------
     // Pass 1 – name collection
     // -------------------------------------------------------------------------
@@ -348,6 +386,28 @@ public class TreeParser {
         }
         node.rangeStart = node.left.rangeStart;
         node.rangeEnd   = node.right.rangeEnd;
+    }
+
+    private static void validateCompleteTaxonSet(Tree tree, TaxonRegistry reg, String inputFile) {
+        int n = reg.size();
+        if (tree.leafCount != n) {
+            throw new IllegalArgumentException("Species tree taxon count (" + tree.leafCount
+                + ") does not match gene-tree taxon count (" + n + "): " + inputFile);
+        }
+
+        boolean[] seen = new boolean[n];
+        for (int taxon : tree.postorderArray) {
+            if (seen[taxon]) {
+                throw new IllegalArgumentException("Species tree contains duplicate taxon: "
+                    + reg.getName(taxon));
+            }
+            seen[taxon] = true;
+        }
+        for (int i = 0; i < n; i++) {
+            if (!seen[i]) {
+                throw new IllegalArgumentException("Species tree is missing taxon: " + reg.getName(i));
+            }
+        }
     }
 
     // -------------------------------------------------------------------------
