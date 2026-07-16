@@ -114,12 +114,15 @@ public class WeightTable {
         double[] scoreArrayD = (mode == Mode.DOUBLE) ? new double[numSplits]  : null;  // floating point
         Int128[] scoreArrayI = (mode == Mode.INT128) ? new Int128[numSplits]  : null;  // exact 128-bit
 
-        // When clusterTrees != partTrees (autocomplete active), the GPU path packs both
-        // sets of orderings/invIndex into a combined array (slots 0..k-1 = completed,
-        // slots k..2k-1 = original) and offsets partition tree indices by k.
-        // numGpuTrees reflects the combined size for VRAM budget calculations.
+        // When clusterTrees != partTrees, the GPU path packs both sets of
+        // orderings/invIndex into a combined array (slots 0..C-1 = cluster trees,
+        // slots C..C+P-1 = partition trees, C = clusterTrees.size()) and offsets
+        // partition tree indices by C.  numGpuTrees is the combined count.
+        //   - autocomplete inference: C == P == k  (completed vs original gene trees)
+        //   - score-only mode:        C == 1, P == numGeneTrees  (single species tree)
+        // The general C + P form is byte-identical to the old 2k for the C == P case.
         boolean splitTrees = (clusterTrees != partTrees);
-        int numGpuTrees = splitTrees ? clusterTrees.size() * 2 : clusterTrees.size();
+        int numGpuTrees = splitTrees ? clusterTrees.size() + partTrees.size() : clusterTrees.size();
 
         boolean useGPU = (Config.getInstance().getComputeMode() == Config.ComputeMode.GPU)
                          && GPUWeightCalculator.tryLoad();
@@ -591,9 +594,9 @@ public class WeightTable {
      *   orderings[t*n + pos]   = postorderArray[pos]
      *   invIndex [t*n + taxon] = positionMap[taxon]  (-1 if absent)
      *
-     * Layout when splitTrees (autocomplete active):
-     *   slots 0..k-1   from clusterTrees (completed)  — cluster membership
-     *   slots k..2k-1  from partTrees (original)      — gene-tree leaves
+     * Layout when splitTrees (clusterTrees != partTrees):
+     *   slots 0..C-1     from clusterTrees  — cluster membership   (C = clusterTrees.size())
+     *   slots C..C+P-1   from partTrees      — gene-tree leaves     (P = partTrees.size())
      * Otherwise the single list fills slots 0..k-1.
      *
      * @return int[2][] = {orderings, invIndex}

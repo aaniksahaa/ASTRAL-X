@@ -499,3 +499,6 @@ data/10k-astral-dataset/10k-simphy/R1/astralx_outputs/estimated/search-mode_loca
 ./run.sh -i gene_trees.tre --score-species-tree species_tree.tre --cpu
 
 ./run.sh -i all_gt_bs_rooted_37.tre --score-species-tree out-37-astralx.tre --cpu
+
+
+

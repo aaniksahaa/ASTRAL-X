@@ -630,10 +630,9 @@ public class Main {
                                      List<Tree> geneTrees, PrefixHashArrays genePref,
                                      TaxonHasher hasher) throws IOException {
         Logging.info("Mode: SCORE-ONLY (score supplied species tree; no species-tree inference)");
-        if (cfg.getComputeMode() == Config.ComputeMode.GPU) {
-            Logging.info("Score-only mode currently uses the CPU weight path");
-            cfg.setComputeMode(Config.ComputeMode.CPU);
-        }
+        // The weight table dispatches GPU/CPU internally from the compute mode, so
+        // both paths are supported here.  The GPU path falls back to CPU on its own
+        // if it reports infeasible, so no forced downgrade is needed.
 
         long ts = PhaseLogger.begin("Score mode  Parse supplied species tree", false);
         Tree speciesTree = TreeParser.parseSpeciesTree(cfg.getScoreSpeciesTreeFile(), registry);
