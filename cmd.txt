@@ -48,6 +48,12 @@
 
 
 
+# angio complete full with consensus
+./run-astralx-with-monitor.sh -i data/all_gt_angio.tre -o data/out-astralx-angio-complete-full.tre --opts "--search-mode full -vv --autocomplete-incomplete-gene-trees --consensus-experimental --stepb-quadratic-nn-balls --stepb-random-leftover-resolution --stepb-process-large-polytomies --anchor-outgroup" --reference-species-tree data/s_tree_angio.tre
+
+
+
+
 ############ avian-48
 
 # complete local
