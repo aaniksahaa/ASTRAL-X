@@ -329,6 +329,44 @@ public class DPTable {
     // -------------------------------------------------------------------------
 
     /**
+     * Anchored-outgroup root: replace the all-taxa root's ENTIRE transition set with
+     * the single split {@code ({anchor} | S\{anchor})}.
+     *
+     * Exact for unrooted species-tree inference: every unrooted tree can be rooted on
+     * the anchor's pendant edge without changing its quartet score, and X already holds
+     * both orientations of every bipartition, so every tree the DP could build under any
+     * rooting is still buildable from {@code S\{anchor}} downward using the untouched
+     * non-root transitions. The anchored split's own weight is 0 (empty third side).
+     * Removing the other root splits therefore cannot change the optimum — it only makes
+     * the redundant with-anchor cluster orientations unreachable, which
+     * {@link #reachableClusters} then drops from the weight step.
+     *
+     * Must be called AFTER all local (Mode 1) and cross-tree (Mode 2) transitions are
+     * built. A no-op (with a warning) if the anchor hash is null.
+     */
+    public void applyAnchoredRoot(ClusterHash anchorHash) {
+        if (anchorHash == null) {
+            Logging.info("Anchored root requested but anchor singleton hash is unavailable "
+                + "(anchor taxon in no tree?) — root transitions left unchanged");
+            return;
+        }
+        ClusterHash sAnchor = ClusterHash.residual(rootHash, anchorHash);
+        Set<BipartitionSplit> old = transitions.get(rootHash);
+        int removed = (old != null) ? old.size() : 0;
+
+        Set<BipartitionSplit> anchored = new LinkedHashSet<>();
+        anchored.add(new BipartitionSplit(anchorHash, sAnchor));
+        transitions.put(rootHash, anchored);
+
+        uniqueSplits = 0;
+        for (Set<BipartitionSplit> s : transitions.values()) uniqueSplits += s.size();
+
+        Logging.info("Anchored root (exact, unrooted-invariant): replaced %d root split(s) with 1 "
+            + "({anchor}=%d | S\\{anchor}=%d taxa); %d total unique splits",
+            removed, anchorHash.size, sAnchor.size, uniqueSplits);
+    }
+
+    /**
      * Clusters actually reachable from the root by the top-down inference DP
      * (see {@link astralx.dp.Inference}#solve): the root is reachable, and both
      * halves of every split of a reachable cluster are reachable.

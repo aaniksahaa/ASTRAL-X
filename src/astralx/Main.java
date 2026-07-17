@@ -300,6 +300,24 @@ public class Main {
                 PhaseLogger.end("Phase 5b Cross-tree transitions", t5b, gpuDP);
             }
 
+            // ── Anchored-outgroup root (exact for unrooted inference) ─────────
+            // Replace the all-taxa root's entire transition set with the single
+            // split ({anchor} | S\{anchor}).  Every unrooted tree is representable
+            // rooted on the anchor's pendant edge, so the optimum is unchanged; the
+            // reachability prune then drops the now-unreachable with-anchor cluster
+            // orientations.  Applies only in FULL mode: it relies on cross-tree
+            // (Mode 2) transitions to reach every clade from S\{anchor} downward —
+            // in LOCAL mode a gene tree's top clades have no non-root path, so
+            // anchoring there would be inexact.
+            if (cfg.isAnchorOutgroup()) {
+                if (cfg.getSearchMode() == Config.SearchMode.FULL) {
+                    dpTable.applyAnchoredRoot(clusterTable.getAnchorHash());
+                } else {
+                    Logging.info("--anchor-outgroup ignored: only applies with --search-mode full "
+                        + "(local mode has no cross-tree path to top clades); running unanchored");
+                }
+            }
+
             if (cfg.isVerifyDPSpace()) {
                 Phase5Verifier.dump(trees, registry, pref, clusterTable, dpTable, cfg.getOutputFile());
                 return;
@@ -371,6 +389,16 @@ public class Main {
                     if (++i >= args.length) return false;
                     cfg.setSearchMode(args[i].equalsIgnoreCase("full")
                         ? Config.SearchMode.FULL : Config.SearchMode.LOCAL);
+                }
+                case "--anchor-outgroup", "--anchor" ->
+                    cfg.setAnchorOutgroup(true);
+                case "--anchor-taxon" -> {
+                    if (++i >= args.length) return false;
+                    try { cfg.setAnchorTaxon(Integer.parseInt(args[i])); }
+                    catch (NumberFormatException e) {
+                        System.err.println("Invalid --anchor-taxon (expected an integer taxon id): " + args[i]);
+                        return false;
+                    }
                 }
                 case "--no-prune-search-space", "--no-prune-unreachable" ->
                     cfg.setPruneUnreachableSplits(false);

@@ -149,6 +149,15 @@
 
 
 
+# incomplete full
+./run-astralx-with-monitor.sh \
+  -i data/avian-363/63430.gene.trees \
+  -o data/avian-363/out-astralx-avian-363-incomplete-full.tre \
+  --opts "--search-mode full -vv --weight-intersection-method simple-tree-walk --anchor-outgroup" \
+  --reference-species-tree data/avian-363/ref-paper-st-63K.tre
+
+
+
 
 # incomplete full
 ./run-astralx-with-monitor.sh \

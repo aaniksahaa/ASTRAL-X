@@ -50,7 +50,9 @@ fail=0
 # Optional: pass extra ASTRAL-X flags via WEIGHT_METHOD env, e.g.
 #   WEIGHT_METHOD=bitset bash test/run_tests.sh --gpu
 EXTRA_OPTS=()
-[[ -n "${WEIGHT_METHOD:-}" ]] && EXTRA_OPTS=(--weight-intersection-method "$WEIGHT_METHOD")
+[[ -n "${WEIGHT_METHOD:-}" ]] && EXTRA_OPTS+=(--weight-intersection-method "$WEIGHT_METHOD")
+# EXTRA passes arbitrary flags through, e.g. EXTRA="--anchor-outgroup"
+[[ -n "${EXTRA:-}" ]] && EXTRA_OPTS+=($EXTRA)
 
 ASTRALX_CMD=(java -Djava.library.path="$NATIVE_DIR" -cp "$BUILD_DIR" astralx.Main
              $COMPUTE_MODE --search-mode "$SEARCH_MODE" "${EXTRA_OPTS[@]}")

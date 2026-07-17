@@ -90,6 +90,20 @@ public class Config {
     private boolean pruneUnreachableSplits = true;
 
     /**
+     * Anchor the DP at a fixed outgroup taxon: replace the all-taxa root's entire
+     * transition set with the single split ({anchor} | S\{anchor}), which is exact
+     * for unrooted species-tree inference (any unrooted tree can be rooted on the
+     * anchor's pendant edge without changing its quartet score, and that split's
+     * own weight is 0).  Combined with pruneUnreachableSplits this drops the
+     * redundant with-anchor cluster orientations from the weight step.  Default off;
+     * enable with --anchor-outgroup.  See DOCS/anchored-outgroup-search-space-design.md.
+     */
+    private boolean anchorOutgroup = false;
+
+    /** Global taxon id used as the outgroup anchor (default 0). */
+    private int anchorTaxon = 0;
+
+    /**
      * Manual GPU batch size override (ignored when gpuBatch=false).
      *   0 (default) — auto: derived from free VRAM via cudaMemGetInfo.
      *   > 0         — use exactly this many splits per kernel launch.
@@ -209,6 +223,10 @@ public class Config {
     public boolean isGpuBatch()               { return gpuBatch; }
     public boolean isPruneUnreachableSplits()           { return pruneUnreachableSplits; }
     public void setPruneUnreachableSplits(boolean v)    { this.pruneUnreachableSplits = v; }
+    public boolean isAnchorOutgroup()                   { return anchorOutgroup; }
+    public void setAnchorOutgroup(boolean v)            { this.anchorOutgroup = v; }
+    public int getAnchorTaxon()                         { return anchorTaxon; }
+    public void setAnchorTaxon(int t)                   { this.anchorTaxon = t; }
     public void setGpuBatch(boolean b)        { this.gpuBatch = b; }
     public int getGpuBatchSize()              { return gpuBatchSize; }
     public void setGpuBatchSize(int s)        { this.gpuBatchSize = s; }

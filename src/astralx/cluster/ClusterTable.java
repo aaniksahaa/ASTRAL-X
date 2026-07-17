@@ -1,5 +1,6 @@
 package astralx.cluster;
 
+import astralx.Config;
 import astralx.Logging;
 import astralx.hash.PrefixHashArrays;
 import astralx.util.ProgressBar;
@@ -43,6 +44,11 @@ public class ClusterTable {
     // Special: the all-taxa cluster hash (DP root)
     private ClusterHash allTaxaHash;
 
+    // The {anchor} singleton hash, for the anchored-outgroup root split
+    // (see DOCS/anchored-outgroup-search-space-design.md). null if the anchor
+    // taxon appears in no input tree (cannot happen for a real taxon).
+    private ClusterHash anchorHash;
+
     private final int m; // number of hash seeds
 
     // True once any multi-range exemplar has been inserted (consensus emission
@@ -74,6 +80,10 @@ public class ClusterTable {
             bar.update(++treesDone);
         }
         bar.done();
+
+        // Compute the {anchor} singleton hash for the anchored-outgroup root split.
+        // Cheap: one range hash from the first tree containing the anchor taxon.
+        this.anchorHash = computeAnchorHash(trees, pref, numTaxa);
 
         long ms = (System.nanoTime() - t0) / 1_000_000;
         Logging.info("Cluster extraction: %d candidates -> %d unique clusters in %d ms",
@@ -167,10 +177,35 @@ public class ClusterTable {
         }
     }
 
+    /**
+     * Hash of the {anchor} singleton cluster — the taxon set {@code {anchorTaxon}} —
+     * computed as a size-1 range hash from the first input tree that contains the
+     * anchor taxon.  Content-based, so it matches the anchor singleton regardless of
+     * which tree produced it.  Returns null if the anchor appears in no tree (which
+     * cannot happen for a real taxon) or the id is out of range.
+     */
+    private ClusterHash computeAnchorHash(List<Tree> trees, PrefixHashArrays pref, int numTaxa) {
+        int anchor = Config.getInstance().getAnchorTaxon();
+        if (anchor < 0 || anchor >= numTaxa) return null;
+        for (Tree t : trees) {
+            int p = (anchor < t.positionMap.length) ? t.positionMap[anchor] : -1;
+            if (p < 0) continue;                       // anchor absent from this tree
+            long[] rawSums = new long[m], rawXors = new long[m];
+            for (int s = 0; s < m; s++) {
+                rawSums[s] = pref.rangeSum(t.treeIndex, s, p, p + 1);
+                rawXors[s] = pref.rangeXor(t.treeIndex, s, p, p + 1);
+            }
+            return new ClusterHash(rawSums, rawXors, 1, m);
+        }
+        return null;
+    }
+
     // -------------------------------------------------------------------------
     // Queries
     // -------------------------------------------------------------------------
 
+    /** The {anchor} singleton hash for the anchored-outgroup root split (may be null). */
+    public ClusterHash getAnchorHash()      { return anchorHash; }
     public Entry get(ClusterHash hash)      { return table.get(hash); }
     public boolean contains(ClusterHash h)  { return table.containsKey(h); }
     public int size()                       { return table.size(); }
