@@ -328,6 +328,37 @@ public class DPTable {
     // Queries
     // -------------------------------------------------------------------------
 
+    /**
+     * Clusters actually reachable from the root by the top-down inference DP
+     * (see {@link astralx.dp.Inference}#solve): the root is reachable, and both
+     * halves of every split of a reachable cluster are reachable.
+     *
+     * The DP calls {@code weightTable.getScore(split)} ONLY for splits of clusters
+     * it reaches, so a cluster never reached contributes nothing to the root score
+     * — its splits need no weight and can be skipped without changing the result.
+     * This mirrors {@code solve}'s recursion exactly (minus the arithmetic), so the
+     * returned set is a superset of every cluster whose splits the DP actually
+     * queries; filtering the weight step to these clusters is therefore
+     * result-preserving.
+     *
+     * O(reachable splits) time; the set holds only {@link ClusterHash} references
+     * already owned by the transitions map — no splits or clusters are copied.
+     */
+    public Set<ClusterHash> reachableClusters() {
+        Set<ClusterHash> reachable = new HashSet<>();
+        ArrayDeque<ClusterHash> queue = new ArrayDeque<>();
+        reachable.add(rootHash);
+        queue.add(rootHash);
+        while (!queue.isEmpty()) {
+            ClusterHash ch = queue.poll();
+            for (BipartitionSplit sp : getSplits(ch)) {
+                if (reachable.add(sp.lo)) queue.add(sp.lo);
+                if (reachable.add(sp.hi)) queue.add(sp.hi);
+            }
+        }
+        return reachable;
+    }
+
     public ClusterHash getRootHash()                       { return rootHash; }
     public Set<BipartitionSplit> getSplits(ClusterHash h)  { return transitions.getOrDefault(h, Collections.emptySet()); }
     public boolean hasSplits(ClusterHash h)                { return transitions.containsKey(h); }

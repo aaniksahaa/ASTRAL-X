@@ -79,6 +79,17 @@ public class Config {
     private boolean gpuBatch = true;
 
     /**
+     * Prune candidate splits whose parent cluster is unreachable from the DP root
+     * before the weight step.  The top-down inference DP only scores splits of
+     * clusters it reaches from the root, so splits of never-reached clusters cost
+     * weight time for nothing.  A cheap reachability BFS over the transitions graph
+     * (DPTable.reachableClusters) marks the needed subset; filtering to it is
+     * result-preserving.  Default on; disable with --no-prune-search-space to
+     * measure the full (unfiltered) candidate count.
+     */
+    private boolean pruneUnreachableSplits = true;
+
+    /**
      * Manual GPU batch size override (ignored when gpuBatch=false).
      *   0 (default) — auto: derived from free VRAM via cudaMemGetInfo.
      *   > 0         — use exactly this many splits per kernel launch.
@@ -196,6 +207,8 @@ public class Config {
     public LargeScoreType getLargeScoreType()        { return largeScoreType; }
     public void setLargeScoreType(LargeScoreType t)  { this.largeScoreType = t; }
     public boolean isGpuBatch()               { return gpuBatch; }
+    public boolean isPruneUnreachableSplits()           { return pruneUnreachableSplits; }
+    public void setPruneUnreachableSplits(boolean v)    { this.pruneUnreachableSplits = v; }
     public void setGpuBatch(boolean b)        { this.gpuBatch = b; }
     public int getGpuBatchSize()              { return gpuBatchSize; }
     public void setGpuBatchSize(int s)        { this.gpuBatchSize = s; }

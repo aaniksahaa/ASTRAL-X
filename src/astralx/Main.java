@@ -372,6 +372,10 @@ public class Main {
                     cfg.setSearchMode(args[i].equalsIgnoreCase("full")
                         ? Config.SearchMode.FULL : Config.SearchMode.LOCAL);
                 }
+                case "--no-prune-search-space", "--no-prune-unreachable" ->
+                    cfg.setPruneUnreachableSplits(false);
+                case "--prune-search-space", "--prune-unreachable" ->
+                    cfg.setPruneUnreachableSplits(true);
                 case "--weight-intersection-method" -> {
                     if (++i >= args.length) return false;
                     String m = args[i].toLowerCase().replace('_', '-');

@@ -105,9 +105,32 @@ public class WeightTable {
         this.useInt128 = (mode == Mode.INT128);
         logAccumulationDecision(n, numGenes, mode);
 
-        // Collect all unique splits from DPTable into an indexed list
+        // Collect all unique splits from DPTable into an indexed list.  Optionally
+        // prune splits whose parent cluster is unreachable from the DP root — the
+        // top-down inference DP never scores those, so skipping them is
+        // result-preserving (see DPTable.reachableClusters).
         List<BipartitionSplit> splitList = new ArrayList<>();
-        for (var entry : dpTable.entries()) splitList.addAll(entry.getValue());
+        if (Config.getInstance().isPruneUnreachableSplits()) {
+            Set<ClusterHash> reachable = dpTable.reachableClusters();
+            int totalClusters = 0, keptClusters = 0, totalSplits = 0;
+            for (var entry : dpTable.entries()) {
+                totalClusters++;
+                int sz = entry.getValue().size();
+                totalSplits += sz;
+                if (reachable.contains(entry.getKey())) {
+                    splitList.addAll(entry.getValue());
+                    keptClusters++;
+                }
+            }
+            int kept = splitList.size();
+            Logging.info("DP reachability prune: clusters %d/%d reachable (%.1f%%), "
+                + "splits %d/%d scored (%.1f%%) — %d unreachable splits skipped"
+                + " [--no-prune-search-space to disable]",
+                keptClusters, totalClusters, 100.0 * keptClusters / Math.max(1, totalClusters),
+                kept, totalSplits, 100.0 * kept / Math.max(1, totalSplits), totalSplits - kept);
+        } else {
+            for (var entry : dpTable.entries()) splitList.addAll(entry.getValue());
+        }
         int numSplits = splitList.size();
 
         // Per-split score buffers — exactly one is non-null, matching the mode.
