@@ -1,6 +1,6 @@
 # Anchored-Outgroup DP Search Space — Design & Plan
 
-> Status: **IMPLEMENTED** (2026-07-17), behind `--anchor-outgroup` (default off),
+> Status: **IMPLEMENTED** (2026-07-17), enabled by default; disable with `--no-anchor-outgroup`,
 > in both **LOCAL and FULL** search modes. Local mode was enabled after making
 > tree-local rotation emission complete at leaves: a leaf has no Type-1 split, but
 > it induces the valid Type-2 resolution of its complement. Both anchoring layers
@@ -219,9 +219,9 @@ were only reachable via with-anchor paths and drop too.
 
 ## 8. Rollout Plan (safe, phased)
 
-1. **Flag.** Add `--anchor-outgroup` (default **off** first, so existing behavior stays
-   byte-identical until proven). Optionally `--anchor-taxon <id|name>` to override the
-   default anchor.
+1. **Flag.** Add `--anchor-outgroup`, then make anchored outgroup the default after
+   local/full equivalence testing. Use `--no-anchor-outgroup` to restore the unanchored
+   search space. Optionally `--anchor-taxon <id|name>` to override the default anchor.
 2. **Implement §4.1 behind the flag**, in order:
    a. `clusterContainsAnchor` predicate (§5.1) + unit-check on positive / complement /
       multi-range / anchor-absent cases.

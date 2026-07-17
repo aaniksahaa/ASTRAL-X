@@ -70,8 +70,8 @@ fail=0
 printf '\n=== Anchored local equivalence (%s) ===\n\n' "$COMPUTE_MODE"
 for input in "${inputs[@]}"; do
     name="$(basename "$input" .tre)"
-    base="$(score_of "$input")"
-    anchored="$(score_of "$input" --anchor-outgroup)"
+    base="$(score_of "$input" --no-anchor-outgroup)"
+    anchored="$(score_of "$input")"
     if [[ "$base" == "$anchored" ]]; then
         printf '  %-43s PASS  score=%s\n' "$name" "$base"
         ((pass++)) || true

@@ -391,6 +391,8 @@ public class Main {
                 }
                 case "--anchor-outgroup", "--anchor" ->
                     cfg.setAnchorOutgroup(true);
+                case "--no-anchor-outgroup", "--no-anchor" ->
+                    cfg.setAnchorOutgroup(false);
                 case "--anchor-taxon" -> {
                     if (++i >= args.length) return false;
                     try { cfg.setAnchorTaxon(Integer.parseInt(args[i])); }

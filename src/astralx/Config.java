@@ -95,10 +95,10 @@ public class Config {
      * for unrooted species-tree inference (any unrooted tree can be rooted on the
      * anchor's pendant edge without changing its quartet score, and that split's
      * own weight is 0).  Combined with pruneUnreachableSplits this drops the
-     * redundant with-anchor cluster orientations from the weight step.  Default off;
-     * enable with --anchor-outgroup.  See DOCS/anchored-outgroup-search-space-design.md.
+     * redundant with-anchor cluster orientations from the weight step.  Default on;
+     * disable with --no-anchor-outgroup.  See DOCS/anchored-outgroup-search-space-design.md.
      */
-    private boolean anchorOutgroup = false;
+    private boolean anchorOutgroup = true;
 
     /** Global taxon id used as the outgroup anchor (default 0). */
     private int anchorTaxon = 0;

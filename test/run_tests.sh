@@ -51,7 +51,7 @@ fail=0
 #   WEIGHT_METHOD=bitset bash test/run_tests.sh --gpu
 EXTRA_OPTS=()
 [[ -n "${WEIGHT_METHOD:-}" ]] && EXTRA_OPTS+=(--weight-intersection-method "$WEIGHT_METHOD")
-# EXTRA passes arbitrary flags through, e.g. EXTRA="--anchor-outgroup"
+# EXTRA passes arbitrary flags through, e.g. EXTRA="--no-anchor-outgroup"
 [[ -n "${EXTRA:-}" ]] && EXTRA_OPTS+=($EXTRA)
 
 ASTRALX_CMD=(java -Djava.library.path="$NATIVE_DIR" -cp "$BUILD_DIR" astralx.Main
