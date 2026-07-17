@@ -1,6 +1,7 @@
 package astralx.greedy;
 
 import astralx.cluster.Cluster;
+import astralx.cluster.ClusterHash;
 import astralx.cluster.ClusterTable;
 import astralx.tree.Tree;
 
@@ -49,28 +50,75 @@ public final class EmissionBridge {
      */
     public static int[] bridge(EmissionBuffer buffer, ClusterTable clusterTable,
                                List<Tree> clusterTreesMutable, int numTaxa) {
+        return bridge(buffer, clusterTable, clusterTreesMutable, numTaxa, false, -1);
+    }
+
+    /**
+     * @param anchorFreeX  when true (anchor-free X), register each emission's
+     *                     ANCHOR-FREE orientation — the side not containing the anchor.
+     *                     The canonical side {@code E} is registered as-is when it is
+     *                     anchor-free, else its complement {@code S\E} is synthesized
+     *                     (multi-range, complement=true; the consensus exemplar spans all
+     *                     n taxa, so the complement is walkable). Keeps X orientation-
+     *                     complete under anchoring so the DP can still use the emission.
+     * @param anchor       anchor taxon global id (valid iff anchorFreeX).
+     */
+    public static int[] bridge(EmissionBuffer buffer, ClusterTable clusterTable,
+                               List<Tree> clusterTreesMutable, int numTaxa,
+                               boolean anchorFreeX, int anchor) {
         int tier1 = 0, tier2 = 0;
         // One exemplar Tree per distinct consensus snapshot that needs synthesis.
         IdentityHashMap<ConsensusTree, Integer> exemplarIndex = new IdentityHashMap<>();
+        // Anchor position per consensus tree (cached; consensus trees span all n taxa).
+        IdentityHashMap<ConsensusTree, Integer> anchorPosCache =
+            anchorFreeX ? new IdentityHashMap<>() : null;
+        ClusterHash root = clusterTable.getAllTaxaHash();
 
         for (EmittedBipartition e : buffer.all()) {
-            if (clusterTable.contains(e.signature)) {   // Tier 1: already a scorable cluster
-                tier1++;
-                continue;
-            }
-            // Tier 2: synthesize a consensus-anchored multi-range exemplar.
             MultiRange mr = e.canonicalSide;
             ConsensusTree ct = mr.tree;
+
+            // Decide which orientation to register.  Default: the canonical side E.
+            ClusterHash regHash   = e.signature;
+            boolean     regCompl  = false;
+            int         regSize   = e.size;
+            if (anchorFreeX) {
+                int aPos = anchorPosCache.computeIfAbsent(ct, k -> anchorPosIn(k, anchor));
+                if (inRanges(aPos, mr.los, mr.his)) {   // E contains the anchor → use S\E
+                    regHash  = ClusterHash.residual(root, e.signature);
+                    regCompl = true;
+                    regSize  = numTaxa - e.size;
+                }
+            }
+
+            // Tier 1: the orientation we want is already a scorable cluster.
+            if (clusterTable.contains(regHash)) { tier1++; continue; }
+
+            // Tier 2: synthesize a consensus-anchored multi-range exemplar.
             Integer ti = exemplarIndex.get(ct);
             if (ti == null) {
                 ti = clusterTreesMutable.size();
                 clusterTreesMutable.add(buildExemplar(ct, ti, numTaxa));
                 exemplarIndex.put(ct, ti);
             }
-            Cluster c = new Cluster(ti, mr.los, mr.his, /*complement=*/false, e.size);
-            if (clusterTable.addCluster(e.signature, c)) tier2++;
+            Cluster c = new Cluster(ti, mr.los, mr.his, regCompl, regSize);
+            if (clusterTable.addCluster(regHash, c)) tier2++;
         }
         return new int[]{ tier1, tier2 };
+    }
+
+    /** Postorder index of the anchor taxon in a consensus tree (spans all n taxa). */
+    private static int anchorPosIn(ConsensusTree ct, int anchor) {
+        int[] aCons = ct.aCons();
+        for (int p = 0; p < aCons.length; p++) if (aCons[p] == anchor) return p;
+        return -1;
+    }
+
+    /** True iff pos falls in any half-open range [los[j],his[j]). */
+    private static boolean inRanges(int pos, int[] los, int[] his) {
+        if (pos < 0) return false;
+        for (int j = 0; j < los.length; j++) if (pos >= los[j] && pos < his[j]) return true;
+        return false;
     }
 
     /**

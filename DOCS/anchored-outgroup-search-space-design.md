@@ -1,6 +1,19 @@
 # Anchored-Outgroup DP Search Space — Design & Plan
 
-> Status: **design / plan only**, not yet implemented. Proposes making the whole DP
+> Status: **IMPLEMENTED** (2026-07-17), behind `--anchor-outgroup` (default off),
+> **FULL search mode only** (exact there; inexact in local, where a gene tree's top
+> clades have no non-root path — so Main ignores the flag in local mode). Both layers
+> landed and verified exact: Layer 1 (single anchored root split, `DPTable.applyAnchoredRoot`)
+> and Layer 2 (anchor-free `ClusterTable` registration `A`, with-anchor-parent transition
+> skipping `B`, anchor-free emission registration `C`). Verified: non-consensus anchored
+> full == independent oracle (16/16 GPU+CPU); default unchanged; consensus anchored ==
+> unanchored on all 16 TCs; 37-taxon full clusters 1200→601, cross-tree 1301→130 ms,
+> scored splits 8433→2612, score identical. The anchored-vs-unanchored score match is
+> the correctness gate on any new dataset.
+>
+> ---
+>
+> Original plan below. Makes the whole DP
 > search space *natively* anchored at one fixed outgroup taxon, so that only the
 > anchor-free orientation of every candidate cluster is ever built. This is an exact,
 > result-preserving change for unrooted species-tree inference. It supersedes the

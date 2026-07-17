@@ -191,8 +191,12 @@ public class Main {
             }
 
             // ── Phase 3: Cluster extraction -> X (from COMPLETED trees) ──────
+            // Anchor-free X (only the anchor-free orientation of each bipartition)
+            // is exact only with the anchored DP root, which applies in FULL mode.
+            boolean anchorFreeX = cfg.isAnchorOutgroup()
+                                  && cfg.getSearchMode() == Config.SearchMode.FULL;
             long t3 = PhaseLogger.begin("Phase 3  Cluster extraction", false);
-            ClusterTable clusterTable = new ClusterTable(trees, pref, registry.size());
+            ClusterTable clusterTable = new ClusterTable(trees, pref, registry.size(), anchorFreeX);
             PhaseLogger.end("Phase 3  Cluster extraction", t3, false);
 
             if (cfg.isVerifyClusters()) {
@@ -261,7 +265,8 @@ public class Main {
                 // ── Bridge emissions into X (Tier-1 lookup / Tier-2 synthesize) ──
                 List<Tree> ext = new ArrayList<>(trees);
                 int[] bridged = EmissionBridge.bridge(gcResult.emissions, clusterTable,
-                                                      ext, registry.size());
+                                                      ext, registry.size(),
+                                                      anchorFreeX, cfg.getAnchorTaxon());
                 // Only switch to the extended list if exemplar trees were actually
                 // appended — preserves the `trees == originalTrees` identity that the
                 // weight path's autocomplete detection relies on when nothing changed.

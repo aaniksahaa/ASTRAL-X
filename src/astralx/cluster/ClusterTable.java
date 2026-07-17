@@ -51,6 +51,13 @@ public class ClusterTable {
 
     private final int m; // number of hash seeds
 
+    // Anchored-outgroup mode (DOCS/anchored-outgroup-search-space-design.md): when
+    // true, register only the ANCHOR-FREE orientation of every bipartition (the side
+    // not containing the anchor taxon), halving X.  Exact only when combined with the
+    // anchored DP root in FULL mode, so the caller passes true only then.
+    private final boolean anchorFreeX;
+    private final int     anchor;   // anchor taxon global id (valid iff anchorFreeX)
+
     // True once any multi-range exemplar has been inserted (consensus emission
     // bridge). Used to gate the GPU weight path, which is single-range-only until
     // the two-tier range-CSR lands (DOCS/multi-range-cluster-design.md §5.2/§5.3).
@@ -60,9 +67,21 @@ public class ClusterTable {
     // Construction
     // -------------------------------------------------------------------------
 
+    /** Full registration (both orientations) — backward-compatible entry point. */
     public ClusterTable(List<Tree> trees, PrefixHashArrays pref, int numTaxa) {
+        this(trees, pref, numTaxa, false);
+    }
+
+    /**
+     * @param anchorFreeX  when true, register only the anchor-free orientation of
+     *                     every bipartition (halves X).  The caller must ensure this
+     *                     is combined with the anchored DP root in FULL mode.
+     */
+    public ClusterTable(List<Tree> trees, PrefixHashArrays pref, int numTaxa, boolean anchorFreeX) {
         long t0 = System.nanoTime();
         this.m = pref.numSeeds();
+        this.anchorFreeX = anchorFreeX;
+        this.anchor = anchorFreeX ? Config.getInstance().getAnchorTaxon() : -1;
 
         // Build all-taxa hash from prefix arrays (using any complete tree)
         long[] atSums = new long[m], atXors = new long[m];
@@ -85,9 +104,14 @@ public class ClusterTable {
         // Cheap: one range hash from the first tree containing the anchor taxon.
         this.anchorHash = computeAnchorHash(trees, pref, numTaxa);
 
+        // In anchor-free mode the {anchor} singleton (a with-anchor cluster) is NOT
+        // registered by walkNodes, but the anchored root's {anchor} child and
+        // buildNewick's leaf-name lookup need it — register it explicitly.
+        if (anchorFreeX && anchorHash != null) registerAnchorSingleton(trees);
+
         long ms = (System.nanoTime() - t0) / 1_000_000;
-        Logging.info("Cluster extraction: %d candidates -> %d unique clusters in %d ms",
-            totalCandidates, table.size(), ms);
+        Logging.info("Cluster extraction: %d candidates -> %d unique clusters in %d ms%s",
+            totalCandidates, table.size(), ms, anchorFreeX ? "  [anchor-free X]" : "");
         Logging.debug("  all-taxa cluster (DP root): %s", allTaxaHash);
         if (Logging.isDebug()) {
             logSizeSummary();
@@ -103,26 +127,29 @@ public class ClusterTable {
         int ti = tree.treeIndex;
         int L  = tree.leafCount;
         int[] count = {0};
-
-        walkNodes(tree.root, ti, L, pref, numTaxa, count);
+        // Anchor position in THIS tree (-1 if anchoring off or the anchor is absent).
+        int anchorPos = (anchorFreeX && anchor >= 0 && anchor < tree.positionMap.length)
+                        ? tree.positionMap[anchor] : -1;
+        walkNodes(tree.root, ti, L, anchorPos, pref, numTaxa, count);
         return count[0];
     }
 
     /**
-     * Post-order walk. For every node (including leaves, but excluding root)
-     * register the subtree cluster and its super-complement S\[lo,hi).
+     * Post-order walk. For every node (including leaves, but excluding root):
+     *   full mode        — register the subtree cluster AND its super-complement;
+     *   anchor-free mode  — register ONLY the side not containing the anchor taxon.
      */
-    private void walkNodes(TreeNode node, int ti, int L,
+    private void walkNodes(TreeNode node, int ti, int L, int anchorPos,
                            PrefixHashArrays pref, int numTaxa, int[] count) {
         if (!node.isLeaf()) {
             if (node.isPolytomous()) {
                 // Recurse into ALL children. A polytomous node still contributes only
                 // its own sub(u) + complement below — NO combo clusters (sub(cᵢ)∪sub(cⱼ))
                 // are added; confirmed ASTRAL-MP behaviour (polytomy-design.md §3.3).
-                for (TreeNode child : node.children) walkNodes(child, ti, L, pref, numTaxa, count);
+                for (TreeNode child : node.children) walkNodes(child, ti, L, anchorPos, pref, numTaxa, count);
             } else {
-                walkNodes(node.left,  ti, L, pref, numTaxa, count);
-                walkNodes(node.right, ti, L, pref, numTaxa, count);
+                walkNodes(node.left,  ti, L, anchorPos, pref, numTaxa, count);
+                walkNodes(node.right, ti, L, anchorPos, pref, numTaxa, count);
             }
         }
 
@@ -130,16 +157,29 @@ public class ClusterTable {
 
         int lo = node.rangeStart, hi = node.rangeEnd;
         int rangeSize = hi - lo;
+        int superCompSize = numTaxa - rangeSize;   // S \ [lo,hi) (w.r.t. ALL taxa)
 
-        // ── 1. Subtree cluster [lo, hi) ──────────────────────────────────────
-        registerCluster(ti, lo, hi, false, rangeSize, L, pref, numTaxa);
-        count[0]++;
-
-        // ── 2. Super-complement: S \ [lo, hi) (w.r.t. ALL taxa, not just Lg) ──
-        int superCompSize = numTaxa - rangeSize;
-        if (superCompSize > 0) {  // skip empty (only if rangeSize == numTaxa, impossible here)
-            registerCluster(ti, lo, hi, true, superCompSize, numTaxa, pref, numTaxa);
+        if (!anchorFreeX) {
+            // ── Full: register both sub(u) and its super-complement ──────────
+            registerCluster(ti, lo, hi, false, rangeSize, L, pref, numTaxa);
             count[0]++;
+            if (superCompSize > 0) {  // skip empty (only if rangeSize == numTaxa, impossible here)
+                registerCluster(ti, lo, hi, true, superCompSize, numTaxa, pref, numTaxa);
+                count[0]++;
+            }
+        } else {
+            // ── Anchor-free: register ONLY the side without the anchor ───────
+            // Exactly one of sub(u) / S\sub(u) contains the anchor (it is in S, on one
+            // side); anchorPos == -1 (anchor absent from this tree) ⇒ sub(u) is
+            // anchor-free (sub(u) ⊆ Lg and anchor ∉ Lg).
+            boolean subHasAnchor = (anchorPos >= lo && anchorPos < hi);
+            if (!subHasAnchor) {
+                registerCluster(ti, lo, hi, false, rangeSize, L, pref, numTaxa);
+                count[0]++;
+            } else if (superCompSize > 0) {
+                registerCluster(ti, lo, hi, true, superCompSize, numTaxa, pref, numTaxa);
+                count[0]++;
+            }
         }
     }
 
@@ -198,6 +238,16 @@ public class ClusterTable {
             return new ClusterHash(rawSums, rawXors, 1, m);
         }
         return null;
+    }
+
+    /** Register the {anchor} singleton (with-anchor, so not added by walkNodes in anchor-free mode). */
+    private void registerAnchorSingleton(List<Tree> trees) {
+        for (Tree t : trees) {
+            int p = (anchor < t.positionMap.length) ? t.positionMap[anchor] : -1;
+            if (p < 0) continue;                       // anchor absent from this tree
+            addCluster(anchorHash, new Cluster(t.treeIndex, p, p + 1, false, t.leafCount));
+            return;
+        }
     }
 
     // -------------------------------------------------------------------------

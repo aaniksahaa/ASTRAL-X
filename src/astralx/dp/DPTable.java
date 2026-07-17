@@ -44,11 +44,20 @@ public class DPTable {
 
     // -------------------------------------------------------------------------
 
+    // Anchored-outgroup mode (FULL only): skip building the with-anchor-parent
+    // transitions — they are unreachable once the root is anchored, so omitting them
+    // (and the redundant per-cluster root-split search) is exact and saves memory.
+    private final boolean anchorFreeX;
+    private final int     anchor;
+
     public DPTable(List<Tree> trees, PrefixHashArrays pref, ClusterTable clusterTable) {
         long t0 = System.nanoTime();
         this.m        = pref.numSeeds();
         this.rootHash = clusterTable.getAllTaxaHash();
         this.n        = rootHash.size;
+        Config cfg = Config.getInstance();
+        this.anchorFreeX = cfg.isAnchorOutgroup() && cfg.getSearchMode() == Config.SearchMode.FULL;
+        this.anchor = anchorFreeX ? cfg.getAnchorTaxon() : -1;
 
         int treesDone = 0;
         ProgressBar localBar = new ProgressBar("Local DP transitions", trees.size());
@@ -73,11 +82,15 @@ public class DPTable {
     private void extractFromTree(Tree tree, PrefixHashArrays pref) {
         int ti = tree.treeIndex;
         int L  = tree.leafCount;
-        emit(tree.root, ti, pref);
+        int anchorPos = (anchorFreeX && anchor >= 0 && anchor < tree.positionMap.length)
+                        ? tree.positionMap[anchor] : -1;
+        emit(tree.root, ti, anchorPos, pref);
 
         // ── Type 3: for incomplete trees add S → Lg | (S\Lg) ─────────────────
-        // Connects the DP root (S) to this gene tree's taxa boundary.
-        if (!tree.isComplete) {
+        // Connects the DP root (S) to this gene tree's taxa boundary.  Skipped in
+        // anchor-free mode — the root is replaced by the single anchored split
+        // (applyAnchoredRoot), which overwrites any root transition anyway.
+        if (!anchorFreeX && !tree.isComplete) {
             ClusterHash hLg  = hashRange(ti, 0, L, false, pref); // hash(Lg)
             ClusterHash hSLg = hashRange(ti, 0, L, true,  pref); // hash(S\Lg)
             if (hSLg.size > 0) {
@@ -87,7 +100,7 @@ public class DPTable {
     }
 
     /** Post-order recursion: emit transitions for this node, then children. */
-    private void emit(TreeNode u, int ti, PrefixHashArrays pref) {
+    private void emit(TreeNode u, int ti, int anchorPos, PrefixHashArrays pref) {
         if (u.isLeaf()) return;
 
         // Polytomous node: recurse into all children, but add NO direct transitions of
@@ -95,18 +108,27 @@ public class DPTable {
         // resolution into the DP search space; its quartet signal still enters via the
         // d-partition QI weight.  (polytomy-design.md §3.7.)
         if (u.isPolytomous()) {
-            for (TreeNode child : u.children) emit(child, ti, pref);
+            for (TreeNode child : u.children) emit(child, ti, anchorPos, pref);
             return;
         }
 
-        emit(u.left,  ti, pref);
-        emit(u.right, ti, pref);
+        emit(u.left,  ti, anchorPos, pref);
+        emit(u.right, ti, anchorPos, pref);
+
+        // In anchor-free mode, sub(u) contains the anchor iff the anchor's position in
+        // this tree falls in [rangeStart,rangeEnd).  Exactly one of the two parents
+        // below (sub(u) for Type 1, S\sub(u) for Type 2) is then anchor-free; the other
+        // is unreachable from the anchored root, so we skip building it.
+        boolean subHasAnchor = (anchorPos >= u.rangeStart && anchorPos < u.rangeEnd);
 
         // ── Type 1: sub(u) → sub(left) | sub(right) ─────────────────────────
-        ClusterHash hU     = hashRange(ti, u.rangeStart,       u.rangeEnd,       false, pref);
-        ClusterHash hLeft  = hashRange(ti, u.left.rangeStart,  u.left.rangeEnd,  false, pref);
-        ClusterHash hRight = hashRange(ti, u.right.rangeStart, u.right.rangeEnd, false, pref);
-        addTransition(hU, hLeft, hRight);
+        // Keep unless anchor-free mode and sub(u) contains the anchor.
+        if (!anchorFreeX || !subHasAnchor) {
+            ClusterHash hU     = hashRange(ti, u.rangeStart,       u.rangeEnd,       false, pref);
+            ClusterHash hLeft  = hashRange(ti, u.left.rangeStart,  u.left.rangeEnd,  false, pref);
+            ClusterHash hRight = hashRange(ti, u.right.rangeStart, u.right.rangeEnd, false, pref);
+            addTransition(hU, hLeft, hRight);
+        }
 
         // ── Type 2: S\sub(u) → sub(sibling) | S\sub(parent) ─────────────────
         // For non-root u: if parent is root and tree is complete, S\sub(root)=empty (size 0)
@@ -114,7 +136,8 @@ public class DPTable {
         // GUARD: skip when the parent is polytomous — u.getSibling() has no well-defined
         // value for a child of a polytomous node (polytomy-design.md §3.7).  For binary
         // trees no node has a polytomous parent, so this clause is always true (unchanged).
-        if (!u.isRoot() && !u.parent.isPolytomous()) {
+        // Anchor-free: S\sub(u) is anchor-free iff the anchor IS in sub(u); keep only then.
+        if (!u.isRoot() && !u.parent.isPolytomous() && (!anchorFreeX || subHasAnchor)) {
             TreeNode sib    = u.getSibling();
             TreeNode parent = u.parent;
 
@@ -311,6 +334,9 @@ public class DPTable {
 
     /** Search transitions for the all-taxa root cluster (not in X itself). */
     private void searchRootTransitions(ClusterTable clusterTable) {
+        // Anchor-free mode replaces the root's transitions with a single anchored split
+        // (applyAnchoredRoot), so building all complementary root splits here is wasted.
+        if (anchorFreeX) return;
         int szRoot = rootHash.size;
         Set<BipartitionSplit> rootSet =
             transitions.computeIfAbsent(rootHash, k -> new LinkedHashSet<>());
