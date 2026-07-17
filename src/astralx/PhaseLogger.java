@@ -4,7 +4,8 @@ import astralx.gpu.GPUWeightCalculator;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * Step-by-step phase logging with per-phase peak CPU RAM and GPU VRAM.
+ * Step-by-step phase logging with both per-phase and run-wide peak CPU RAM and
+ * GPU VRAM.
  *
  * Two background threads run for every phase:
  *   - cpu-ram-poller : reads /proc/self/status VmRSS every 50 ms (total process RSS,
@@ -14,7 +15,9 @@ import java.util.concurrent.atomic.AtomicLong;
  * Output format:
  *   ▶  Phase N  Name  [GPU/CPU]
  *   ...kernel/Java output interleaved...
- *        ✓  1234 ms  │  peak RAM: 8192 MiB  │  peak VRAM: 231 MiB
+ *        ✓  1234 ms
+ *           peak RAM (this step): 8192 MiB │ peak RAM (so far): 8192 MiB
+ *           peak VRAM (this step): 231 MiB │ peak VRAM (so far): 231 MiB
  */
 public class PhaseLogger {
 
@@ -32,7 +35,8 @@ public class PhaseLogger {
     }
 
     // ── CPU RAM poller (/proc/self/status VmRSS) ──────────────────────────────
-    private static final AtomicLong peakCpuRssMiB   = new AtomicLong(0);
+    private static final AtomicLong peakCpuRssMiB      = new AtomicLong(0);
+    private static final AtomicLong peakCpuRssSoFarMiB = new AtomicLong(0);
     private static volatile boolean cpuPolling       = false;
     private static Thread           cpuPollThread    = null;
 
@@ -72,7 +76,7 @@ public class PhaseLogger {
         cpuPollThread.start();
     }
 
-    /** Stop CPU polling and return a formatted "peak CPU: X MiB" string. */
+    /** Stop CPU polling and format the current-step and run-wide RSS peaks. */
     private static String stopCpuPolling() {
         if (cpuPollThread == null) return null;
         cpuPolling = false;
@@ -83,13 +87,19 @@ public class PhaseLogger {
 
         long peak = peakCpuRssMiB.get();
         if (peak <= 0) return null;
+        long peakSoFar = updateMaximum(peakCpuRssSoFarMiB, peak);
         // colour: cyan (CPU colour matches [CPU] tag)
-        return c(DIM, "peak RAM: ") + c(CYAN, peak + " MiB");
+        return c(DIM, "peak ") + c(CYAN, "RAM") + c(DIM, " (this step): ")
+            + c(CYAN, peak + " MiB")
+            + "  " + c(DIM, "│") + "  "
+            + c(DIM, "peak ") + c(CYAN, "RAM") + c(DIM, " (so far): ")
+            + c(CYAN, peakSoFar + " MiB");
     }
 
     // ── Background VRAM poller ────────────────────────────────────────────────
     private static final AtomicLong minFreeVRAM = new AtomicLong(Long.MAX_VALUE);
     private static final AtomicLong totalVRAM   = new AtomicLong(0);
+    private static final AtomicLong peakVramUsedSoFarMiB = new AtomicLong(0);
     private static volatile boolean vramPolling = false;
     private static Thread           vramPollThread = null;
 
@@ -116,7 +126,7 @@ public class PhaseLogger {
         vramPollThread.start();
     }
 
-    /** Stop VRAM polling and return a formatted "peak VRAM: X MiB" string, or null. */
+    /** Stop VRAM polling and format the current-step and run-wide usage peaks. */
     private static String stopVramPolling() {
         if (vramPollThread == null) return null;
         vramPolling = false;
@@ -130,8 +140,24 @@ public class PhaseLogger {
         if (minFree == Long.MAX_VALUE || total == 0) return null;
 
         long peakUsed = total - minFree;
-        String colCode = (peakUsed * 2 < total) ? GRN : YLW;
-        return c(DIM, "peak VRAM: ") + c(colCode, peakUsed + " MiB");
+        long peakSoFar = updateMaximum(peakVramUsedSoFarMiB, peakUsed);
+        String stepCol = (peakUsed * 2 < total) ? GRN : YLW;
+        String runCol  = (peakSoFar * 2 < total) ? GRN : YLW;
+        return c(DIM, "peak ") + c(GRN, "VRAM") + c(DIM, " (this step): ")
+            + c(stepCol, peakUsed + " MiB")
+            + "  " + c(DIM, "│") + "  "
+            + c(DIM, "peak ") + c(GRN, "VRAM") + c(DIM, " (so far): ")
+            + c(runCol, peakSoFar + " MiB");
+    }
+
+    /** Atomically raise a run-wide high-water mark and return its new value. */
+    private static long updateMaximum(AtomicLong maximum, long candidate) {
+        long current;
+        do {
+            current = maximum.get();
+            if (candidate <= current) return current;
+        } while (!maximum.compareAndSet(current, candidate));
+        return candidate;
     }
 
     // ── Public API ────────────────────────────────────────────────────────────
@@ -152,7 +178,7 @@ public class PhaseLogger {
     }
 
     /**
-     * Print phase-completion line with elapsed time, peak CPU RAM, and (for GPU) peak VRAM.
+     * Print a phase-completion block with time, RAM peaks, and (for GPU) VRAM peaks.
      * @param label same label passed to {@link #begin}
      * @param t0    timestamp returned by {@link #begin}
      * @param gpu   true if this phase ran on the GPU
@@ -162,14 +188,12 @@ public class PhaseLogger {
         String cpuStr  = stopCpuPolling();
         String vramStr = gpu ? stopVramPolling() : null;
 
-        StringBuilder sb = new StringBuilder();
-        sb.append("     ").append(c(DIM, "✓")).append("  ").append(c(YLW, ms + " ms"));
+        System.err.println("     " + c(DIM, "✓") + "  " + c(YLW, ms + " ms"));
         if (cpuStr != null) {
-            sb.append("  ").append(c(DIM, "│")).append("  ").append(cpuStr);
+            System.err.println("        " + cpuStr);
         }
         if (vramStr != null) {
-            sb.append("  ").append(c(DIM, "│")).append("  ").append(vramStr);
+            System.err.println("        " + vramStr);
         }
-        System.err.println(sb);
     }
 }
