@@ -225,6 +225,54 @@ public class GPUWeightCalculator {
     );
 
     /**
+     * Simple-tree-walk weight calculation (many-candidate fast path).
+     *
+     * One CUDA thread per split walks a resident flat postorder token stream of all
+     * gene trees sequentially, maintaining a small per-thread stack of
+     * (|node∩A|,|node∩B|,|node|) triples.  Every non-root internal node's
+     * tripartition is scored in O(1) from its children (same QI math as the other
+     * methods, so bit-identical).  No prefix arrays, no dedup, no cross-tree
+     * parallelism — a lean kernel that wins when the candidate set is huge.
+     *
+     * Resident (uploaded once): clusterBits (A/B pool), geneLgBits, nodeStream,
+     * treeNodeOffset, leafCount.  Per-batch (streamed): splits (4 ints/split) + scores.
+     *
+     * @param splits         numSplits × 4  [aCid, bCid, aSize, bSize]
+     * @param clusterBits    numClusters × W  longs (global-taxon bitsets; cid 0 = empty)
+     * @param geneLgBits     numTrees × W  longs (per gene-tree present-taxa bitset)
+     * @param nodeStream     flat postorder tokens: leaf = taxon id (≥0), internal = -childCount
+     * @param treeNodeOffset numTrees + 1  CSR row pointers into nodeStream
+     * @param leafCount      numTrees  (L per gene tree = LgSize)
+     * @param numSplits      number of candidate splits
+     * @param numClusters    number of distinct cluster bitsets in the pool
+     * @param numTrees       number of gene trees
+     * @param wordsPerSet    W = ceil(numTaxa/64)
+     * @param numTaxa        total taxon count (= totalN for sizeC)
+     * @param batchSizeHint  0=auto, -1=no batching, >0=exact batch size
+     * @param vramFraction   fraction of free VRAM to use when batchSizeHint==0
+     * @param scoreMode      0=LONG, 1=DOUBLE (bit pattern), 2=INT128 (low,high pair)
+     * @return for LONG/DOUBLE: long[numSplits]; for INT128: long[2*numSplits];
+     *         or null if infeasible (e.g. numTaxa exceeds the GPU stack cap) — caller falls back to CPU
+     */
+    public static native long[] computeWeightsTreeWalkGPU(
+        int[]  splits,
+        long[] clusterBits,
+        long[] geneLgBits,
+        int[]  nodeStream,
+        int[]  treeNodeOffset,
+        int[]  leafCount,
+        int numSplits,
+        int numClusters,
+        int numTrees,
+        int wordsPerSet,
+        int numTaxa,
+        int batchSizeHint,
+        double vramFraction,
+        int scoreMode,
+        double progressIntervalSec
+    );
+
+    /**
      * Query GPU free and total VRAM via cudaMemGetInfo.
      * Returns long[2] = {freeMiB, totalMiB}, or null if unavailable.
      */

@@ -69,6 +69,12 @@
 // dynamic shared-memory scan area sized on the host.
 #define WB_BLOCK 256
 
+// Simple-tree-walk per-thread postorder stack cap (in triples).  The stack depth
+// is bounded by a tree's leaf count, so the GPU tree-walk path is used only when
+// numTaxa <= WB_TW_STACK_CAP; larger taxon sets fall back to the CPU tree walk.
+// Each thread's private stack is WB_TW_STACK_CAP*3 ints of local memory.
+#define WB_TW_STACK_CAP 512
+
 // ---------------------------------------------------------------------------
 // Adaptive accumulator transport.
 //
@@ -1401,6 +1407,251 @@ __global__ void computeWeightsBitsetKernelI128(
     }
 }
 
+// ===========================================================================
+// SIMPLE-TREE-WALK path (many-candidate fast option).
+//
+// One thread per split walks the resident flat postorder token stream of all gene
+// trees sequentially, maintaining a small private stack of (nA,nB,nS) triples
+// = (|node∩A|, |node∩B|, |node|).  Tokens: leaf = taxon id (>=0), internal =
+// -childCount; the root is not emitted.  Every non-root internal node's
+// tripartition is scored in O(1) from its children — same QI arithmetic as the
+// other kernels, so bit-identical.  No prefix arrays, no dedup.  Per-tree lgA/lgB
+// come from popcount(A/B & geneLgBits[g]); complete trees short-circuit to aSize/bSize.
+// ===========================================================================
+
+template<typename ACC>
+__global__ void computeWeightsTreeWalkKernel(
+    const int* __restrict__ splits,                     // curBatch * 4
+    const unsigned long long* __restrict__ clusterBits,
+    const unsigned long long* __restrict__ geneLgBits,
+    const int* __restrict__ nodeStream,
+    const int* __restrict__ treeNodeOffset,
+    const int* __restrict__ leafCount,
+    int curBatch, int numTrees, int W, int totalN,
+    long long* __restrict__ twoScores, int* __restrict__ dProgress)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= curBatch) return;
+
+    const int* sp = splits + (size_t)idx * 4;
+    int aCid = sp[0], bCid = sp[1], aSize = sp[2], bSize = sp[3];
+    if (totalN - aSize - bSize < 0) { twoScores[idx] = 0LL; return; }
+
+    const unsigned long long* A = clusterBits + (size_t)aCid * W;
+    const unsigned long long* B = clusterBits + (size_t)bCid * W;
+
+    const int PI[6] = {0, 0, 1, 1, 2, 2};
+    const int PJ[6] = {1, 2, 0, 2, 0, 1};
+    const int PK[6] = {2, 1, 2, 0, 1, 0};
+
+    int stack[WB_TW_STACK_CAP * 3];
+    ACC twoScore = (ACC) 0;
+
+    for (int g = 0; g < numTrees; g++) {
+        int segBeg = treeNodeOffset[g], segEnd = treeNodeOffset[g + 1];
+        if (segBeg == segEnd) continue;
+        int LgSize = leafCount[g];
+        int lgA, lgB;
+        if (LgSize == totalN) { lgA = aSize; lgB = bSize; }
+        else { const unsigned long long* Lg = geneLgBits + (size_t)g * W;
+               lgA = bs_popAnd(A, Lg, W); lgB = bs_popAnd(B, Lg, W); }
+
+        int top = 0;
+        for (int i = segBeg; i < segEnd; i++) {
+            int tok = nodeStream[i];
+            if (tok >= 0) {                                   // leaf
+                int inA = (int)((A[tok >> 6] >> (tok & 63)) & 1ULL);
+                int inB = (int)((B[tok >> 6] >> (tok & 63)) & 1ULL);
+                int e = top * 3;
+                stack[e] = inA; stack[e + 1] = inB; stack[e + 2] = 1;
+                top++;
+            } else {                                          // internal (k children)
+                int k = -tok;
+                int cbase = top - k;
+                if (k == 2) {
+                    int e0 = cbase * 3;
+                    int a0 = stack[e0],     b0 = stack[e0 + 1], s0 = stack[e0 + 2];
+                    int a1 = stack[e0 + 3], b1 = stack[e0 + 4], s1 = stack[e0 + 5];
+                    int a2 = lgA - a0 - a1, b2 = lgB - b0 - b1;
+                    int sz3 = LgSize - s0 - s1;
+                    int c0 = s0 - a0 - b0, c1 = s1 - a1 - b1, c2 = sz3 - a2 - b2;
+                    if (!(a2 < 0 || b2 < 0 || c0 < 0 || c1 < 0 || c2 < 0)) {
+                        ACC a[3] = {(ACC)a0, (ACC)a1, (ACC)a2};
+                        ACC b[3] = {(ACC)b0, (ACC)b1, (ACC)b2};
+                        ACC c[3] = {(ACC)c0, (ACC)c1, (ACC)c2};
+                        ACC twoQI = (ACC) 0;
+                        #pragma unroll
+                        for (int p = 0; p < 6; p++) {
+                            ACC ai = a[PI[p]], bj = b[PJ[p]], ck = c[PK[p]];
+                            ACC su = ai + bj + ck - 3;
+                            if (su > 0) twoQI += ai * bj * ck * su;
+                        }
+                        twoScore += twoQI;
+                    }
+                    stack[e0] = a0 + a1; stack[e0 + 1] = b0 + b1; stack[e0 + 2] = s0 + s1;
+                    top = cbase + 1;
+                } else {                                       // polytomy k>=3
+                    ACC Sa = 0, Sb = 0, Sc = 0, Sab = 0, Sac = 0, Sbc = 0;
+                    int sumA = 0, sumB = 0, sumS = 0;
+                    for (int j = 0; j < k; j++) {
+                        int e = (cbase + j) * 3;
+                        int aj = stack[e], bj = stack[e + 1], sj = stack[e + 2];
+                        int cj = sj - aj - bj;
+                        Sa += aj; Sb += bj; Sc += cj;
+                        Sab += (ACC) aj * bj; Sac += (ACC) aj * cj; Sbc += (ACC) bj * cj;
+                        sumA += aj; sumB += bj; sumS += sj;
+                    }
+                    int aC = lgA - sumA, bC = lgB - sumB, szC = LgSize - sumS, cC = szC - aC - bC;
+                    if (!(aC < 0 || bC < 0 || cC < 0)) {
+                        Sa += aC; Sb += bC; Sc += cC;
+                        Sab += (ACC) aC * bC; Sac += (ACC) aC * cC; Sbc += (ACC) bC * cC;
+                        ACC twoQI = (ACC) 0;
+                        for (int j = 0; j < k; j++) {
+                            int e = (cbase + j) * 3;
+                            ACC aj = stack[e], bj = stack[e + 1], cj = (ACC)(stack[e + 2] - stack[e] - stack[e + 1]);
+                            twoQI += aj * (aj - 1) * ((Sb - bj) * (Sc - cj) - Sbc + bj * cj);
+                            twoQI += bj * (bj - 1) * ((Sa - aj) * (Sc - cj) - Sac + aj * cj);
+                            twoQI += cj * (cj - 1) * ((Sa - aj) * (Sb - bj) - Sab + aj * bj);
+                        }
+                        { ACC aj = aC, bj = bC, cj = cC;
+                          twoQI += aj * (aj - 1) * ((Sb - bj) * (Sc - cj) - Sbc + bj * cj);
+                          twoQI += bj * (bj - 1) * ((Sa - aj) * (Sc - cj) - Sac + aj * cj);
+                          twoQI += cj * (cj - 1) * ((Sa - aj) * (Sb - bj) - Sab + aj * bj); }
+                        twoScore += twoQI;
+                    }
+                    stack[cbase * 3] = sumA; stack[cbase * 3 + 1] = sumB; stack[cbase * 3 + 2] = sumS;
+                    top = cbase + 1;
+                }
+            }
+        }
+    }
+
+    storeTwoScore(twoScores, idx, twoScore);
+    if (dProgress) {
+        unsigned act = __activemask();
+        if ((threadIdx.x & 31) == (__ffs(act) - 1)) atomicAdd(dProgress, __popc(act));
+    }
+}
+
+// INT128 twin of the tree-walk kernel (one thread per split, exact 128-bit).
+__global__ void computeWeightsTreeWalkKernelI128(
+    const int* __restrict__ splits,
+    const unsigned long long* __restrict__ clusterBits,
+    const unsigned long long* __restrict__ geneLgBits,
+    const int* __restrict__ nodeStream,
+    const int* __restrict__ treeNodeOffset,
+    const int* __restrict__ leafCount,
+    int curBatch, int numTrees, int W, int totalN,
+    long long* __restrict__ twoScores, int* __restrict__ dProgress)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= curBatch) return;
+
+    const int* sp = splits + (size_t)idx * 4;
+    int aCid = sp[0], bCid = sp[1], aSize = sp[2], bSize = sp[3];
+    if (totalN - aSize - bSize < 0) { storeTwoScoreI128(twoScores, idx, i128_zero()); return; }
+
+    const unsigned long long* A = clusterBits + (size_t)aCid * W;
+    const unsigned long long* B = clusterBits + (size_t)bCid * W;
+
+    const int PI[6] = {0, 0, 1, 1, 2, 2};
+    const int PJ[6] = {1, 2, 0, 2, 0, 1};
+    const int PK[6] = {2, 1, 2, 0, 1, 0};
+
+    int stack[WB_TW_STACK_CAP * 3];
+    I128 twoScore = i128_zero();
+
+    for (int g = 0; g < numTrees; g++) {
+        int segBeg = treeNodeOffset[g], segEnd = treeNodeOffset[g + 1];
+        if (segBeg == segEnd) continue;
+        int LgSize = leafCount[g];
+        int lgA, lgB;
+        if (LgSize == totalN) { lgA = aSize; lgB = bSize; }
+        else { const unsigned long long* Lg = geneLgBits + (size_t)g * W;
+               lgA = bs_popAnd(A, Lg, W); lgB = bs_popAnd(B, Lg, W); }
+
+        int top = 0;
+        for (int i = segBeg; i < segEnd; i++) {
+            int tok = nodeStream[i];
+            if (tok >= 0) {                                   // leaf
+                int inA = (int)((A[tok >> 6] >> (tok & 63)) & 1ULL);
+                int inB = (int)((B[tok >> 6] >> (tok & 63)) & 1ULL);
+                int e = top * 3;
+                stack[e] = inA; stack[e + 1] = inB; stack[e + 2] = 1;
+                top++;
+            } else {
+                int k = -tok;
+                int cbase = top - k;
+                if (k == 2) {
+                    int e0 = cbase * 3;
+                    int a0 = stack[e0],     b0 = stack[e0 + 1], s0 = stack[e0 + 2];
+                    int a1 = stack[e0 + 3], b1 = stack[e0 + 4], s1 = stack[e0 + 5];
+                    int a2 = lgA - a0 - a1, b2 = lgB - b0 - b1;
+                    int sz3 = LgSize - s0 - s1;
+                    int c0 = s0 - a0 - b0, c1 = s1 - a1 - b1, c2 = sz3 - a2 - b2;
+                    if (!(a2 < 0 || b2 < 0 || c0 < 0 || c1 < 0 || c2 < 0)) {
+                        long long a[3] = {a0, a1, a2};
+                        long long b[3] = {b0, b1, b2};
+                        long long c[3] = {c0, c1, c2};
+                        I128 twoQI = i128_zero();
+                        #pragma unroll
+                        for (int p = 0; p < 6; p++) {
+                            long long ai = a[PI[p]], bj = b[PJ[p]], ck = c[PK[p]];
+                            long long su = ai + bj + ck - 3;
+                            if (su > 0) {
+                                long long abc = ai * bj * ck;
+                                twoQI = i128_add(twoQI, i128_mul_u64((unsigned long long)abc, (unsigned long long)su));
+                            }
+                        }
+                        twoScore = i128_add(twoScore, twoQI);
+                    }
+                    stack[e0] = a0 + a1; stack[e0 + 1] = b0 + b1; stack[e0 + 2] = s0 + s1;
+                    top = cbase + 1;
+                } else {
+                    long long Sa = 0, Sb = 0, Sc = 0, Sab = 0, Sac = 0, Sbc = 0;
+                    int sumA = 0, sumB = 0, sumS = 0;
+                    for (int j = 0; j < k; j++) {
+                        int e = (cbase + j) * 3;
+                        int aj = stack[e], bj = stack[e + 1], sj = stack[e + 2];
+                        int cj = sj - aj - bj;
+                        Sa += aj; Sb += bj; Sc += cj;
+                        Sab += (long long) aj * bj; Sac += (long long) aj * cj; Sbc += (long long) bj * cj;
+                        sumA += aj; sumB += bj; sumS += sj;
+                    }
+                    int aC = lgA - sumA, bC = lgB - sumB, szC = LgSize - sumS, cC = szC - aC - bC;
+                    if (!(aC < 0 || bC < 0 || cC < 0)) {
+                        Sa += aC; Sb += bC; Sc += cC;
+                        Sab += (long long) aC * bC; Sac += (long long) aC * cC; Sbc += (long long) bC * cC;
+                        I128 twoQI = i128_zero();
+                        for (int j = 0; j <= k; j++) {
+                            long long aj, bj, cj;
+                            if (j < k) { int e = (cbase + j) * 3;
+                                         aj = stack[e]; bj = stack[e + 1]; cj = (long long)stack[e + 2] - aj - bj; }
+                            else       { aj = aC; bj = bC; cj = cC; }
+                            long long brA = (Sb - bj) * (Sc - cj) - Sbc + bj * cj;
+                            long long brB = (Sa - aj) * (Sc - cj) - Sac + aj * cj;
+                            long long brC = (Sa - aj) * (Sb - bj) - Sab + aj * bj;
+                            long long wA = aj * (aj - 1), wB = bj * (bj - 1), wC = cj * (cj - 1);
+                            if (wA > 0 && brA > 0) twoQI = i128_add(twoQI, i128_mul_u64((unsigned long long) wA, (unsigned long long) brA));
+                            if (wB > 0 && brB > 0) twoQI = i128_add(twoQI, i128_mul_u64((unsigned long long) wB, (unsigned long long) brB));
+                            if (wC > 0 && brC > 0) twoQI = i128_add(twoQI, i128_mul_u64((unsigned long long) wC, (unsigned long long) brC));
+                        }
+                        twoScore = i128_add(twoScore, twoQI);
+                    }
+                    stack[cbase * 3] = sumA; stack[cbase * 3 + 1] = sumB; stack[cbase * 3 + 2] = sumS;
+                    top = cbase + 1;
+                }
+            }
+        }
+    }
+
+    storeTwoScoreI128(twoScores, idx, twoScore);
+    if (dProgress) {
+        unsigned act = __activemask();
+        if ((threadIdx.x & 31) == (__ffs(act) - 1)) atomicAdd(dProgress, __popc(act));
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Progress-bar helpers (host-side, used in the batch loop)
 // ---------------------------------------------------------------------------
@@ -2516,6 +2767,233 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsBitsetGPU(
     env->ReleaseIntArrayElements(jPolyChildOffset, hPolyChildOffset, JNI_ABORT);
     env->ReleaseLongArrayElements(jPolyChildBits, hPolyChildBits, JNI_ABORT);
     env->ReleaseIntArrayElements(jPolyChildSize, hPolyChildSize, JNI_ABORT);
+
+    return result;
+}
+
+JNIEXPORT jlongArray JNICALL
+Java_astralx_gpu_GPUWeightCalculator_computeWeightsTreeWalkGPU(
+    JNIEnv* env, jclass cls,
+    jintArray jSplits,
+    jlongArray jClusterBits,
+    jlongArray jGeneLgBits,
+    jintArray jNodeStream,
+    jintArray jTreeNodeOffset,
+    jintArray jLeafCount,
+    jint numSplits, jint numClusters, jint numTrees,
+    jint wordsPerSet, jint numTaxa,
+    jint batchSizeHint, jdouble vramFraction, jint scoreMode, jdouble progressIntervalSec)
+{
+    // Per-thread stack is bounded by the leaf count (<= numTaxa); the private stack
+    // array is sized WB_TW_STACK_CAP.  Larger taxon sets → infeasible (CPU fallback).
+    if (numTaxa > WB_TW_STACK_CAP) {
+        fprintf(stderr, "[ASTRAL-X GPU] tree-walk: numTaxa=%d exceeds stack cap %d → CPU fallback\n",
+                numTaxa, WB_TW_STACK_CAP);
+        return NULL;
+    }
+
+    bool useDouble = (scoreMode == 1);
+    bool useI128   = (scoreMode == 2);
+    int  scoresPerSplit = useI128 ? 2 : 1;
+    int  W = wordsPerSet;
+    int  totalN = numTaxa;
+    fprintf(stderr, "[ASTRAL-X GPU] weight accumulator: %s  (simple-tree-walk, W=%d words)\n",
+            useI128   ? "INT128 (exact 128-bit integer)"
+          : useDouble ? "DOUBLE (64-bit float, overflow-safe)"
+                      : "LONG (exact 64-bit integer)", W);
+
+    jint*  hSplits         = env->GetIntArrayElements(jSplits, NULL);
+    jlong* hClusterBits    = env->GetLongArrayElements(jClusterBits, NULL);
+    jlong* hGeneLgBits     = env->GetLongArrayElements(jGeneLgBits, NULL);
+    jint*  hNodeStream     = env->GetIntArrayElements(jNodeStream, NULL);
+    jint*  hTreeNodeOffset = env->GetIntArrayElements(jTreeNodeOffset, NULL);
+    jint*  hLeafCount      = env->GetIntArrayElements(jLeafCount, NULL);
+
+    size_t clusterLen  = (size_t) env->GetArrayLength(jClusterBits);
+    size_t geneLgLen   = (size_t) env->GetArrayLength(jGeneLgBits);
+    size_t nodeStreamLen = (size_t) env->GetArrayLength(jNodeStream);
+
+    // --- Upload resident data once ---
+    unsigned long long *dClusterBits, *dGeneLgBits;
+    int *dNodeStream, *dTreeNodeOffset, *dLeafCount;
+    #define MB_(n) ((size_t)((n) > 0 ? (n) : 1))
+    size_t clusterSz    = MB_(clusterLen)    * sizeof(unsigned long long);
+    size_t geneSz       = MB_(geneLgLen)     * sizeof(unsigned long long);
+    size_t nodeStreamSz = MB_(nodeStreamLen) * sizeof(int);
+    size_t treeOffSz    = (size_t)(numTrees + 1) * sizeof(int);
+    size_t leafCntSz    = MB_(numTrees)      * sizeof(int);
+
+    cudaMalloc(&dClusterBits,    clusterSz);
+    cudaMalloc(&dGeneLgBits,     geneSz);
+    cudaMalloc(&dNodeStream,     nodeStreamSz);
+    cudaMalloc(&dTreeNodeOffset, treeOffSz);
+    cudaMalloc(&dLeafCount,      leafCntSz);
+    if (clusterLen)    cudaMemcpy(dClusterBits, hClusterBits, clusterLen    * sizeof(unsigned long long), cudaMemcpyHostToDevice);
+    if (geneLgLen)     cudaMemcpy(dGeneLgBits,  hGeneLgBits,  geneLgLen     * sizeof(unsigned long long), cudaMemcpyHostToDevice);
+    if (nodeStreamLen) cudaMemcpy(dNodeStream,  hNodeStream,  nodeStreamLen * sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(dTreeNodeOffset, hTreeNodeOffset, treeOffSz, cudaMemcpyHostToDevice);
+    if (numTrees > 0)  cudaMemcpy(dLeafCount, hLeafCount, (size_t)numTrees * sizeof(int), cudaMemcpyHostToDevice);
+    #undef MB_
+
+    {
+        size_t residentTotal = clusterSz + geneSz + nodeStreamSz + treeOffSz + leafCntSz;
+        size_t freeAfterStatic = 0, totalVRAM = 0;
+        cudaMemGetInfo(&freeAfterStatic, &totalVRAM);
+        fprintf(stderr,
+            "[ASTRAL-X GPU] weight resident data uploaded (simple-tree-walk, W=%d):\n"
+            "  clusterBits : %6.1f MB  (%d clusters × %d words)\n"
+            "  geneLgBits  : %6.1f MB  (%d gene trees)\n"
+            "  nodeStream  : %6.1f MB  (%zu tokens)\n"
+            "  ─────────────────────\n"
+            "  resident total : %6.1f MB   (VRAM free after: %.1f MB / %.1f MB)\n",
+            W, clusterSz / 1e6, numClusters, W, geneSz / 1e6, numTrees,
+            nodeStreamSz / 1e6, nodeStreamLen, residentTotal / 1e6,
+            freeAfterStatic / 1e6, totalVRAM / 1e6);
+        fflush(stderr);
+    }
+
+    // --- Determine batch size (per-split: 16 B in + 8/16 B out) ---
+    int batchSize;
+    if (batchSizeHint == -1) {
+        batchSize = numSplits;
+        fprintf(stderr, "[ASTRAL-X GPU] batching disabled — single launch, %d splits\n", numSplits);
+    } else if (batchSizeHint > 0) {
+        batchSize = (batchSizeHint < numSplits) ? batchSizeHint : numSplits;
+        fprintf(stderr, "[ASTRAL-X GPU] manual batch size: %d  (numSplits=%d)\n", batchSize, numSplits);
+    } else {
+        size_t freeVRAM = 0, totalVRAM = 0;
+        cudaMemGetInfo(&freeVRAM, &totalVRAM);
+        size_t usable = (size_t)((double)freeVRAM * (double)vramFraction);
+        size_t perSplitBytes = 4 * sizeof(int) + scoresPerSplit * sizeof(long long);
+        long long autoSize = (long long)(usable / perSplitBytes);
+        if (autoSize < 1) autoSize = 1;
+        if (autoSize > (long long)numSplits) autoSize = (long long)numSplits;
+        batchSize = (int)autoSize;
+        fprintf(stderr,
+            "[ASTRAL-X GPU] adaptive batch: freeVRAM=%.2f GB, occupancy=%.0f%%, usable=%.2f GB, "
+            "perSplit=%zu B → batchSize=%d  (numSplits=%d, numBatches=%d)\n",
+            freeVRAM / 1e9, (double)vramFraction * 100.0, usable / 1e9,
+            perSplitBytes, batchSize, numSplits, (numSplits + batchSize - 1) / batchSize);
+    }
+
+    int*       dSplits    = NULL;
+    long long* dTwoScores = NULL;
+    while (batchSize > 0) {
+        size_t splitBufSz = (size_t)batchSize * 4 * sizeof(int);
+        size_t scoreBufSz = (size_t)batchSize * scoresPerSplit * sizeof(long long);
+        cudaError_t e1 = cudaMalloc(&dSplits,    splitBufSz);
+        cudaError_t e2 = cudaMalloc(&dTwoScores, scoreBufSz);
+        if (e1 == cudaSuccess && e2 == cudaSuccess) break;
+        if (dSplits)    { cudaFree(dSplits);    dSplits    = NULL; }
+        if (dTwoScores) { cudaFree(dTwoScores); dTwoScores = NULL; }
+        batchSize /= 2;
+        fprintf(stderr, "[ASTRAL-X GPU] cudaMalloc failed, retrying with batchSize=%d\n", batchSize);
+    }
+    if (batchSize <= 0 || dSplits == NULL || dTwoScores == NULL) {
+        fprintf(stderr, "[ASTRAL-X GPU] FATAL: cannot allocate GPU batch buffers (tree-walk)\n");
+        cudaFree(dClusterBits); cudaFree(dGeneLgBits); cudaFree(dNodeStream);
+        cudaFree(dTreeNodeOffset); cudaFree(dLeafCount);
+        env->ReleaseIntArrayElements(jSplits, hSplits, JNI_ABORT);
+        env->ReleaseLongArrayElements(jClusterBits, hClusterBits, JNI_ABORT);
+        env->ReleaseLongArrayElements(jGeneLgBits, hGeneLgBits, JNI_ABORT);
+        env->ReleaseIntArrayElements(jNodeStream, hNodeStream, JNI_ABORT);
+        env->ReleaseIntArrayElements(jTreeNodeOffset, hTreeNodeOffset, JNI_ABORT);
+        env->ReleaseIntArrayElements(jLeafCount, hLeafCount, JNI_ABORT);
+        return NULL;
+    }
+
+    long long* hTwoScores = new long long[(size_t)numSplits * scoresPerSplit]();
+
+    cudaStream_t wbStream = 0, pollStream = 0;
+    cudaStreamCreate(&wbStream);
+    cudaStreamCreate(&pollStream);
+    int* dProgress = NULL; int* hProgress = NULL;
+    cudaMalloc(&dProgress, sizeof(int));
+    cudaHostAlloc((void**)&hProgress, sizeof(int), cudaHostAllocDefault);
+
+    int    blockSize  = WB_BLOCK;
+    int    numBatches = (numSplits + batchSize - 1) / batchSize;
+    double t_loop_start = wb_now_sec();
+    const char* GRN = wb_use_color() ? "\033[32m" : "";
+    const char* RST = wb_use_color() ? "\033[0m"  : "";
+    char   bar_buf[WB_BAR_W * 3 + 1];
+
+    for (int b = 0; b < numBatches; b++) {
+        int offset   = b * batchSize;
+        int curBatch = (offset + batchSize <= numSplits) ? batchSize : (numSplits - offset);
+
+        cudaMemcpy(dSplits, hSplits + (size_t)offset * 4,
+                   (size_t)curBatch * 4 * sizeof(int), cudaMemcpyHostToDevice);
+        cudaMemsetAsync(dProgress, 0, sizeof(int), wbStream);
+
+        int gridSize = (curBatch + blockSize - 1) / blockSize;
+        if (useI128)
+            computeWeightsTreeWalkKernelI128<<<gridSize, blockSize, 0, wbStream>>>(
+                dSplits, dClusterBits, dGeneLgBits, dNodeStream, dTreeNodeOffset, dLeafCount,
+                curBatch, numTrees, W, totalN, dTwoScores, dProgress);
+        else if (useDouble)
+            computeWeightsTreeWalkKernel<double><<<gridSize, blockSize, 0, wbStream>>>(
+                dSplits, dClusterBits, dGeneLgBits, dNodeStream, dTreeNodeOffset, dLeafCount,
+                curBatch, numTrees, W, totalN, dTwoScores, dProgress);
+        else
+            computeWeightsTreeWalkKernel<long long><<<gridSize, blockSize, 0, wbStream>>>(
+                dSplits, dClusterBits, dGeneLgBits, dNodeStream, dTreeNodeOffset, dLeafCount,
+                curBatch, numTrees, W, totalN, dTwoScores, dProgress);
+
+        char wbLabel[64];
+        snprintf(wbLabel, sizeof wbLabel,
+                 (numBatches > 1) ? "weight batch %d/%d" : "weight", b + 1, numBatches);
+        cudaError_t err = wb_poll_progress(wbStream, pollStream, dProgress, hProgress, curBatch, wbLabel, progressIntervalSec);
+        cudaError_t serr = cudaStreamSynchronize(wbStream);
+        if (err == cudaErrorNotReady || err == cudaSuccess) err = serr;
+        if (err != cudaSuccess) {
+            fprintf(stderr, "[ASTRAL-X GPU] kernel error (tree-walk batch %d/%d): %s\n",
+                    b + 1, numBatches, cudaGetErrorString(err));
+        }
+
+        cudaMemcpy(hTwoScores + (size_t)offset * scoresPerSplit, dTwoScores,
+                   (size_t)curBatch * scoresPerSplit * sizeof(long long), cudaMemcpyDeviceToHost);
+
+        if (numBatches > 1) {
+            double elapsed  = wb_now_sec() - t_loop_start;
+            double avg_sec  = elapsed / (b + 1);
+            int    rem      = numBatches - (b + 1);
+            double pct      = 100.0 * (b + 1) / numBatches;
+            wb_build_bar(bar_buf, b + 1, numBatches);
+            if (rem == 0) {
+                char dur_buf[32];
+                wb_fmt_duration(elapsed, dur_buf, sizeof(dur_buf));
+                fprintf(stderr,
+                    "\r  %s[GPU]%s weight  %s[%s]%s  %d/%d  100%%  done in %s                    \n",
+                    GRN, RST, GRN, bar_buf, RST, numBatches, numBatches, dur_buf);
+            } else {
+                char eta_buf[32];
+                wb_fmt_duration(avg_sec * rem, eta_buf, sizeof(eta_buf));
+                fprintf(stderr,
+                    "\r  %s[GPU]%s weight  %s[%s]%s  %d/%d  %5.1f%%  %.2fs/batch  ETA: %-8s",
+                    GRN, RST, GRN, bar_buf, RST, b + 1, numBatches, pct, avg_sec, eta_buf);
+            }
+            fflush(stderr);
+        }
+    }
+
+    jsize outLen = (jsize)((size_t)numSplits * scoresPerSplit);
+    jlongArray result = env->NewLongArray(outLen);
+    env->SetLongArrayRegion(result, 0, outLen, (jlong*)hTwoScores);
+
+    delete[] hTwoScores;
+    cudaFree(dSplits); cudaFree(dTwoScores);
+    cudaFree(dClusterBits); cudaFree(dGeneLgBits); cudaFree(dNodeStream);
+    cudaFree(dTreeNodeOffset); cudaFree(dLeafCount);
+    cudaFree(dProgress); cudaFreeHost(hProgress);
+    cudaStreamDestroy(wbStream); cudaStreamDestroy(pollStream);
+
+    env->ReleaseIntArrayElements(jSplits, hSplits, JNI_ABORT);
+    env->ReleaseLongArrayElements(jClusterBits, hClusterBits, JNI_ABORT);
+    env->ReleaseLongArrayElements(jGeneLgBits, hGeneLgBits, JNI_ABORT);
+    env->ReleaseIntArrayElements(jNodeStream, hNodeStream, JNI_ABORT);
+    env->ReleaseIntArrayElements(jTreeNodeOffset, hTreeNodeOffset, JNI_ABORT);
+    env->ReleaseIntArrayElements(jLeafCount, hLeafCount, JNI_ABORT);
 
     return result;
 }

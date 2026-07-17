@@ -30,8 +30,19 @@ public class Config {
      *                            Best when n is small and gene-tree count is large; the win
      *                            shrinks as W grows (n ≳ a few hundred). Same QI math and
      *                            bit-identical scores to the other two methods.
+     *   SIMPLE_TREE_WALK       — many-candidate fast path. One thread per split walks a
+     *                            resident flat postorder token stream of all gene trees
+     *                            sequentially, maintaining a small O(n) per-thread stack of
+     *                            (|node∩A|,|node∩B|,|node|) triples; every non-root internal
+     *                            node's tripartition is scored in O(1) from its children (no
+     *                            prefix arrays, no dedup, no cross-tree parallelism). Lean
+     *                            kernel; wins when the candidate set is huge (full search on
+     *                            large gene-tree counts), where per-split O(n·k) but tiny
+     *                            constant beats the prefix path's per-split prefix rebuild.
+     *                            GPU stack is capped at n; larger n falls back to CPU. Same
+     *                            QI math and bit-identical scores to the other methods.
      */
-    public enum WeightIntersectionMethod { PREFIX_SUM, SMALLER_SIDE_TRAVERSAL, BITSET }
+    public enum WeightIntersectionMethod { PREFIX_SUM, SMALLER_SIDE_TRAVERSAL, BITSET, SIMPLE_TREE_WALK }
 
     /**
      * Numeric type used for weight scores when the taxon set is large enough that

@@ -11,6 +11,7 @@ import astralx.gpu.GPUWeightCalculator;
 import astralx.partition.Partition;
 import astralx.partition.PartitionTable;
 import astralx.tree.Tree;
+import astralx.tree.TreeNode;
 import astralx.util.Int128;
 import astralx.util.ProgressBar;
 import astralx.util.Threading;
@@ -139,9 +140,19 @@ public class WeightTable {
         // (DOCS/multi-range-cluster-design.md §5.2/§5.3). No CPU correction needed.
 
         Config.WeightIntersectionMethod method = Config.getInstance().getWeightIntersectionMethod();
-        boolean bitset = (method == Config.WeightIntersectionMethod.BITSET);
+        boolean bitset   = (method == Config.WeightIntersectionMethod.BITSET);
+        boolean treeWalk = (method == Config.WeightIntersectionMethod.SIMPLE_TREE_WALK);
 
-        if (useGPU && bitset) {
+        if (useGPU && treeWalk) {
+            boolean ok = computeScoresGPUTreeWalk(splitList, clusterTable,
+                                                  clusterTrees, partTrees,
+                                                  scoreArray, scoreArrayD, scoreArrayI);
+            if (!ok) {
+                Logging.info("GPU tree-walk weight path infeasible, falling back to CPU tree-walk");
+                computeScoresCPUTreeWalk(splitList, clusterTable, clusterTrees, partTrees,
+                                         scoreArray, scoreArrayD, scoreArrayI);
+            }
+        } else if (useGPU && bitset) {
             boolean ok = computeScoresGPUBitset(splitList, partTable, clusterTable,
                                                 clusterTrees, partTrees,
                                                 scoreArray, scoreArrayD, scoreArrayI);
@@ -237,7 +248,10 @@ public class WeightTable {
             if (Config.getInstance().getComputeMode() == Config.ComputeMode.GPU) {
                 Logging.info("GPU library not available, falling back to CPU");
             }
-            if (bitset) {
+            if (treeWalk) {
+                computeScoresCPUTreeWalk(splitList, clusterTable, clusterTrees, partTrees,
+                                         scoreArray, scoreArrayD, scoreArrayI);
+            } else if (bitset) {
                 computeScoresCPUBitset(splitList, partTable, clusterTable,
                                        clusterTrees, partTrees, scoreArray, scoreArrayD, scoreArrayI);
             } else {
@@ -1192,6 +1206,399 @@ public class WeightTable {
             return false;
         }
         Logging.info("  GPU bitset kernel returned in %d ms", gpuMs);
+        unpackTwoScores(twoScores, scoreArray, scoreArrayD, scoreArrayI, numSplits);
+        return true;
+    }
+
+    // -------------------------------------------------------------------------
+    // SIMPLE-TREE-WALK path (many-candidate fast option; CPU + GPU).
+    //
+    // One thread per split walks a resident flat postorder token stream of all gene
+    // trees sequentially, maintaining a small O(n) per-thread stack of
+    // (nA,nB,nS) = (|node∩A|, |node∩B|, |node|) triples.  Every non-root internal
+    // node's tripartition is scored in O(1) from its children — the SAME node set
+    // (all non-root internal nodes) and SAME QI helpers as the other methods, with
+    // no dedup, so the raw Σ over nodes is bit-identical to the deduped Σ freq·QI.
+    // -------------------------------------------------------------------------
+
+    /** GPU per-thread postorder stack cap — mirrors WB_TW_STACK_CAP in astralx_weight.cu. */
+    private static final int TW_GPU_STACK_CAP = 512;
+
+    private static final class TreeWalkData {
+        int      W;
+        int      numClusters;
+        long[]   clusterBits;     // numClusters * W
+        int[]    splitCid;        // numSplits * 4  [aCid, bCid, aSize, bSize]
+        int      numTrees;
+        long[]   geneLgBits;      // numTrees * W
+        int[]    nodeStream;      // flat postorder tokens (leaf=taxon≥0, internal=-childCount)
+        int[]    treeNodeOffset;  // numTrees + 1  CSR row pointers
+        int[]    leafCount;       // numTrees  (L per gene tree = LgSize)
+        int      maxLeaf;         // max leaf count over trees (CPU stack sizing)
+    }
+
+    /** Count postorder tokens a tree emits: one per leaf, one per NON-root internal node. */
+    private int countTreeTokens(TreeNode node) {
+        if (node.isLeaf()) return 1;
+        int c = 0;
+        if (node.isPolytomous()) for (TreeNode ch : node.children) c += countTreeTokens(ch);
+        else { c += countTreeTokens(node.left); c += countTreeTokens(node.right); }
+        if (!node.isRoot()) c += 1;   // this internal node emits a token; root is skipped
+        return c;
+    }
+
+    /** Emit postorder tokens into stream[cursor..]; leaf → taxonId (≥0), non-root internal → -childCount. */
+    private int fillTreeTokens(TreeNode node, int[] stream, int cursor) {
+        if (node.isLeaf()) { stream[cursor++] = node.taxonId; return cursor; }
+        int k;
+        if (node.isPolytomous()) {
+            k = node.children.length;
+            for (TreeNode ch : node.children) cursor = fillTreeTokens(ch, stream, cursor);
+        } else {
+            k = 2;
+            cursor = fillTreeTokens(node.left,  stream, cursor);
+            cursor = fillTreeTokens(node.right, stream, cursor);
+        }
+        if (!node.isRoot()) stream[cursor++] = -k;   // score this node; root emits nothing
+        return cursor;
+    }
+
+    /** Materialize the cluster pool, Lg bitsets, and postorder token stream (parallel fills). */
+    private TreeWalkData buildTreeWalkData(List<BipartitionSplit> splitList, ClusterTable clusterTable,
+                                           List<Tree> clusterTrees, List<Tree> partTrees) {
+        int W = (n + 63) >>> 6;
+        int numSplits = splitList.size();
+        int numTrees = partTrees.size();
+
+        // --- Cluster pool (dedup by ClusterHash); cid 0 = empty (all-zero, size 0) ---
+        Map<ClusterHash, Integer> cidMap = new HashMap<>();
+        List<Cluster> clusterExemplars = new ArrayList<>();
+        clusterExemplars.add(null);               // cid 0
+        int[] splitCid = new int[numSplits * 4];
+        ClusterHash[] side = new ClusterHash[2];
+        for (int i = 0; i < numSplits; i++) {
+            BipartitionSplit sp = splitList.get(i);
+            side[0] = sp.lo; side[1] = sp.hi;
+            for (int s = 0; s < 2; s++) {
+                ClusterTable.Entry e = clusterTable.get(side[s]);
+                int cid = 0, sz = 0;
+                if (e != null) {
+                    Integer id = cidMap.get(side[s]);
+                    if (id == null) {
+                        id = clusterExemplars.size();
+                        clusterExemplars.add(e.exemplar);
+                        cidMap.put(side[s], id);
+                    }
+                    cid = id; sz = e.exemplar.size;
+                }
+                splitCid[i * 4 + s]     = cid;
+                splitCid[i * 4 + 2 + s] = sz;
+            }
+        }
+        int numClusters = clusterExemplars.size();
+        if ((long) numClusters * W > Integer.MAX_VALUE)
+            throw new IllegalStateException("Tree-walk cluster pool too large for a single long[]");
+        long[] clusterBits = new long[numClusters * W];
+        Threading.processRangeParallel(numClusters, cid -> {
+            if (cid == 0) return;
+            buildClusterBitsInto(clusterBits, cid * W, clusterExemplars.get(cid), clusterTrees, W);
+        });
+
+        // --- Per gene-tree present-taxa (Lg) bitsets ---
+        if ((long) numTrees * W > Integer.MAX_VALUE)
+            throw new IllegalStateException("Tree-walk gene-tree Lg pool too large for a single long[]");
+        long[] geneLgBits = new long[numTrees * W];
+        Threading.processRangeParallel(numTrees, g -> {
+            Tree t = partTrees.get(g);
+            setRangeBits(geneLgBits, g * W, t, 0, t.leafCount);
+        });
+
+        // --- Postorder token stream: count → offsets → parallel fill (disjoint segments) ---
+        int[] treeNodeOffset = new int[numTrees + 1];
+        int[] leafCount = new int[numTrees];
+        int maxLeaf = 0;
+        for (int g = 0; g < numTrees; g++) {
+            Tree t = partTrees.get(g);
+            leafCount[g] = t.leafCount;
+            if (t.leafCount > maxLeaf) maxLeaf = t.leafCount;
+            long tok = (long) treeNodeOffset[g] + countTreeTokens(t.root);
+            if (tok > Integer.MAX_VALUE)
+                throw new IllegalStateException("Tree-walk node stream too large for a single int[]");
+            treeNodeOffset[g + 1] = (int) tok;
+        }
+        int[] nodeStream = new int[treeNodeOffset[numTrees]];
+        Threading.processRangeParallel(numTrees, g ->
+            fillTreeTokens(partTrees.get(g).root, nodeStream, treeNodeOffset[g]));
+
+        TreeWalkData d = new TreeWalkData();
+        d.W = W; d.numClusters = numClusters; d.clusterBits = clusterBits; d.splitCid = splitCid;
+        d.numTrees = numTrees; d.geneLgBits = geneLgBits; d.nodeStream = nodeStream;
+        d.treeNodeOffset = treeNodeOffset; d.leafCount = leafCount; d.maxLeaf = Math.max(1, maxLeaf);
+        return d;
+    }
+
+    // --- CPU tree-walk scorers (mirror computeScore / D / I; reuse the same QI helpers) ---
+
+    private long computeScoreTreeWalk(int idx, TreeWalkData d, int totalN, int[] stack) {
+        int W = d.W;
+        int aCid = d.splitCid[idx * 4], bCid = d.splitCid[idx * 4 + 1];
+        int aSize = d.splitCid[idx * 4 + 2], bSize = d.splitCid[idx * 4 + 3];
+        if (totalN - aSize - bSize < 0) return 0L;
+        int aB = aCid * W, bB = bCid * W;
+        long[] cb = d.clusterBits, lg = d.geneLgBits;
+        int[] ns = d.nodeStream, off = d.treeNodeOffset, lc = d.leafCount;
+        long twoScore = 0L;
+
+        for (int g = 0; g < d.numTrees; g++) {
+            int segBeg = off[g], segEnd = off[g + 1];
+            if (segBeg == segEnd) continue;
+            int LgSize = lc[g], lgA, lgB;
+            if (LgSize == totalN) { lgA = aSize; lgB = bSize; }
+            else { int lb = g * W; lgA = popAnd(cb, aB, lg, lb, W); lgB = popAnd(cb, bB, lg, lb, W); }
+
+            int top = 0;
+            for (int i = segBeg; i < segEnd; i++) {
+                int tok = ns[i];
+                if (tok >= 0) {
+                    int inA = (int) ((cb[aB + (tok >>> 6)] >>> (tok & 63)) & 1L);
+                    int inB = (int) ((cb[bB + (tok >>> 6)] >>> (tok & 63)) & 1L);
+                    int e = top * 3; stack[e] = inA; stack[e + 1] = inB; stack[e + 2] = 1; top++;
+                } else {
+                    int k = -tok, cbase = top - k;
+                    if (k == 2) {
+                        int e0 = cbase * 3;
+                        int a0 = stack[e0], b0 = stack[e0 + 1], s0 = stack[e0 + 2];
+                        int a1 = stack[e0 + 3], b1 = stack[e0 + 4], s1 = stack[e0 + 5];
+                        int a2 = lgA - a0 - a1, b2 = lgB - b0 - b1, sz3 = LgSize - s0 - s1;
+                        int c0 = s0 - a0 - b0, c1 = s1 - a1 - b1, c2 = sz3 - a2 - b2;
+                        if (!(a2 < 0 || b2 < 0 || c0 < 0 || c1 < 0 || c2 < 0))
+                            twoScore += computeTwoQI(a0, a1, a2, b0, b1, b2, c0, c1, c2);
+                        stack[e0] = a0 + a1; stack[e0 + 1] = b0 + b1; stack[e0 + 2] = s0 + s1;
+                        top = cbase + 1;
+                    } else {
+                        int dd = k + 1;
+                        int[] pa = new int[dd], pb = new int[dd], pc = new int[dd];
+                        int sumA = 0, sumB = 0, sumS = 0;
+                        for (int j = 0; j < k; j++) {
+                            int e = (cbase + j) * 3;
+                            int aj = stack[e], bj = stack[e + 1], sj = stack[e + 2];
+                            pa[j] = aj; pb[j] = bj; pc[j] = sj - aj - bj;
+                            sumA += aj; sumB += bj; sumS += sj;
+                        }
+                        int aC = lgA - sumA, bC = lgB - sumB, cC = (LgSize - sumS) - aC - bC;
+                        if (!(aC < 0 || bC < 0 || cC < 0)) {
+                            pa[k] = aC; pb[k] = bC; pc[k] = cC;
+                            twoScore += polyTwoQILong(pa, pb, pc, dd);
+                        }
+                        stack[cbase * 3] = sumA; stack[cbase * 3 + 1] = sumB; stack[cbase * 3 + 2] = sumS;
+                        top = cbase + 1;
+                    }
+                }
+            }
+        }
+        return twoScore / 2;
+    }
+
+    private double computeScoreTreeWalkD(int idx, TreeWalkData d, int totalN, int[] stack) {
+        int W = d.W;
+        int aCid = d.splitCid[idx * 4], bCid = d.splitCid[idx * 4 + 1];
+        int aSize = d.splitCid[idx * 4 + 2], bSize = d.splitCid[idx * 4 + 3];
+        if (totalN - aSize - bSize < 0) return 0.0;
+        int aB = aCid * W, bB = bCid * W;
+        long[] cb = d.clusterBits, lg = d.geneLgBits;
+        int[] ns = d.nodeStream, off = d.treeNodeOffset, lc = d.leafCount;
+        double twoScore = 0.0;
+
+        for (int g = 0; g < d.numTrees; g++) {
+            int segBeg = off[g], segEnd = off[g + 1];
+            if (segBeg == segEnd) continue;
+            int LgSize = lc[g], lgA, lgB;
+            if (LgSize == totalN) { lgA = aSize; lgB = bSize; }
+            else { int lb = g * W; lgA = popAnd(cb, aB, lg, lb, W); lgB = popAnd(cb, bB, lg, lb, W); }
+
+            int top = 0;
+            for (int i = segBeg; i < segEnd; i++) {
+                int tok = ns[i];
+                if (tok >= 0) {
+                    int inA = (int) ((cb[aB + (tok >>> 6)] >>> (tok & 63)) & 1L);
+                    int inB = (int) ((cb[bB + (tok >>> 6)] >>> (tok & 63)) & 1L);
+                    int e = top * 3; stack[e] = inA; stack[e + 1] = inB; stack[e + 2] = 1; top++;
+                } else {
+                    int k = -tok, cbase = top - k;
+                    if (k == 2) {
+                        int e0 = cbase * 3;
+                        int a0 = stack[e0], b0 = stack[e0 + 1], s0 = stack[e0 + 2];
+                        int a1 = stack[e0 + 3], b1 = stack[e0 + 4], s1 = stack[e0 + 5];
+                        int a2 = lgA - a0 - a1, b2 = lgB - b0 - b1, sz3 = LgSize - s0 - s1;
+                        int c0 = s0 - a0 - b0, c1 = s1 - a1 - b1, c2 = sz3 - a2 - b2;
+                        if (!(a2 < 0 || b2 < 0 || c0 < 0 || c1 < 0 || c2 < 0))
+                            twoScore += computeTwoQIDouble(a0, a1, a2, b0, b1, b2, c0, c1, c2);
+                        stack[e0] = a0 + a1; stack[e0 + 1] = b0 + b1; stack[e0 + 2] = s0 + s1;
+                        top = cbase + 1;
+                    } else {
+                        int dd = k + 1;
+                        int[] pa = new int[dd], pb = new int[dd], pc = new int[dd];
+                        int sumA = 0, sumB = 0, sumS = 0;
+                        for (int j = 0; j < k; j++) {
+                            int e = (cbase + j) * 3;
+                            int aj = stack[e], bj = stack[e + 1], sj = stack[e + 2];
+                            pa[j] = aj; pb[j] = bj; pc[j] = sj - aj - bj;
+                            sumA += aj; sumB += bj; sumS += sj;
+                        }
+                        int aC = lgA - sumA, bC = lgB - sumB, cC = (LgSize - sumS) - aC - bC;
+                        if (!(aC < 0 || bC < 0 || cC < 0)) {
+                            pa[k] = aC; pb[k] = bC; pc[k] = cC;
+                            twoScore += polyTwoQIDouble(pa, pb, pc, dd);
+                        }
+                        stack[cbase * 3] = sumA; stack[cbase * 3 + 1] = sumB; stack[cbase * 3 + 2] = sumS;
+                        top = cbase + 1;
+                    }
+                }
+            }
+        }
+        return twoScore / 2.0;
+    }
+
+    private Int128 computeScoreTreeWalkI(int idx, TreeWalkData d, int totalN, int[] stack) {
+        int W = d.W;
+        int aCid = d.splitCid[idx * 4], bCid = d.splitCid[idx * 4 + 1];
+        int aSize = d.splitCid[idx * 4 + 2], bSize = d.splitCid[idx * 4 + 3];
+        if (totalN - aSize - bSize < 0) return Int128.ZERO;
+        int aB = aCid * W, bB = bCid * W;
+        long[] cb = d.clusterBits, lg = d.geneLgBits;
+        int[] ns = d.nodeStream, off = d.treeNodeOffset, lc = d.leafCount;
+        Int128 twoScore = Int128.ZERO;
+
+        for (int g = 0; g < d.numTrees; g++) {
+            int segBeg = off[g], segEnd = off[g + 1];
+            if (segBeg == segEnd) continue;
+            int LgSize = lc[g], lgA, lgB;
+            if (LgSize == totalN) { lgA = aSize; lgB = bSize; }
+            else { int lb = g * W; lgA = popAnd(cb, aB, lg, lb, W); lgB = popAnd(cb, bB, lg, lb, W); }
+
+            int top = 0;
+            for (int i = segBeg; i < segEnd; i++) {
+                int tok = ns[i];
+                if (tok >= 0) {
+                    int inA = (int) ((cb[aB + (tok >>> 6)] >>> (tok & 63)) & 1L);
+                    int inB = (int) ((cb[bB + (tok >>> 6)] >>> (tok & 63)) & 1L);
+                    int e = top * 3; stack[e] = inA; stack[e + 1] = inB; stack[e + 2] = 1; top++;
+                } else {
+                    int k = -tok, cbase = top - k;
+                    if (k == 2) {
+                        int e0 = cbase * 3;
+                        int a0 = stack[e0], b0 = stack[e0 + 1], s0 = stack[e0 + 2];
+                        int a1 = stack[e0 + 3], b1 = stack[e0 + 4], s1 = stack[e0 + 5];
+                        int a2 = lgA - a0 - a1, b2 = lgB - b0 - b1, sz3 = LgSize - s0 - s1;
+                        int c0 = s0 - a0 - b0, c1 = s1 - a1 - b1, c2 = sz3 - a2 - b2;
+                        if (!(a2 < 0 || b2 < 0 || c0 < 0 || c1 < 0 || c2 < 0))
+                            twoScore = twoScore.add(computeTwoQIInt128(a0, a1, a2, b0, b1, b2, c0, c1, c2));
+                        stack[e0] = a0 + a1; stack[e0 + 1] = b0 + b1; stack[e0 + 2] = s0 + s1;
+                        top = cbase + 1;
+                    } else {
+                        int dd = k + 1;
+                        int[] pa = new int[dd], pb = new int[dd], pc = new int[dd];
+                        int sumA = 0, sumB = 0, sumS = 0;
+                        for (int j = 0; j < k; j++) {
+                            int e = (cbase + j) * 3;
+                            int aj = stack[e], bj = stack[e + 1], sj = stack[e + 2];
+                            pa[j] = aj; pb[j] = bj; pc[j] = sj - aj - bj;
+                            sumA += aj; sumB += bj; sumS += sj;
+                        }
+                        int aC = lgA - sumA, bC = lgB - sumB, cC = (LgSize - sumS) - aC - bC;
+                        if (!(aC < 0 || bC < 0 || cC < 0)) {
+                            pa[k] = aC; pb[k] = bC; pc[k] = cC;
+                            twoScore = twoScore.add(polyTwoQIInt128(pa, pb, pc, dd));
+                        }
+                        stack[cbase * 3] = sumA; stack[cbase * 3 + 1] = sumB; stack[cbase * 3 + 2] = sumS;
+                        top = cbase + 1;
+                    }
+                }
+            }
+        }
+        return twoScore.halve();
+    }
+
+    /** CPU tree-walk path: build resident data once, then walk per split in parallel. */
+    private void computeScoresCPUTreeWalk(List<BipartitionSplit> splitList, ClusterTable clusterTable,
+                                          List<Tree> clusterTrees, List<Tree> partTrees,
+                                          long[] scoreArray, double[] scoreArrayD, Int128[] scoreArrayI) {
+        TreeWalkData d = buildTreeWalkData(splitList, clusterTable, clusterTrees, partTrees);
+        int numSplits = splitList.size();
+        int totalN = n;
+        int cap = d.maxLeaf * 3;
+        ThreadLocal<int[]> stackTL = ThreadLocal.withInitial(() -> new int[cap]);
+        Logging.info("Weight table: CPU path (simple-tree-walk)  splits=%d  W=%d  clusters=%d  trees=%d  tokens=%d",
+            numSplits, d.W, d.numClusters, d.numTrees, d.nodeStream.length);
+        java.util.concurrent.atomic.AtomicInteger wDone = new java.util.concurrent.atomic.AtomicInteger(0);
+        ProgressBar wBar = new ProgressBar("Scoring splits (CPU tree-walk)", numSplits);
+        Threading.processRangeParallel(numSplits, idx -> {
+            int[] stack = stackTL.get();
+            if (useInt128)      scoreArrayI[idx] = computeScoreTreeWalkI(idx, d, totalN, stack);
+            else if (useDouble) scoreArrayD[idx] = computeScoreTreeWalkD(idx, d, totalN, stack);
+            else                scoreArray[idx]  = computeScoreTreeWalk(idx, d, totalN, stack);
+            wBar.update(wDone.incrementAndGet());
+        });
+        wBar.done();
+    }
+
+    /** GPU tree-walk path: build resident data once, resolve batch size, call the native kernel. */
+    private boolean computeScoresGPUTreeWalk(List<BipartitionSplit> splitList, ClusterTable clusterTable,
+                                             List<Tree> clusterTrees, List<Tree> partTrees,
+                                             long[] scoreArray, double[] scoreArrayD, Int128[] scoreArrayI) {
+        // Early feasibility check: the GPU kernel's per-thread stack is capped at
+        // TW_GPU_STACK_CAP taxa.  Larger sets go straight to the CPU tree walk (no
+        // wasted resident-data build).
+        if (n > TW_GPU_STACK_CAP) {
+            Logging.info("GPU tree-walk: numTaxa=%d exceeds stack cap %d — using CPU tree-walk", n, TW_GPU_STACK_CAP);
+            return false;
+        }
+
+        Config cfg = Config.getInstance();
+        TreeWalkData d = buildTreeWalkData(splitList, clusterTable, clusterTrees, partTrees);
+        int numSplits = splitList.size();
+
+        long residentMem = 8L * (d.clusterBits.length + d.geneLgBits.length)
+                         + 4L * ((long) d.nodeStream.length + d.treeNodeOffset.length + d.leafCount.length);
+        long perSplit = 4L * Integer.BYTES + (useInt128 ? 2L : 1L) * Long.BYTES;
+
+        int batchSizeHint; String batchDesc;
+        if (!cfg.isGpuBatch()) {
+            batchSizeHint = -1; batchDesc = "off (single launch)";
+        } else if (cfg.getGpuNumBatches() > 0) {
+            int N = cfg.getGpuNumBatches();
+            batchSizeHint = (numSplits + N - 1) / N;
+            batchDesc = N + " batches → batchSize=" + batchSizeHint;
+        } else if (cfg.getGpuBatchSize() > 0) {
+            batchSizeHint = cfg.getGpuBatchSize();
+            batchDesc = "explicit batchSize=" + batchSizeHint;
+        } else if (cfg.isGpuVramControlFactorSet()) {
+            double F = cfg.getGpuVramControlFactor();
+            long batchMem = (long) (F * residentMem);
+            batchSizeHint = (int) Math.max(1, Math.min(numSplits, batchMem / perSplit));
+            batchDesc = String.format("vram-control-factor=%.3f  resident=%.1f MB  batch→%d",
+                F, residentMem / 1e6, (numSplits + batchSizeHint - 1) / Math.max(1, batchSizeHint));
+        } else {
+            batchSizeHint = 0;
+            batchDesc = String.format("auto (free-VRAM adaptive, occupancy=%.0f%%)", cfg.getGpuVramFraction() * 100);
+        }
+
+        Logging.info("Weight table: GPU path (simple-tree-walk)  splits=%d  W=%d  clusters=%d  trees=%d  tokens=%d  resident=%.1f MB  batching=%s",
+            numSplits, d.W, d.numClusters, d.numTrees, d.nodeStream.length, residentMem / 1e6, batchDesc);
+
+        long t1 = System.nanoTime();
+        long[] twoScores = GPUWeightCalculator.computeWeightsTreeWalkGPU(
+            d.splitCid, d.clusterBits, d.geneLgBits, d.nodeStream, d.treeNodeOffset, d.leafCount,
+            numSplits, d.numClusters, d.numTrees, d.W, n,
+            batchSizeHint, cfg.getGpuVramFraction(), nativeScoreMode(),
+            cfg.getGpuProgressIntervalSec());
+        long gpuMs = (System.nanoTime() - t1) / 1_000_000;
+
+        if (twoScores == null) {
+            Logging.info("  GPU tree-walk kernel returned null after %d ms (infeasible)", gpuMs);
+            return false;
+        }
+        Logging.info("  GPU tree-walk kernel returned in %d ms", gpuMs);
         unpackTwoScores(twoScores, scoreArray, scoreArrayD, scoreArrayI, numSplits);
         return true;
     }

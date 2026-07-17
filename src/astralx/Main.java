@@ -382,9 +382,11 @@ public class Main {
                             cfg.setWeightIntersectionMethod(Config.WeightIntersectionMethod.SMALLER_SIDE_TRAVERSAL);
                         case "bitset", "bitsets", "bit-set" ->
                             cfg.setWeightIntersectionMethod(Config.WeightIntersectionMethod.BITSET);
+                        case "simple-tree-walk", "tree-walk", "treewalk", "simple" ->
+                            cfg.setWeightIntersectionMethod(Config.WeightIntersectionMethod.SIMPLE_TREE_WALK);
                         default -> {
                             System.err.println("Unknown --weight-intersection-method: " + args[i]
-                                + "  (expected: prefix-sum | smaller-side-traversal | bitset)");
+                                + "  (expected: prefix-sum | smaller-side-traversal | bitset | simple-tree-walk)");
                             return false;
                         }
                     }
