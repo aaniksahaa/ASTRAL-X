@@ -18,11 +18,12 @@ import java.util.*;
  *
  * Built via Mode 1 (tree-local transitions only), O(nk):
  *
- *   Type 1  -- for every internal node u (incl. root):
+ *   Type 1  -- for every resolved binary internal node u (incl. root):
  *              sub(u) → sub(left(u)) | sub(right(u))
  *
- *   Type 2  -- for every non-root internal node u whose parent is also non-root:
- *              [Lg \ sub(u)] → sub(sibling(u)) | [Lg \ sub(parent(u))]
+ *   Type 2  -- for every resolved non-root node u (leaf or internal) with a
+ *              binary parent and a nonempty parent super-complement:
+ *              [S \ sub(u)] → sub(sibling(u)) | [S \ sub(parent(u))]
  *
  * For complete trees (Lg == S), Types 3a/3b add nothing new and are skipped.
  *
@@ -44,7 +45,7 @@ public class DPTable {
 
     // -------------------------------------------------------------------------
 
-    // Anchored-outgroup mode (FULL only): skip building the with-anchor-parent
+    // Anchored-outgroup mode: skip building the with-anchor-parent
     // transitions — they are unreachable once the root is anchored, so omitting them
     // (and the redundant per-cluster root-split search) is exact and saves memory.
     private final boolean anchorFreeX;
@@ -56,7 +57,7 @@ public class DPTable {
         this.rootHash = clusterTable.getAllTaxaHash();
         this.n        = rootHash.size;
         Config cfg = Config.getInstance();
-        this.anchorFreeX = cfg.isAnchorOutgroup() && cfg.getSearchMode() == Config.SearchMode.FULL;
+        this.anchorFreeX = cfg.isAnchorOutgroup();
         this.anchor = anchorFreeX ? cfg.getAnchorTaxon() : -1;
 
         int treesDone = 0;
@@ -101,7 +102,20 @@ public class DPTable {
 
     /** Post-order recursion: emit transitions for this node, then children. */
     private void emit(TreeNode u, int ti, int anchorPos, PrefixHashArrays pref) {
-        if (u.isLeaf()) return;
+        // A leaf has no Type-1 subtree split, but it can still induce a Type-2
+        // split of its complement.  If u={x}, sibling(u)=B, and the taxa outside
+        // parent(u) are O, the valid unrooted rotation is
+        //
+        //     S\{x} = B ∪ O  →  B | O.
+        //
+        // Keep this separate from the internal-node traversal so leaves remain
+        // ordinary DP base cases while their incident edge can contribute a
+        // resolution for the opposite side of the bipartition.
+        if (u.isLeaf()) {
+            boolean subHasAnchor = (anchorPos >= u.rangeStart && anchorPos < u.rangeEnd);
+            emitType2(u, ti, subHasAnchor, pref);
+            return;
+        }
 
         // Polytomous node: recurse into all children, but add NO direct transitions of
         // its own.  A polytomy is an unresolved node — it must not force any binary
@@ -130,23 +144,38 @@ public class DPTable {
             addTransition(hU, hLeft, hRight);
         }
 
-        // ── Type 2: S\sub(u) → sub(sibling) | S\sub(parent) ─────────────────
-        // For non-root u: if parent is root and tree is complete, S\sub(root)=empty (size 0)
-        // so hCompParent.size==0 and we skip.  For incomplete trees, S\sub(root) = S\Lg != empty.
-        // GUARD: skip when the parent is polytomous — u.getSibling() has no well-defined
-        // value for a child of a polytomous node (polytomy-design.md §3.7).  For binary
-        // trees no node has a polytomous parent, so this clause is always true (unchanged).
-        // Anchor-free: S\sub(u) is anchor-free iff the anchor IS in sub(u); keep only then.
-        if (!u.isRoot() && !u.parent.isPolytomous() && (!anchorFreeX || subHasAnchor)) {
-            TreeNode sib    = u.getSibling();
-            TreeNode parent = u.parent;
+        emitType2(u, ti, subHasAnchor, pref);
+    }
 
-            ClusterHash hCompU      = hashRange(ti, u.rangeStart,      u.rangeEnd,      true,  pref);
-            ClusterHash hSib        = hashRange(ti, sib.rangeStart,    sib.rangeEnd,    false, pref);
-            ClusterHash hCompParent = hashRange(ti, parent.rangeStart, parent.rangeEnd, true,  pref);
-            if (hCompParent.size > 0) {
-                addTransition(hCompU, hSib, hCompParent);
-            }
+    /**
+     * Emit the complement-side rotation induced by {@code u}. Unlike Type 1,
+     * this is valid for leaves as well as binary internal nodes: it splits the
+     * complement of {@code sub(u)}, not {@code sub(u)} itself.
+     */
+    private void emitType2(TreeNode u, int ti, boolean subHasAnchor,
+                           PrefixHashArrays pref) {
+        // For non-root u: if parent is root and the tree is complete,
+        // S\sub(root)=empty, so hCompParent.size==0 and we skip. For incomplete
+        // trees, S\sub(root)=S\Lg is nonempty and the transition is valid.
+        //
+        // GUARD: u must not be polytomous and its parent must be binary.
+        // A child of a polytomous parent has no unique sibling, while a
+        // polytomous u must not inject a binary resolution of its own.
+        //
+        // Anchor-free: S\sub(u) is anchor-free iff the anchor IS in sub(u).
+        if (u.isRoot() || u.isPolytomous() || u.parent.isPolytomous()
+                || (anchorFreeX && !subHasAnchor)) {
+            return;
+        }
+
+        TreeNode sib    = u.getSibling();
+        TreeNode parent = u.parent;
+
+        ClusterHash hCompU      = hashRange(ti, u.rangeStart,      u.rangeEnd,      true,  pref);
+        ClusterHash hSib        = hashRange(ti, sib.rangeStart,    sib.rangeEnd,    false, pref);
+        ClusterHash hCompParent = hashRange(ti, parent.rangeStart, parent.rangeEnd, true,  pref);
+        if (hCompParent.size > 0) {
+            addTransition(hCompU, hSib, hCompParent);
         }
     }
 
@@ -359,10 +388,10 @@ public class DPTable {
      * the single split {@code ({anchor} | S\{anchor})}.
      *
      * Exact for unrooted species-tree inference: every unrooted tree can be rooted on
-     * the anchor's pendant edge without changing its quartet score, and X already holds
-     * both orientations of every bipartition, so every tree the DP could build under any
-     * rooting is still buildable from {@code S\{anchor}} downward using the untouched
-     * non-root transitions. The anchored split's own weight is 0 (empty third side).
+     * the anchor's pendant edge without changing its quartet score. Full mode supplies
+     * all X-compatible rotations; local mode supplies the tree-local rotations,
+     * including the leaf-induced Type-2 transition needed immediately below the
+     * anchored root. The anchored split's own weight is 0 (empty third side).
      * Removing the other root splits therefore cannot change the optimum — it only makes
      * the redundant with-anchor cluster orientations unreachable, which
      * {@link #reachableClusters} then drops from the weight step.
@@ -429,5 +458,7 @@ public class DPTable {
     public int numClusters()                               { return transitions.size(); }
     public int numUniqueSplits()                           { return uniqueSplits; }
     public int numEmitted()                                { return totalEmitted; }
+    public boolean isAnchorFree()                          { return anchorFreeX; }
+    public int getAnchorTaxon()                            { return anchor; }
     public Set<Map.Entry<ClusterHash, Set<BipartitionSplit>>> entries() { return transitions.entrySet(); }
 }

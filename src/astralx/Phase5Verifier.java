@@ -20,8 +20,8 @@ import java.util.*;
  *   2. For every split (A → B | C): size(B) + size(C) == size(A).
  *   3. For every split, both halves are in ClusterTable (or one of them is a
  *      root-child subtree cluster, which is always valid).
- *   4. Expected transition counts match theory (Type1 count = # internal nodes
- *      incl. root; Type2 count = # non-root nodes whose parent is not root).
+ *   4. Expected transition counts match theory (Type 1 from resolved internal
+ *      nodes; Type 2 from every eligible non-root node, including leaves).
  *   5. Small input: print all splits with taxon names.
  */
 public class Phase5Verifier {
@@ -91,23 +91,29 @@ public class Phase5Verifier {
         else out.printf("Check 3 (cluster membership): %d FAILURES%n", membershipFails);
 
         // ── Check 4: Expected transition counts (tree-structural) ────────────
-        // Type 1 per tree: # internal nodes (incl. root) = leafCount - 1
-        // Type 2 per tree: # non-root internal nodes with non-root parent
-        //   For a balanced 5-leaf tree: root has 2 children (each internal),
-        //   those have leaf children -- Type 2 applies only at depth > 1.
+        // Type 1 comes from each resolved binary internal node.
+        // Type 2 comes from each resolved non-root node (leaf OR internal) whose
+        // parent is binary and whose parent's super-complement is nonempty.
+        // Type 3 connects an incomplete tree's taxon boundary to S.
         int expType1 = 0;
         int expType2 = 0;
+        int expType3 = 0;
+        boolean anchorFree = dpTable.isAnchorFree();
+        int anchor = dpTable.getAnchorTaxon();
         for (Tree t : trees) {
-            int internal = t.leafCount - 1;      // internal nodes incl. root
-            expType1 += internal;
-            // Count Type 2 eligible nodes via recursion
-            expType2 += countType2(t.root);
+            int anchorPos = anchorFree && anchor >= 0 && anchor < t.positionMap.length
+                            ? t.positionMap[anchor] : -1;
+            expType1 += countType1(t.root, anchorPos, anchorFree);
+            expType2 += countType2(t.root, n, anchorPos, anchorFree);
+            if (!anchorFree && !t.isComplete) expType3++;
         }
         out.printf("%nExpected Type1 transitions (incl. root): %d%n", expType1);
         out.printf("Expected Type2 transitions: %d%n", expType2);
-        out.printf("Total emitted (Type1+Type2): %d  (expected %d)%n",
-            dpTable.numEmitted(), expType1 + expType2);
-        if (dpTable.numEmitted() != expType1 + expType2) {
+        out.printf("Expected Type3 transitions: %d%n", expType3);
+        int expectedEmitted = expType1 + expType2 + expType3;
+        out.printf("Total emitted (Type1+Type2+Type3): %d  (expected %d)%n",
+            dpTable.numEmitted(), expectedEmitted);
+        if (dpTable.numEmitted() != expectedEmitted) {
             out.println("FAIL: emitted count mismatch");
             fails++;
         } else {
@@ -150,13 +156,50 @@ public class Phase5Verifier {
 
     // -------------------------------------------------------------------------
 
-    /** Count Type 2 eligible nodes under subtree rooted at u. */
-    private static int countType2(astralx.tree.TreeNode u) {
+    /** Count resolved internal nodes that emit Type 1. */
+    private static int countType1(astralx.tree.TreeNode u, int anchorPos,
+                                  boolean anchorFree) {
         if (u.isLeaf()) return 0;
         int count = 0;
-        // u is non-root AND parent is non-root → eligible
-        if (!u.isRoot() && !u.parent.isRoot()) count = 1;
-        return count + countType2(u.left) + countType2(u.right);
+        if (!u.isPolytomous()
+                && (!anchorFree || !containsPosition(u, anchorPos))) {
+            count = 1;
+        }
+        if (u.isPolytomous()) {
+            for (var child : u.children) {
+                count += countType1(child, anchorPos, anchorFree);
+            }
+        } else {
+            count += countType1(u.left, anchorPos, anchorFree);
+            count += countType1(u.right, anchorPos, anchorFree);
+        }
+        return count;
+    }
+
+    /** Count nodes (including leaves) that emit a nondegenerate Type 2. */
+    private static int countType2(astralx.tree.TreeNode u, int n, int anchorPos,
+                                  boolean anchorFree) {
+        int count = 0;
+        if (!u.isRoot() && !u.isPolytomous() && !u.parent.isPolytomous()
+                && n - u.parent.rangeSize() > 0
+                && (!anchorFree || containsPosition(u, anchorPos))) {
+            count = 1;
+        }
+        if (!u.isLeaf()) {
+            if (u.isPolytomous()) {
+                for (var child : u.children) {
+                    count += countType2(child, n, anchorPos, anchorFree);
+                }
+            } else {
+                count += countType2(u.left, n, anchorPos, anchorFree);
+                count += countType2(u.right, n, anchorPos, anchorFree);
+            }
+        }
+        return count;
+    }
+
+    private static boolean containsPosition(astralx.tree.TreeNode u, int position) {
+        return position >= u.rangeStart && position < u.rangeEnd;
     }
 
     /**

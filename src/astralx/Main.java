@@ -191,10 +191,10 @@ public class Main {
             }
 
             // ── Phase 3: Cluster extraction -> X (from COMPLETED trees) ──────
-            // Anchor-free X (only the anchor-free orientation of each bipartition)
-            // is exact only with the anchored DP root, which applies in FULL mode.
-            boolean anchorFreeX = cfg.isAnchorOutgroup()
-                                  && cfg.getSearchMode() == Config.SearchMode.FULL;
+            // Anchor-free X stores only the orientation of each bipartition that
+            // excludes the fixed anchor.  Both local and full modes use the
+            // corresponding single anchored root when the option is enabled.
+            boolean anchorFreeX = cfg.isAnchorOutgroup();
             long t3 = PhaseLogger.begin("Phase 3  Cluster extraction", false);
             ClusterTable clusterTable = new ClusterTable(trees, pref, registry.size(), anchorFreeX);
             PhaseLogger.end("Phase 3  Cluster extraction", t3, false);
@@ -310,17 +310,11 @@ public class Main {
             // split ({anchor} | S\{anchor}).  Every unrooted tree is representable
             // rooted on the anchor's pendant edge, so the optimum is unchanged; the
             // reachability prune then drops the now-unreachable with-anchor cluster
-            // orientations.  Applies only in FULL mode: it relies on cross-tree
-            // (Mode 2) transitions to reach every clade from S\{anchor} downward —
-            // in LOCAL mode a gene tree's top clades have no non-root path, so
-            // anchoring there would be inexact.
+            // orientations. Local emission includes the leaf-induced Type-2
+            // rotation needed to enter S\{anchor}; full mode additionally has all
+            // cross-tree resolutions.
             if (cfg.isAnchorOutgroup()) {
-                if (cfg.getSearchMode() == Config.SearchMode.FULL) {
-                    dpTable.applyAnchoredRoot(clusterTable.getAnchorHash());
-                } else {
-                    Logging.info("--anchor-outgroup ignored: only applies with --search-mode full "
-                        + "(local mode has no cross-tree path to top clades); running unanchored");
-                }
+                dpTable.applyAnchoredRoot(clusterTable.getAnchorHash());
             }
 
             if (cfg.isVerifyDPSpace()) {

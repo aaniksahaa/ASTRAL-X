@@ -1,11 +1,16 @@
 # Anchored-Outgroup DP Search Space — Design & Plan
 
 > Status: **IMPLEMENTED** (2026-07-17), behind `--anchor-outgroup` (default off),
-> **FULL search mode only** (exact there; inexact in local, where a gene tree's top
-> clades have no non-root path — so Main ignores the flag in local mode). Both layers
-> landed and verified exact: Layer 1 (single anchored root split, `DPTable.applyAnchoredRoot`)
-> and Layer 2 (anchor-free `ClusterTable` registration `A`, with-anchor-parent transition
-> skipping `B`, anchor-free emission registration `C`). Verified: non-consensus anchored
+> in both **LOCAL and FULL** search modes. Local mode was enabled after making
+> tree-local rotation emission complete at leaves: a leaf has no Type-1 split, but
+> it induces the valid Type-2 resolution of its complement. Both anchoring layers
+> landed and were equality-tested: Layer 1 (single anchored root split,
+> `DPTable.applyAnchoredRoot`) and Layer 2 (anchor-free `ClusterTable` registration
+> `A`, with-anchor-parent transition skipping `B`, anchor-free emission registration
+> `C`). Verified: anchored LOCAL == unanchored LOCAL on TC1–TC16 (including true-local
+> polytomy runs), 120 randomized complete/incomplete datasets, and the bundled
+> 37-taxon dataset; on the latter, clusters 1200→601 and scored local splits
+> 1696→1039 at identical score 23,458,838. Also verified: non-consensus anchored
 > full == independent oracle (16/16 GPU+CPU); default unchanged; consensus anchored ==
 > unanchored on all 16 TCs; 37-taxon full clusters 1200→601, cross-tree 1301→130 ms,
 > scored splits 8433→2612, score identical. The anchored-vs-unanchored score match is

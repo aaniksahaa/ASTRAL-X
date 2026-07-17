@@ -53,8 +53,8 @@ public class ClusterTable {
 
     // Anchored-outgroup mode (DOCS/anchored-outgroup-search-space-design.md): when
     // true, register only the ANCHOR-FREE orientation of every bipartition (the side
-    // not containing the anchor taxon), halving X.  Exact only when combined with the
-    // anchored DP root in FULL mode, so the caller passes true only then.
+    // not containing the anchor taxon), halving X. Exact when combined with the
+    // corresponding anchored DP root.
     private final boolean anchorFreeX;
     private final int     anchor;   // anchor taxon global id (valid iff anchorFreeX)
 
@@ -74,8 +74,8 @@ public class ClusterTable {
 
     /**
      * @param anchorFreeX  when true, register only the anchor-free orientation of
-     *                     every bipartition (halves X).  The caller must ensure this
-     *                     is combined with the anchored DP root in FULL mode.
+     *                     every bipartition (halves X). The caller must combine this
+     *                     with the anchored DP root.
      */
     public ClusterTable(List<Tree> trees, PrefixHashArrays pref, int numTaxa, boolean anchorFreeX) {
         long t0 = System.nanoTime();
