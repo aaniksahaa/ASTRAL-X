@@ -310,9 +310,9 @@ public class Config {
      * The output tile is separate and tiny for the usual completion datasets.
      * A bounded default avoids consuming a fixed fraction of a large GPU merely
      * to reduce the number of otherwise equivalent tree batches.
-     * Configured via --gpu-sim-vram-cap-mb. Default: 1024 MiB.
+     * Configured via --gpu-sim-vram-cap-mb. Default: 512 MiB.
      */
-    private int gpuSimilarityVramCapMiB = 1024;
+    private int gpuSimilarityVramCapMiB = 512;
     public int  getGpuSimilarityVramCapMiB()          { return gpuSimilarityVramCapMiB; }
     public void setGpuSimilarityVramCapMiB(int cap)   { this.gpuSimilarityVramCapMiB = Math.max(1, cap); }
 

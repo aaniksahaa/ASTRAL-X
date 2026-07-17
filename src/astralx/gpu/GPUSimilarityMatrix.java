@@ -28,7 +28,7 @@ package astralx.gpu;
  *
  * Architecture:
  *   - Δ-tree batching: tree data O(Δ · n · log n) GPU VRAM, capped at
- *     1024 MiB by default (configurable via --gpu-sim-vram-cap-mb)
+ *     512 MiB by default (configurable via --gpu-sim-vram-cap-mb)
  *   - B×B pair tiling: output tile O(B²) GPU VRAM (B ≈ √(n·k))
  *   - No atomics: thread (da,db) owns pair (a0+da, b0+db) uniquely
  */

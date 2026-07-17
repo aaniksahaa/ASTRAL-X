@@ -67,7 +67,7 @@ Optional:
   --gpu-progress-interval     GPU weight-kernel progress update interval, seconds (default: auto)
   --gpu-vram-control-factor   Resident-relative batch sizing override
   --gpu-dist-tile-size        Tile size B for GPU distance matrix kernel
-  --gpu-sim-vram-cap-mb       Similarity tree-batch VRAM cap in MiB (default: 1024)
+  --gpu-sim-vram-cap-mb       Similarity tree-batch VRAM cap in MiB (default: 512)
   --verify-distance-matrix    Dump distance matrix and exit
   --autocomplete-incomplete-gene-trees  Autocomplete incomplete gene trees before inference
   --consensus-experimental              Enable consensus-based X enrichment (Step A + Step B)

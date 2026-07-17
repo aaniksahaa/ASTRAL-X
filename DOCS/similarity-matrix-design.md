@@ -79,7 +79,7 @@ Same architecture as the distance matrix kernel:
 
 - **B×B output tile**: B = min(n, ceil(sqrt(n·k))). Tile VRAM = O(B²).
 - **Δ-tree batching**: Δ chosen so that Δ·(per-tree GPU bytes) fits the configured
-  tree-data cap (`--gpu-sim-vram-cap-mb`, default 1024 MiB) and currently free VRAM.
+  tree-data cap (`--gpu-sim-vram-cap-mb`, default 512 MiB) and currently free VRAM.
 - **Upper-triangle tiling**: only tiles with a0 ≤ b0 are processed; results mirrored.
 
 For each tile:

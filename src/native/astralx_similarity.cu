@@ -318,7 +318,8 @@ Java_astralx_gpu_GPUSimilarityMatrix_computeSimilarityGPU(
     if (num_batches > 1) {
         fprintf(stderr,
             "[ASTRAL-X sim] NOTE: similarity tree-data is bounded to %d MiB (%d batches). "
-            "If this phase is too slow, increase --gpu-sim-vram-cap-mb; results are unchanged.\n",
+            "If this phase is a bottleneck, raise --gpu-sim-vram-cap-mb to use fewer batches; "
+            "results are unchanged.\n",
             treeVramCapMiB, num_batches);
     }
 
