@@ -69,9 +69,10 @@
 // dynamic shared-memory scan area sized on the host.
 #define WB_BLOCK 256
 
-// Simple-tree-walk per-thread postorder stack cap (in triples).  The stack depth
-// is bounded by a tree's leaf count, so the GPU tree-walk path is used only when
-// numTaxa <= WB_TW_STACK_CAP; larger taxon sets fall back to the CPU tree walk.
+// Simple-tree-walk per-thread postorder stack cap (in triples). The Java side
+// measures the exact maximum postorder evaluation frontier of the scoring trees;
+// the GPU path is used whenever that measured frontier fits this compiled array,
+// regardless of the total taxon count.
 // Each thread's private stack is WB_TW_STACK_CAP*3 ints of local memory.
 #define WB_TW_STACK_CAP 512
 
@@ -2781,14 +2782,16 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsTreeWalkGPU(
     jintArray jTreeNodeOffset,
     jintArray jLeafCount,
     jint numSplits, jint numClusters, jint numTrees,
-    jint wordsPerSet, jint numTaxa,
+    jint wordsPerSet, jint numTaxa, jint maxFrontier,
     jint batchSizeHint, jdouble vramFraction, jint scoreMode, jdouble progressIntervalSec)
 {
-    // Per-thread stack is bounded by the leaf count (<= numTaxa); the private stack
-    // array is sized WB_TW_STACK_CAP.  Larger taxon sets → infeasible (CPU fallback).
-    if (numTaxa > WB_TW_STACK_CAP) {
-        fprintf(stderr, "[ASTRAL-X GPU] tree-walk: numTaxa=%d exceeds stack cap %d → CPU fallback\n",
-                numTaxa, WB_TW_STACK_CAP);
+    // Defense in depth: Java measures the exact token-stream frontier before
+    // building resident data, but native code independently enforces the fixed
+    // private-array bound before launching either kernel.
+    if (maxFrontier < 1 || maxFrontier > WB_TW_STACK_CAP) {
+        fprintf(stderr,
+                "[ASTRAL-X GPU] tree-walk: measured frontier=%d outside stack cap %d → CPU fallback\n",
+                maxFrontier, WB_TW_STACK_CAP);
         return NULL;
     }
 

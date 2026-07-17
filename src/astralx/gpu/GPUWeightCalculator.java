@@ -248,11 +248,13 @@ public class GPUWeightCalculator {
      * @param numTrees       number of gene trees
      * @param wordsPerSet    W = ceil(numTaxa/64)
      * @param numTaxa        total taxon count (= totalN for sizeC)
+     * @param maxFrontier    measured maximum postorder stack entries over all trees
      * @param batchSizeHint  0=auto, -1=no batching, >0=exact batch size
      * @param vramFraction   fraction of free VRAM to use when batchSizeHint==0
      * @param scoreMode      0=LONG, 1=DOUBLE (bit pattern), 2=INT128 (low,high pair)
      * @return for LONG/DOUBLE: long[numSplits]; for INT128: long[2*numSplits];
-     *         or null if infeasible (e.g. numTaxa exceeds the GPU stack cap) — caller falls back to CPU
+     *         or null if infeasible (e.g. maxFrontier exceeds the compiled GPU
+     *         stack cap) — caller falls back to CPU
      */
     public static native long[] computeWeightsTreeWalkGPU(
         int[]  splits,
@@ -266,6 +268,7 @@ public class GPUWeightCalculator {
         int numTrees,
         int wordsPerSet,
         int numTaxa,
+        int maxFrontier,
         int batchSizeHint,
         double vramFraction,
         int scoreMode,

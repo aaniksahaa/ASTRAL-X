@@ -1256,7 +1256,74 @@ public class WeightTable {
         int[]    nodeStream;      // flat postorder tokens (leaf=taxon≥0, internal=-childCount)
         int[]    treeNodeOffset;  // numTrees + 1  CSR row pointers
         int[]    leafCount;       // numTrees  (L per gene tree = LgSize)
-        int      maxLeaf;         // max leaf count over trees (CPU stack sizing)
+        int      maxFrontier;     // exact max postorder stack entries over all trees
+        int      frontierTree;    // tree index attaining maxFrontier
+        int      frontierLeaves;  // leaf count of frontierTree
+    }
+
+    /** Exact tree-walk stack requirement for the current child ordering. */
+    private static final class TreeWalkFrontier {
+        int entries = 1;
+        int treeIndex = -1;
+        int leafCount = 0;
+    }
+
+    /**
+     * Maximum evaluation-stack size of this subtree's postorder token sequence.
+     * Each completed child leaves one value on the stack; the internal-node token
+     * then reduces all child values to one without increasing the peak.
+     */
+    private static int treeWalkFrontier(TreeNode node) {
+        if (node.isLeaf()) return 1;
+        int held = 0;
+        int peak = 0;
+        if (node.isPolytomous()) {
+            for (TreeNode child : node.children) {
+                peak = Math.max(peak, held + treeWalkFrontier(child));
+                held++;
+            }
+        } else {
+            peak = Math.max(peak, treeWalkFrontier(node.left));
+            held = 1;
+            peak = Math.max(peak, held + treeWalkFrontier(node.right));
+        }
+        return Math.max(1, peak);
+    }
+
+    /** Measure the exact maximum frontier across all scoring gene trees. */
+    private static TreeWalkFrontier measureTreeWalkFrontier(List<Tree> trees) {
+        TreeWalkFrontier result = new TreeWalkFrontier();
+        for (int g = 0; g < trees.size(); g++) {
+            Tree tree = trees.get(g);
+            int frontier = treeWalkFrontier(tree.root);
+            if (frontier > result.entries || result.treeIndex < 0) {
+                result.entries = frontier;
+                result.treeIndex = g;
+                result.leafCount = tree.leafCount;
+            }
+        }
+        return result;
+    }
+
+    /** Independently replay emitted tokens to audit the structural measurement. */
+    private static int tokenStreamFrontier(int[] stream, int begin, int end) {
+        int top = 0;
+        int peak = 0;
+        for (int i = begin; i < end; i++) {
+            int token = stream[i];
+            if (token >= 0) {
+                top++;
+                if (top > peak) peak = top;
+            } else {
+                int childCount = -token;
+                if (childCount > top) {
+                    throw new IllegalStateException("Malformed tree-walk token stream: childCount="
+                        + childCount + " exceeds stack top=" + top);
+                }
+                top = top - childCount + 1;
+            }
+        }
+        return Math.max(1, peak);
     }
 
     /** Count postorder tokens a tree emits: one per leaf, one per NON-root internal node. */
@@ -1287,7 +1354,8 @@ public class WeightTable {
 
     /** Materialize the cluster pool, Lg bitsets, and postorder token stream (parallel fills). */
     private TreeWalkData buildTreeWalkData(List<BipartitionSplit> splitList, ClusterTable clusterTable,
-                                           List<Tree> clusterTrees, List<Tree> partTrees) {
+                                           List<Tree> clusterTrees, List<Tree> partTrees,
+                                           TreeWalkFrontier frontier) {
         int W = (n + 63) >>> 6;
         int numSplits = splitList.size();
         int numTrees = partTrees.size();
@@ -1338,11 +1406,9 @@ public class WeightTable {
         // --- Postorder token stream: count → offsets → parallel fill (disjoint segments) ---
         int[] treeNodeOffset = new int[numTrees + 1];
         int[] leafCount = new int[numTrees];
-        int maxLeaf = 0;
         for (int g = 0; g < numTrees; g++) {
             Tree t = partTrees.get(g);
             leafCount[g] = t.leafCount;
-            if (t.leafCount > maxLeaf) maxLeaf = t.leafCount;
             long tok = (long) treeNodeOffset[g] + countTreeTokens(t.root);
             if (tok > Integer.MAX_VALUE)
                 throw new IllegalStateException("Tree-walk node stream too large for a single int[]");
@@ -1352,10 +1418,26 @@ public class WeightTable {
         Threading.processRangeParallel(numTrees, g ->
             fillTreeTokens(partTrees.get(g).root, nodeStream, treeNodeOffset[g]));
 
+        int replayMax = 1;
+        int replayTree = -1;
+        for (int g = 0; g < numTrees; g++) {
+            int measured = tokenStreamFrontier(nodeStream, treeNodeOffset[g], treeNodeOffset[g + 1]);
+            if (measured > replayMax || replayTree < 0) {
+                replayMax = measured;
+                replayTree = g;
+            }
+        }
+        if (replayMax != frontier.entries) {
+            throw new IllegalStateException("Tree-walk frontier mismatch: structural="
+                + frontier.entries + " tokenReplay=" + replayMax + " (tree=" + replayTree + ")");
+        }
+
         TreeWalkData d = new TreeWalkData();
         d.W = W; d.numClusters = numClusters; d.clusterBits = clusterBits; d.splitCid = splitCid;
         d.numTrees = numTrees; d.geneLgBits = geneLgBits; d.nodeStream = nodeStream;
-        d.treeNodeOffset = treeNodeOffset; d.leafCount = leafCount; d.maxLeaf = Math.max(1, maxLeaf);
+        d.treeNodeOffset = treeNodeOffset; d.leafCount = leafCount;
+        d.maxFrontier = frontier.entries; d.frontierTree = frontier.treeIndex;
+        d.frontierLeaves = frontier.leafCount;
         return d;
     }
 
@@ -1545,13 +1627,16 @@ public class WeightTable {
     private void computeScoresCPUTreeWalk(List<BipartitionSplit> splitList, ClusterTable clusterTable,
                                           List<Tree> clusterTrees, List<Tree> partTrees,
                                           long[] scoreArray, double[] scoreArrayD, Int128[] scoreArrayI) {
-        TreeWalkData d = buildTreeWalkData(splitList, clusterTable, clusterTrees, partTrees);
+        TreeWalkFrontier frontier = measureTreeWalkFrontier(partTrees);
+        TreeWalkData d = buildTreeWalkData(splitList, clusterTable, clusterTrees, partTrees, frontier);
         int numSplits = splitList.size();
         int totalN = n;
-        int cap = d.maxLeaf * 3;
+        int cap = d.maxFrontier * 3;
         ThreadLocal<int[]> stackTL = ThreadLocal.withInitial(() -> new int[cap]);
-        Logging.info("Weight table: CPU path (simple-tree-walk)  splits=%d  W=%d  clusters=%d  trees=%d  tokens=%d",
-            numSplits, d.W, d.numClusters, d.numTrees, d.nodeStream.length);
+        Logging.info("Weight table: CPU path (simple-tree-walk)  splits=%d  W=%d  clusters=%d  "
+            + "trees=%d  tokens=%d  maxFrontier=%d (tree=%d, leaves=%d)",
+            numSplits, d.W, d.numClusters, d.numTrees, d.nodeStream.length,
+            d.maxFrontier, d.frontierTree, d.frontierLeaves);
         java.util.concurrent.atomic.AtomicInteger wDone = new java.util.concurrent.atomic.AtomicInteger(0);
         ProgressBar wBar = new ProgressBar("Scoring splits (CPU tree-walk)", numSplits);
         Threading.processRangeParallel(numSplits, idx -> {
@@ -1568,16 +1653,24 @@ public class WeightTable {
     private boolean computeScoresGPUTreeWalk(List<BipartitionSplit> splitList, ClusterTable clusterTable,
                                              List<Tree> clusterTrees, List<Tree> partTrees,
                                              long[] scoreArray, double[] scoreArrayD, Int128[] scoreArrayI) {
-        // Early feasibility check: the GPU kernel's per-thread stack is capped at
-        // TW_GPU_STACK_CAP taxa.  Larger sets go straight to the CPU tree walk (no
-        // wasted resident-data build).
-        if (n > TW_GPU_STACK_CAP) {
-            Logging.info("GPU tree-walk: numTaxa=%d exceeds stack cap %d — using CPU tree-walk", n, TW_GPU_STACK_CAP);
+        // Early feasibility check against the ACTUAL postorder evaluation frontier,
+        // not total taxa. A balanced tree with thousands of leaves can require only
+        // a few dozen stack entries, while a pathologically ordered caterpillar can
+        // still approach its leaf count.
+        TreeWalkFrontier frontier = measureTreeWalkFrontier(partTrees);
+        Logging.info("GPU tree-walk frontier: required=%d entries (%d B/thread logically; "
+            + "treeIndex=%d, leaves=%d), compiled cap=%d (%d B/thread), numTaxa=%d",
+            frontier.entries, frontier.entries * 3 * Integer.BYTES,
+            frontier.treeIndex, frontier.leafCount, TW_GPU_STACK_CAP,
+            TW_GPU_STACK_CAP * 3 * Integer.BYTES, n);
+        if (frontier.entries > TW_GPU_STACK_CAP) {
+            Logging.info("GPU tree-walk: measured frontier=%d exceeds stack cap %d — using CPU tree-walk",
+                frontier.entries, TW_GPU_STACK_CAP);
             return false;
         }
 
         Config cfg = Config.getInstance();
-        TreeWalkData d = buildTreeWalkData(splitList, clusterTable, clusterTrees, partTrees);
+        TreeWalkData d = buildTreeWalkData(splitList, clusterTable, clusterTrees, partTrees, frontier);
         int numSplits = splitList.size();
 
         long residentMem = 8L * (d.clusterBits.length + d.geneLgBits.length)
@@ -1611,7 +1704,7 @@ public class WeightTable {
         long t1 = System.nanoTime();
         long[] twoScores = GPUWeightCalculator.computeWeightsTreeWalkGPU(
             d.splitCid, d.clusterBits, d.geneLgBits, d.nodeStream, d.treeNodeOffset, d.leafCount,
-            numSplits, d.numClusters, d.numTrees, d.W, n,
+            numSplits, d.numClusters, d.numTrees, d.W, n, d.maxFrontier,
             batchSizeHint, cfg.getGpuVramFraction(), nativeScoreMode(),
             cfg.getGpuProgressIntervalSec());
         long gpuMs = (System.nanoTime() - t1) / 1_000_000;
