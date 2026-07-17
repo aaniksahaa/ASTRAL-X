@@ -305,6 +305,17 @@ public class Config {
     public int  getGpuDistTileSizeB()          { return gpuDistTileSizeB; }
     public void setGpuDistTileSizeB(int b)     { this.gpuDistTileSizeB = Math.max(0, b); }
 
+    /**
+     * Maximum GPU memory reserved for one similarity-matrix tree-data batch.
+     * The output tile is separate and tiny for the usual completion datasets.
+     * A bounded default avoids consuming a fixed fraction of a large GPU merely
+     * to reduce the number of otherwise equivalent tree batches.
+     * Configured via --gpu-sim-vram-cap-mb. Default: 1024 MiB.
+     */
+    private int gpuSimilarityVramCapMiB = 1024;
+    public int  getGpuSimilarityVramCapMiB()          { return gpuSimilarityVramCapMiB; }
+    public void setGpuSimilarityVramCapMiB(int cap)   { this.gpuSimilarityVramCapMiB = Math.max(1, cap); }
+
     // Testing flags
     private boolean verifyParse = false;
     public boolean isVerifyParse()          { return verifyParse; }

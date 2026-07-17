@@ -67,6 +67,7 @@ Optional:
   --gpu-progress-interval     GPU weight-kernel progress update interval, seconds (default: auto)
   --gpu-vram-control-factor   Resident-relative batch sizing override
   --gpu-dist-tile-size        Tile size B for GPU distance matrix kernel
+  --gpu-sim-vram-cap-mb       Similarity tree-batch VRAM cap in MiB (default: 1024)
   --verify-distance-matrix    Dump distance matrix and exit
   --autocomplete-incomplete-gene-trees  Autocomplete incomplete gene trees before inference
   --consensus-experimental              Enable consensus-based X enrichment (Step A + Step B)
@@ -129,7 +130,7 @@ while [[ $# -gt 0 ]]; do
       PROGRAM_ARGS+=("$1" "$2")
       shift 2
       ;;
-    --search-mode|-t|--threads|-m|--seeds|--weight-intersection-method|--anchor-taxon|--gpu-batch-size|--gpu-batches|--gpu-vram-control-factor|--gpu-vram-occupancy-factor|--gpu-progress-interval|--gpu-dp-state-space-construction-output-cap|--gpu-dist-tile-size|--dump-completed-gene-trees|--completion-method)
+    --search-mode|-t|--threads|-m|--seeds|--weight-intersection-method|--anchor-taxon|--gpu-batch-size|--gpu-batches|--gpu-vram-control-factor|--gpu-vram-occupancy-factor|--gpu-progress-interval|--gpu-dp-state-space-construction-output-cap|--gpu-dist-tile-size|--gpu-sim-vram-cap-mb|--dump-completed-gene-trees|--completion-method)
       PROGRAM_ARGS+=("$1" "$2")
       shift 2
       ;;

@@ -97,9 +97,9 @@ public class SimilarityMatrixBuilder {
         //   eulerF, eulerLeftChildF, eulerRightChildF (double, 8B each)
         // → 2 + 2 + 2 + 8 + 8 + 8 = 30 bytes/pos
         double euler_mb  = (double)k * E_max * 30 / 1e6;
-        // Sparse tables: sparseMin (2B), sparseLeftChildS/RightChildS (2B each),
-        // sparseLeftChildF/RightChildF (8B each) → 2 + 2 + 2 + 8 + 8 = 22 bytes/cell
-        double sparse_mb = (double)k * LOG_max * E_max * 22 / 1e6;
+        // Sparse table: one unsigned-16 left-biased argmin Euler position.
+        // The kernel fetches depth and child payloads from the base Euler arrays.
+        double sparse_mb = (double)k * LOG_max * E_max * Character.BYTES / 1e6;
         double leaf_mb   = (double)k * n * 4 / 1e6;
         Logging.info("  E_max=%d  LOG=%d  euler %.1f MB  sparse %.1f MB  leaf %.1f MB",
             E_max, LOG_max, euler_mb, sparse_mb, leaf_mb);
@@ -116,11 +116,7 @@ public class SimilarityMatrixBuilder {
         short[]  eulerRightChildS  = new short [(int)edSize];
         double[] eulerRightChildF  = new double[(int)edSize];
 
-        short[]  sparseMin         = new short [(int)spSize];
-        short[]  sparseLeftChildS  = new short [(int)spSize];
-        double[] sparseLeftChildF  = new double[(int)spSize];
-        short[]  sparseRightChildS = new short [(int)spSize];
-        double[] sparseRightChildF = new double[(int)spSize];
+        char[] sparseArgmin = new char[(int)spSize];
 
         int[]    firstOcc          = new int   [(int)ldSize];
         int[]    eulerLen          = new int   [k];
@@ -155,11 +151,7 @@ public class SimilarityMatrixBuilder {
                 long dst   = spOff + (long)lvl * E_max;
                 for (int p = 0; p < rowLen; p++) {
                     int idx = (int)(dst + p);
-                    sparseMin         [idx] = td.sparseMin        [lvl][p];
-                    sparseLeftChildS  [idx] = td.sparseLeftChildS [lvl][p];
-                    sparseLeftChildF  [idx] = td.sparseLeftChildF [lvl][p];
-                    sparseRightChildS [idx] = td.sparseRightChildS[lvl][p];
-                    sparseRightChildF [idx] = td.sparseRightChildF[lvl][p];
+                    sparseArgmin[idx] = td.sparseArgmin[lvl][p];
                 }
             }
 
@@ -186,12 +178,11 @@ public class SimilarityMatrixBuilder {
             eulerF,
             eulerLeftChildS,  eulerLeftChildF,
             eulerRightChildS, eulerRightChildF,
-            sparseMin,
-            sparseLeftChildS,  sparseLeftChildF,
-            sparseRightChildS, sparseRightChildF,
+            sparseArgmin,
             firstOcc, eulerLen, leafCount,
             k, n, E_max, LOG_max,
-            tileSizeB, progressInterval, progressMaxSteps,
+            tileSizeB, cfg.getGpuSimilarityVramCapMiB(),
+            progressInterval, progressMaxSteps,
             sm.numSum, sm.denSum
         );
 

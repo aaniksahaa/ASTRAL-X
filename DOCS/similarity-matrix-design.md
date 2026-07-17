@@ -78,7 +78,8 @@ The pairwise reformulation turns this into **pair-owned independent evaluation**
 Same architecture as the distance matrix kernel:
 
 - **B×B output tile**: B = min(n, ceil(sqrt(n·k))). Tile VRAM = O(B²).
-- **Δ-tree batching**: Δ chosen so that Δ·(per-tree GPU bytes) ≤ remaining VRAM.
+- **Δ-tree batching**: Δ chosen so that Δ·(per-tree GPU bytes) fits the configured
+  tree-data cap (`--gpu-sim-vram-cap-mb`, default 1024 MiB) and currently free VRAM.
 - **Upper-triangle tiling**: only tiles with a0 ≤ b0 are processed; results mirrored.
 
 For each tile:
@@ -98,56 +99,37 @@ DFS produces:
 - `eulerDepths[tourLen]` — depth at each tour position
 - `firstOcc[n]`           — first Euler position of each leaf taxon; −1 if absent
 - `leafDepth[n]`          — depth of each leaf; −1 if absent (presence test)
-- `eulerLen`              — actual tour length (= 3·k_t − 2 for k_t ≥ 2)
+- `eulerLen`              — actual emitted tour length (3·k_t − 2 for a strictly binary rooted tree)
 - `sparseMin[LOG][tourLen]` — standard min-depth sparse table (left-biased)
 
-### 5.2 New: child-subLeafCount payload arrays
+### 5.2 Bridge-formula Euler payload arrays
 
-During the same DFS, at each Euler position pos record:
+For each node `v`, preprocessing computes its descendant-leaf count `s(v)` and
+the root-to-node prefix `F(v)` used by the bridge formula. At each Euler position:
 
-| Position type | `prevChildSubLC[pos]` | `nextChildSubLC[pos]` | `eulerS[pos]` |
-|---|---|---|---|
-| First visit to internal u | 0 | subLC[first child] | S[u] |
-| Intermediate visit between c_i and c_{i+1} | subLC[c_i] | subLC[c_{i+1}] | S[u] |
-| Leaf visit | 0 | 0 | 0 |
+- `eulerF[pos]` stores `F(node at pos)`.
+- At an internal node's INTERMEDIATE position,
+  `eulerLeftChildS/F` and `eulerRightChildS/F` store the two child payloads.
 
-**Key property**: for pair (a,b) with l = min(firstOcc[a], firstOcc[b]), r = max:
-- The LEFTMOST minimum in [l,r] is always an **intermediate visit** of LCA(a,b)
-  between the child containing the left leaf and the next child.
-- The RIGHTMOST minimum in [l,r] is the intermediate visit between the
-  second-to-last child and the child containing the right leaf.
+For a binary-tree leaf pair `(a,b)`, the leftmost minimum-depth Euler position
+between their first occurrences is the unique INTERMEDIATE visit of their LCA.
 
-Therefore:
-- `prevChildSubLC` at **leftmost argmin** = subLC of child containing the **left** leaf
-- `nextChildSubLC` at **rightmost argmin** = subLC of child containing the **right** leaf
+### 5.3 Compact argmin sparse table
 
-### 5.3 New: payload-tracking sparse tables
+The current bridge-formula implementation stores one unsigned 16-bit Euler
+position per sparse cell:
 
-Build three additional sparse tables alongside `sparseMin`:
-
-| Table | Build rule | Query gives |
-|---|---|---|
-| `sparseSubLCLeft[LOG][E]`  | left-biased argmin; carry `prevChildSubLC` | subLC of child containing the left leaf |
-| `sparseSubLCRight[LOG][E]` | right-biased argmin; carry `nextChildSubLC` | subLC of child containing the right leaf |
-| `sparseSLeft[LOG][E]`      | left-biased argmin; carry `eulerS`         | S[u] of LCA |
-
-Build formula for left-biased (`sparseSubLCLeft`, `sparseSLeft`):
 ```
-level 0:  payload[pos] = source[pos]
-level ≥1: if sparse[lvl-1][pos] ≤ sparse[lvl-1][pos+half]:   // left wins (left-biased)
-              payload[lvl][pos] = payload[lvl-1][pos]
-          else:
-              payload[lvl][pos] = payload[lvl-1][pos+half]
+sparseArgmin[lvl][pos] = leftmost minimum-depth Euler position
+                         in [pos, pos + 2^lvl)
 ```
 
-Build formula for right-biased (`sparseSubLCRight`):
-```
-level 0:  payload[pos] = nextChildSubLC[pos]
-level ≥1: if sparse[lvl-1][pos+half] ≤ sparse[lvl-1][pos]:   // right wins (right-biased)
-              payload[lvl][pos] = payload[lvl-1][pos+half]
-          else:
-              payload[lvl][pos] = payload[lvl-1][pos]
-```
+Level 0 stores `pos`. Higher levels compare the two half-interval minima using
+the same `leftDepth <= rightDepth` tie rule and propagate the winning position.
+The child-size/F payloads are not replicated at every sparse level; after an
+RMQ chooses the exact Euler position, the kernel fetches them from the base
+Euler arrays. This preserves the selected position exactly while reducing a
+sparse cell from 22 bytes to 2 bytes.
 
 ---
 
@@ -163,29 +145,24 @@ for each tree t in current Δ-batch:
     fa = firstOcc[t][a];  fb = firstOcc[t][b]
     l  = min(fa, fb);     r  = max(fa, fb)
 
-    // RMQ: 4 payloads in one overlap query
+    // O(1) left-biased RMQ
     k_lvl = 31 - clz(r - l + 1)
     l2    = r - (1 << k_lvl) + 1
 
-    d_l = sparseMin[t][k_lvl][l];   d_r = sparseMin[t][k_lvl][l2]
+    p_l = sparseArgmin[t][k_lvl][l]
+    p_r = sparseArgmin[t][k_lvl][l2]
+    p   = (eulerDepth[p_l] <= eulerDepth[p_r]) ? p_l : p_r
 
-    // Left-biased payloads
-    subLC_leftChild = (d_l <= d_r) ? sparseSubLCLeft[t][k_lvl][l]
-                                   : sparseSubLCLeft[t][k_lvl][l2]
-    S_u             = (d_l <= d_r) ? sparseSLeft[t][k_lvl][l]
-                                   : sparseSLeft[t][k_lvl][l2]
-
-    // Right-biased payload
-    subLC_rightChild = (d_r <= d_l) ? sparseSubLCRight[t][k_lvl][l2]
-                                    : sparseSubLCRight[t][k_lvl][l]
-
-    // Assign to ca/cb based on which leaf is left vs right in the tour
-    subLC_ca = (fa <= fb) ? subLC_leftChild  : subLC_rightChild
-    subLC_cb = (fa <= fb) ? subLC_rightChild : subLC_leftChild
+    leftS,leftF,rightS,rightF = base Euler payloads at p
+    aS,aF = (fa <= fb) ? (leftS,leftF)   : (rightS,rightF)
+    bS,bF = (fa <= fb) ? (rightS,rightF) : (leftS,leftF)
 
     // Accumulate
-    num  = S_u - C2(subLC_ca) - C2(subLC_cb)
     den  = C2(kt[t] - 2)
+    Z = kt[t] - aS - bS
+    twoQD = (eulerF[fa] - aF) + (eulerF[fb] - bF)
+            + (aS - 1)*Z + (bS - 1)*Z
+    num = den - twoQD/2
     numTile[da * bB + db] += num
     denTile[da * bB + db] += den
 ```
@@ -199,21 +176,21 @@ No atomics — each (da,db) owns a unique cell.
 | Array | Type | Size per tree | Notes |
 |---|---|---|---|
 | `eulerDepths`       | `short` | E_max    | depth at each Euler position |
-| `eulerPrevSubLC`    | `short` | E_max    | prevChildSubLC at each position |
-| `eulerNextSubLC`    | `short` | E_max    | nextChildSubLC at each position |
-| `eulerS`            | `int`   | E_max    | S[u] at each position |
-| `sparseMin`         | `short` | LOG×E_max | min-depth left-biased sparse table |
-| `sparseSubLCLeft`   | `short` | LOG×E_max | left-biased prevChildSubLC payload |
-| `sparseSubLCRight`  | `short` | LOG×E_max | right-biased nextChildSubLC payload |
-| `sparseSLeft`       | `int`   | LOG×E_max | left-biased S[u] payload |
+| `eulerF`            | `double` | E_max   | F(node) at each position |
+| `eulerLeftChildS`   | `short` | E_max    | left-child size at intermediates |
+| `eulerLeftChildF`   | `double` | E_max   | left-child F at intermediates |
+| `eulerRightChildS`  | `short` | E_max    | right-child size at intermediates |
+| `eulerRightChildF`  | `double` | E_max   | right-child F at intermediates |
+| `sparseArgmin`      | `char`/`uint16` | LOG×E_max | left-biased argmin Euler position |
 | `firstOcc`          | `int`   | n         | first Euler position per leaf |
-| `leafDepth`         | `short` | n         | leaf depth (−1 = absent) |
 | `leafCount`         | `int`   | 1         | k_t per tree |
-| `eulerLen`          | `int`   | 1         | actual tour length |
 
-Per-tree bytes ≈ E_max × (2+2+2+4 + LOG×(2+2+2+4)) + n×6
-                = E_max × (10 + 10·LOG) + 6n
-                ≈ 3n × 10 × (1+LOG) + 6n      [E_max ≈ 3n]
+The bridge-formula implementation's base Euler payloads occupy 30 bytes per
+position and the compact sparse table occupies 2 bytes per cell:
+
+```
+per-tree bytes = E_max × (30 + 2·LOG) + 4n + 4
+```
 
 ---
 

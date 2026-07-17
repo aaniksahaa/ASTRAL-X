@@ -19,13 +19,16 @@ package astralx.gpu;
  * GPU per-pair query for tree T:
  *   l = min(firstOcc[x], firstOcc[y]),  r = max(...)
  *   k_lvl = floor(log2(r − l + 1)),     l2 = r − 2^k_lvl + 1
- *   pick left-biased min-depth position (LCA's INTERMEDIATE visit), read
- *   (leftChildS, leftChildF, rightChildS, rightChildF) at that position.
+ *   read the two compact unsigned-16 argmin positions, compare their depths
+ *   with the same left-biased tie rule, then read
+ *   (leftChildS, leftChildF, rightChildS, rightChildF) from the base Euler
+ *   arrays at the winning LCA INTERMEDIATE position.
  *   If firstOcc[x] ≤ firstOcc[y]:  x's child = left,  y's child = right.
  *   Else: swap.
  *
  * Architecture:
- *   - Δ-tree batching: tree data O(Δ · n · log n) GPU VRAM
+ *   - Δ-tree batching: tree data O(Δ · n · log n) GPU VRAM, capped at
+ *     1024 MiB by default (configurable via --gpu-sim-vram-cap-mb)
  *   - B×B pair tiling: output tile O(B²) GPU VRAM (B ≈ √(n·k))
  *   - No atomics: thread (da,db) owns pair (a0+da, b0+db) uniquely
  */
@@ -57,11 +60,9 @@ public class GPUSimilarityMatrix {
      * @param eulerLeftChildF   flat [numTrees × E_max]            (double) F(leftChild) at intermediates
      * @param eulerRightChildS  flat [numTrees × E_max]            (short)  s(rightChild) at intermediates
      * @param eulerRightChildF  flat [numTrees × E_max]            (double) F(rightChild) at intermediates
-     * @param sparseMin         flat [numTrees × LOG × E_max]      (short)  left-biased min-depth
-     * @param sparseLeftChildS  flat [numTrees × LOG × E_max]      (short)  argmin payload
-     * @param sparseLeftChildF  flat [numTrees × LOG × E_max]      (double) argmin payload
-     * @param sparseRightChildS flat [numTrees × LOG × E_max]      (short)  argmin payload
-     * @param sparseRightChildF flat [numTrees × LOG × E_max]      (double) argmin payload
+     * @param sparseArgmin      flat [numTrees × LOG × E_max]      (char) unsigned-16
+     *                          left-biased argmin Euler position; depth and child
+     *                          payloads are fetched from the base Euler arrays
      * @param firstOcc          flat [numTrees × n]                (int)    first tour pos, −1 absent
      * @param eulerLen          [numTrees]                         (int)    actual tour length
      * @param leafCount         [numTrees]                         (int)    kt per tree
@@ -70,6 +71,7 @@ public class GPUSimilarityMatrix {
      * @param E_max             padded Euler tour length
      * @param LOG               number of sparse-table levels
      * @param tileSizeB         B — GPU pair tile side (0 = auto)
+     * @param treeVramCapMiB    maximum tree-batch data allocation in MiB
      * @param progressInterval  seconds between progress updates
      * @param progressMaxSteps  max progress prints (0 = time-interval mode)
      * @param numSumOut         pre-zeroed [n × n] — native fills numerator sums
@@ -82,11 +84,7 @@ public class GPUSimilarityMatrix {
         double[] eulerLeftChildF,
         short[]  eulerRightChildS,
         double[] eulerRightChildF,
-        short[]  sparseMin,
-        short[]  sparseLeftChildS,
-        double[] sparseLeftChildF,
-        short[]  sparseRightChildS,
-        double[] sparseRightChildF,
+        char[]   sparseArgmin,
         int[]    firstOcc,
         int[]    eulerLen,
         int[]    leafCount,
@@ -95,6 +93,7 @@ public class GPUSimilarityMatrix {
         int      E_max,
         int      LOG,
         int      tileSizeB,
+        int      treeVramCapMiB,
         double   progressInterval,
         int      progressMaxSteps,
         double[] numSumOut,

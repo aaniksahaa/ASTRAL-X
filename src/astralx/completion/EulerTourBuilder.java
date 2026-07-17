@@ -11,7 +11,9 @@ import astralx.tree.TreeNode;
  *   - Append depth(node) when returning from its LEFT child (INTERMEDIATE)
  *   - Do NOT append when returning from the right child
  *
- * Tour length for L leaves = 3L − 2.
+ * Tour length for a strictly binary tree with L leaves = 3L − 2. Inputs may
+ * contain a harmless unary wrapper such as {@code ((A,B));}, so allocation uses
+ * an exact structural count rather than assuming the strict-binary identity.
  *
  * LCA property (binary trees):
  *   For two leaves a, b with first occurrences fa, fb in the tour:
@@ -44,9 +46,9 @@ import astralx.tree.TreeNode;
  *   eulerRightChildS[p]    = s(node.right)        INTERMEDIATE positions only
  *   eulerRightChildF[p]    = F(node.right)        INTERMEDIATE positions only
  *
- * Sparse tables for the child-of-LCA payloads use the SAME left-biased argmin
+ * A compact sparse table stores only the SAME left-biased argmin Euler position
  * as sparseMin (left index wins on tie). The argmin selects the INTERMEDIATE
- * visit of the LCA, where the child payloads are meaningful.
+ * visit of the LCA; child payloads are then read from the base Euler arrays.
  *
  * HINT for n-ary extension: with arbitrary-degree internal nodes, an LCA u
  * has multiple intermediate positions (one between each pair of consecutive
@@ -87,10 +89,13 @@ public class EulerTourBuilder {
         public final short[]    eulerRightChildS;
         public final double[]   eulerRightChildF;
 
-        public final short[][]  sparseLeftChildS;
-        public final double[][] sparseLeftChildF;
-        public final short[][]  sparseRightChildS;
-        public final double[][] sparseRightChildF;
+        /**
+         * Left-biased argmin Euler position for each sparse-table interval.
+         * Java {@code char} is an unsigned 16-bit value, so this retains the
+         * exact selected position while using only 2 bytes per sparse cell.
+         * Child payloads are fetched from the base Euler arrays at query time.
+         */
+        public final char[][] sparseArgmin;
 
         public final int leafCount;
 
@@ -98,8 +103,7 @@ public class EulerTourBuilder {
                      double[] eulerF,
                      short[]  eulerLeftChildS,  double[] eulerLeftChildF,
                      short[]  eulerRightChildS, double[] eulerRightChildF,
-                     short[][]  sparseLeftChildS,  double[][] sparseLeftChildF,
-                     short[][]  sparseRightChildS, double[][] sparseRightChildF,
+                     char[][] sparseArgmin,
                      int leafCount) {
             super(base.depths, base.sparseMin, base.firstOcc, base.tourLen, base.log);
             this.eulerF             = eulerF;
@@ -107,10 +111,7 @@ public class EulerTourBuilder {
             this.eulerLeftChildF    = eulerLeftChildF;
             this.eulerRightChildS   = eulerRightChildS;
             this.eulerRightChildF   = eulerRightChildF;
-            this.sparseLeftChildS   = sparseLeftChildS;
-            this.sparseLeftChildF   = sparseLeftChildF;
-            this.sparseRightChildS  = sparseRightChildS;
-            this.sparseRightChildF  = sparseRightChildF;
+            this.sparseArgmin       = sparseArgmin;
             this.leafCount          = leafCount;
         }
     }
@@ -126,8 +127,7 @@ public class EulerTourBuilder {
     // ── Lite build (distance matrix) ─────────────────────────────────────────
 
     public static TourData build(Tree tree, int n) {
-        int L = tree.leafCount;
-        int tourLen = Math.max(1, 3 * L - 2);
+        int tourLen = countEulerPositions(tree.root);
 
         short[] depths   = new short[tourLen];
         int[]   firstOcc = new int[n];
@@ -139,7 +139,10 @@ public class EulerTourBuilder {
         int actualLen = cursor[0];
 
         int log = 1;
-        while ((1 << log) < actualLen) log++;
+        // Levels are 0..floor(log2(actualLen)), inclusive. The previous strict
+        // comparison omitted the top level when actualLen was exactly a power
+        // of two, although a full-width RMQ query legitimately requests it.
+        while ((1 << log) <= actualLen) log++;
 
         short[][] sparse = new short[log][actualLen];
         for (int i = 0; i < actualLen; i++) sparse[0][i] = depths[i];
@@ -190,17 +193,21 @@ public class EulerTourBuilder {
                      eulerRightChildS, eulerRightChildF,
                      cursor);
 
-        // ── Step C: build payload sparse tables (left-biased argmin) ─────────
-        short[][]  sparseLeftChildS   = new short [log][len];
-        double[][] sparseLeftChildF   = new double[log][len];
-        short[][]  sparseRightChildS  = new short [log][len];
-        double[][] sparseRightChildF  = new double[log][len];
+        // ── Step C: build a compact left-biased argmin sparse table ──────────
+        // Store only the selected Euler position, not four replicated child
+        // payloads at every level. At query time the GPU compares the two
+        // candidate depths and fetches (leftS,leftF,rightS,rightF) from the
+        // base Euler arrays at the winning position. This is exactly the same
+        // left-biased RMQ decision as the former payload-carrying tables.
+        if (len > Character.MAX_VALUE + 1) {
+            throw new IllegalArgumentException("Similarity Euler tour has " + len
+                + " positions; compact 16-bit RMQ supports at most "
+                + (Character.MAX_VALUE + 1));
+        }
+        char[][] sparseArgmin = new char[log][len];
 
         for (int i = 0; i < len; i++) {
-            sparseLeftChildS [0][i] = eulerLeftChildS [i];
-            sparseLeftChildF [0][i] = eulerLeftChildF [i];
-            sparseRightChildS[0][i] = eulerRightChildS[i];
-            sparseRightChildF[0][i] = eulerRightChildF[i];
+            sparseArgmin[0][i] = (char) i;
         }
 
         short[][] baseMin = base.sparseMin;
@@ -212,10 +219,7 @@ public class EulerTourBuilder {
                 short dR = baseMin[lvl - 1][i + half];
                 boolean pickLeft = (dL <= dR);   // left-biased on ties
                 int srcIdx = pickLeft ? i : (i + half);
-                sparseLeftChildS [lvl][i] = sparseLeftChildS [lvl - 1][srcIdx];
-                sparseLeftChildF [lvl][i] = sparseLeftChildF [lvl - 1][srcIdx];
-                sparseRightChildS[lvl][i] = sparseRightChildS[lvl - 1][srcIdx];
-                sparseRightChildF[lvl][i] = sparseRightChildF[lvl - 1][srcIdx];
+                sparseArgmin[lvl][i] = sparseArgmin[lvl - 1][srcIdx];
             }
         }
 
@@ -223,12 +227,25 @@ public class EulerTourBuilder {
             base, eulerF,
             eulerLeftChildS, eulerLeftChildF,
             eulerRightChildS, eulerRightChildF,
-            sparseLeftChildS, sparseLeftChildF,
-            sparseRightChildS, sparseRightChildF,
+            sparseArgmin,
             kt);
     }
 
     // ── DFS helpers ──────────────────────────────────────────────────────────
+
+    /** Exact number of positions emitted by {@link #buildDFS}. */
+    private static int countEulerPositions(TreeNode node) {
+        if (node.isLeaf()) return 1;
+        if (node.isPolytomous()) {
+            long count = node.children.length; // ENTER + (k-1) intermediates
+            for (TreeNode child : node.children) count += countEulerPositions(child);
+            if (count > Integer.MAX_VALUE) throw new IllegalArgumentException("Euler tour too large");
+            return (int) count;
+        }
+        long count = 2L + countEulerPositions(node.left) + countEulerPositions(node.right);
+        if (count > Integer.MAX_VALUE) throw new IllegalArgumentException("Euler tour too large");
+        return (int) count;
+    }
 
     /**
      * Recursive DFS building the Euler tour (depths + firstOcc).
