@@ -180,6 +180,14 @@
   --reference-species-tree data/avian-363/ref-paper-st-63K.tre
 
 
+# complete local - with prefix sum and anchoring 
+./run-astralx-with-monitor.sh \
+  -i data/avian-363/63430.gene.trees \
+  -o data/avian-363/out-astralx-avian-363-complete-local.tre \
+  --opts "--search-mode local -vv --autocomplete-incomplete-gene-trees --anchor-outgroup" \
+  --reference-species-tree data/avian-363/ref-paper-st-63K.tre
+
+
 # complete local - with simple tree walk 
 ./run-astralx-with-monitor.sh \
   -i data/avian-363/63430.gene.trees \
@@ -211,6 +219,14 @@
 
 
 # complete full
+./run-astralx-with-monitor.sh \
+  -i data/avian-363/63430.gene.trees \
+  -o data/avian-363/out-astralx-avian-363-complete-full.tre \
+  --opts "--search-mode full -vv --autocomplete-incomplete-gene-trees --anchor-outgroup" \
+  --reference-species-tree data/avian-363/ref-paper-st-63K.tre
+
+
+# complete full with simple tree walk and anchor outgroup 
 ./run-astralx-with-monitor.sh \
   -i data/avian-363/63430.gene.trees \
   -o data/avian-363/out-astralx-avian-363-complete-full.tre \
@@ -251,7 +267,7 @@
 
 
 
-# incomplete full - simple tree walk with anchor 
+# incomplete full - simple tree walk with anchor (maybe around 6 hrs)
 ./run-astralx-with-monitor.sh \
   -i data/avian-363/63430.gene.trees \
   -o data/avian-363/out-astralx-avian-363-incomplete-full.tre \
