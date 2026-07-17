@@ -124,8 +124,7 @@ public class WeightTable {
             }
             int kept = splitList.size();
             Logging.info("DP reachability prune: clusters %d/%d reachable (%.1f%%), "
-                + "splits %d/%d scored (%.1f%%) — %d unreachable splits skipped"
-                + " [--no-prune-search-space to disable]",
+                + "splits %d/%d need to be scored (%.1f%%) — %d unreachable splits skipped",
                 keptClusters, totalClusters, 100.0 * keptClusters / Math.max(1, totalClusters),
                 kept, totalSplits, 100.0 * kept / Math.max(1, totalSplits), totalSplits - kept);
         } else {
