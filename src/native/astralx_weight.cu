@@ -68,12 +68,14 @@
 // Fixed block size.  Must match the static reduction buffer below and the
 // dynamic shared-memory scan area sized on the host.
 #define WB_BLOCK 256
+#define WB_SMALL_QI_MAX_N 491
 
 // Simple-tree-walk per-thread postorder stack cap (in triples). The Java side
 // measures the exact maximum postorder evaluation frontier of the scoring trees;
-// the GPU path is used whenever that measured frontier fits this compiled array,
-// regardless of the total taxon count.
-// Each thread's private stack is WB_TW_STACK_CAP*3 ints of local memory.
+// the GPU path is used whenever that measured frontier fits the compiled maximum,
+// regardless of the total taxon count.  Launch dispatch selects the smallest of
+// 32/64/128/256/512 entries that fits, so the usual private stack is much smaller
+// than the worst-case maximum.
 #define WB_TW_STACK_CAP 512
 
 // ---------------------------------------------------------------------------
@@ -90,6 +92,41 @@
 // ---------------------------------------------------------------------------
 __device__ inline void storeTwoScore(long long* out, int idx, long long v) { out[idx] = v; }
 __device__ inline void storeTwoScore(long long* out, int idx, double    v) { out[idx] = __double_as_longlong(v); }
+
+// Exact binary-node 2*QI.  For totalN <= 491, each individual permutation
+// term is bounded by floor-balanced x*y*z*(totalN-3) <= INT_MAX.  The guarded
+// specialization therefore uses full-rate 32-bit products for each term and
+// widens only the six-term sum.  Larger inputs retain the original ACC-width
+// arithmetic.  SMALL_QI is a compile-time dispatch flag, so the generic kernel
+// pays no runtime branch or additional live state.
+template<typename ACC, bool SMALL_QI>
+__device__ __forceinline__ ACC binaryTwoQI(
+    int a0, int a1, int a2, int b0, int b1, int b2, int c0, int c1, int c2)
+{
+    if (SMALL_QI) {
+        long long q = 0;
+        int t;
+        t = a0 * b1; t *= c2; t *= a0 + b1 + c2 - 3; q += t;
+        t = a0 * b2; t *= c1; t *= a0 + b2 + c1 - 3; q += t;
+        t = a1 * b0; t *= c2; t *= a1 + b0 + c2 - 3; q += t;
+        t = a1 * b2; t *= c0; t *= a1 + b2 + c0 - 3; q += t;
+        t = a2 * b0; t *= c1; t *= a2 + b0 + c1 - 3; q += t;
+        t = a2 * b1; t *= c0; t *= a2 + b1 + c0 - 3; q += t;
+        return (ACC)q;
+    }
+
+    ACC q = (ACC)0;
+    ACC A0 = (ACC)a0, A1 = (ACC)a1, A2 = (ACC)a2;
+    ACC B0 = (ACC)b0, B1 = (ACC)b1, B2 = (ACC)b2;
+    ACC C0 = (ACC)c0, C1 = (ACC)c1, C2 = (ACC)c2;
+    q += A0 * B1 * C2 * (A0 + B1 + C2 - 3);
+    q += A0 * B2 * C1 * (A0 + B2 + C1 - 3);
+    q += A1 * B0 * C2 * (A1 + B0 + C2 - 3);
+    q += A1 * B2 * C0 * (A1 + B2 + C0 - 3);
+    q += A2 * B0 * C1 * (A2 + B0 + C1 - 3);
+    q += A2 * B1 * C0 * (A2 + B1 + C0 - 3);
+    return q;
+}
 
 // ---------------------------------------------------------------------------
 // Emulated 128-bit signed integer for exact, overflow-free accumulation at very
@@ -140,24 +177,29 @@ __device__ inline void storeTwoScoreI128(long long* out, int idx, I128 v) {
 }
 
 // ---------------------------------------------------------------------------
-// Device helper: cooperative prefix-sum of cluster membership over a tree's
-// leaves, written into pX[0..L].  Uses scan[] (WB_BLOCK ints) as scratch.
+// Device helper: cooperatively build BOTH cluster-membership prefix rows over a
+// tree's leaves.  Fusing A/B means the gene-tree ordering is loaded only once.
+// Chunk totals are scanned with warp shuffles; scanA/scanB hold only the eight
+// warp totals (WB_BLOCK slots are reserved to keep the dynamic layout simple).
 //
 //   pX[p] = number of leaves among the first p (postorder) that are in the
 //           cluster (clLo,clHi,clComp) of tree clBase.
 //
 // All threads of the block must call this uniformly (it issues __syncthreads).
 // ---------------------------------------------------------------------------
-__device__ void buildPrefix(
-    int* __restrict__ pX, int* __restrict__ scan, int L,
-    size_t gBase, size_t clBase, int clLo, int clHi, int clComp,
-    int clRngOff, int clRngCnt, const int* __restrict__ rangeData,
+__device__ void buildPrefixPair(
+    int* __restrict__ pA, int* __restrict__ pB,
+    int* __restrict__ scanA, int* __restrict__ scanB, int L,
+    size_t gBase,
+    size_t aBase, int aLo, int aHi, int aComp, int aRngOff, int aRngCnt,
+    size_t bBase, int bLo, int bHi, int bComp, int bRngOff, int bRngCnt,
+    const int* __restrict__ rangeData,
     const int* __restrict__ orderings,
     const int* __restrict__ invIndex,
     int tid, int nthreads)
 {
     if (L <= 0) {
-        if (tid == 0) pX[0] = 0;
+        if (tid == 0) { pA[0] = 0; pB[0] = 0; }
         __syncthreads();
         return;
     }
@@ -168,49 +210,84 @@ __device__ void buildPrefix(
     if (start > L) start = L;
     if (end   > L) end   = L;
 
-    // Pass A: write indicator into pX[start..end), accumulate this chunk's sum.
-    // Single-range cluster (clRngCnt==0): membership is one interval test — the
-    // original fast path, byte-identical. Multi-range (clRngCnt>0): membership is
-    // "pos in ANY of clRngCnt disjoint ranges" (DOCS/multi-range-cluster-design.md §5.2).
-    int sum = 0;
+    // Pass A: write both indicator rows and accumulate both chunk totals.
+    int sumA = 0, sumB = 0;
     for (int p = start; p < end; p++) {
-        int t   = orderings[gBase + (size_t)p];
-        int pos = invIndex[clBase + (size_t)t];
-        int in;
-        if (clRngCnt == 0) {
-            in = (pos >= clLo && pos < clHi) ? 1 : 0;
+        int t = orderings[gBase + (size_t)p];
+
+        int posA = invIndex[aBase + (size_t)t];
+        int inA;
+        if (aRngCnt == 0) {
+            inA = (posA >= aLo && posA < aHi) ? 1 : 0;
         } else {
-            in = 0;
-            for (int r = 0; r < clRngCnt; r++) {
-                int rlo = rangeData[2 * (clRngOff + r)];
-                int rhi = rangeData[2 * (clRngOff + r) + 1];
-                if (pos >= rlo && pos < rhi) { in = 1; break; }
+            inA = 0;
+            for (int r = 0; r < aRngCnt; r++) {
+                int rlo = rangeData[2 * (aRngOff + r)];
+                int rhi = rangeData[2 * (aRngOff + r) + 1];
+                if (posA >= rlo && posA < rhi) { inA = 1; break; }
             }
         }
-        in     ^= clComp;          // clComp is 0/1
-        pX[p]   = in;
-        sum    += in;
+        inA ^= aComp;
+
+        int posB = invIndex[bBase + (size_t)t];
+        int inB;
+        if (bRngCnt == 0) {
+            inB = (posB >= bLo && posB < bHi) ? 1 : 0;
+        } else {
+            inB = 0;
+            for (int r = 0; r < bRngCnt; r++) {
+                int rlo = rangeData[2 * (bRngOff + r)];
+                int rhi = rangeData[2 * (bRngOff + r) + 1];
+                if (posB >= rlo && posB < rhi) { inB = 1; break; }
+            }
+        }
+        inB ^= bComp;
+
+        pA[p] = inA; pB[p] = inB;
+        sumA += inA; sumB += inB;
     }
-    scan[tid] = sum;
+
+    // Inclusive scan within each warp (all WB_BLOCK threads are active here).
+    int warpA = sumA, warpB = sumB;
+    int lane = tid & 31;
+    int warp = tid >> 5;
+    #pragma unroll
+    for (int off = 1; off < 32; off <<= 1) {
+        int va = __shfl_up_sync(0xffffffffu, warpA, off);
+        int vb = __shfl_up_sync(0xffffffffu, warpB, off);
+        if (lane >= off) { warpA += va; warpB += vb; }
+    }
+    if (lane == 31) { scanA[warp] = warpA; scanB[warp] = warpB; }
     __syncthreads();
 
-    // Inclusive scan of chunk sums (Hillis-Steele over WB_BLOCK elements).
-    for (int off = 1; off < nthreads; off <<= 1) {
-        int v = (tid >= off) ? scan[tid - off] : 0;
-        __syncthreads();
-        if (tid >= off) scan[tid] += v;
-        __syncthreads();
+    // First warp scans the (at most eight) warp totals.
+    int numWarps = (nthreads + 31) >> 5;
+    if (warp == 0) {
+        int blockA = (lane < numWarps) ? scanA[lane] : 0;
+        int blockB = (lane < numWarps) ? scanB[lane] : 0;
+        #pragma unroll
+        for (int off = 1; off < 32; off <<= 1) {
+            int va = __shfl_up_sync(0xffffffffu, blockA, off);
+            int vb = __shfl_up_sync(0xffffffffu, blockB, off);
+            if (lane >= off) { blockA += va; blockB += vb; }
+        }
+        if (lane < numWarps) { scanA[lane] = blockA; scanB[lane] = blockB; }
     }
-    int excl = scan[tid] - sum;   // exclusive offset = sum of all previous chunks
+    __syncthreads();
 
-    // Pass B: convert per-chunk indicators to global prefix (value BEFORE p).
-    int acc = excl;
+    int priorWarpA = (warp == 0) ? 0 : scanA[warp - 1];
+    int priorWarpB = (warp == 0) ? 0 : scanB[warp - 1];
+    int exclA = priorWarpA + warpA - sumA;
+    int exclB = priorWarpB + warpB - sumB;
+
+    // Pass B: convert both per-chunk indicator rows to global exclusive prefixes.
+    int accA = exclA, accB = exclB;
     for (int p = start; p < end; p++) {
-        int v = pX[p];
-        pX[p] = acc;
-        acc  += v;
+        int va = pA[p], vb = pB[p];
+        pA[p] = accA; pB[p] = accB;
+        accA += va; accB += vb;
     }
-    if (start < L && end == L) pX[L] = acc;   // total row sum at the very end
+    if (start < L && end == L) { pA[L] = accA; pB[L] = accB; }
 
     __syncthreads();
 }
@@ -345,13 +422,13 @@ __device__ I128 scorePolyNodesI128(
 
 // ---------------------------------------------------------------------------
 // Score one split.  pA/pB are the two prefix buffers (in shared memory for the
-// fast path, or in a per-block global slot for the large-L path); scan is the
-// WB_BLOCK-int scratch used by buildPrefix (always in shared memory).
+// fast path, or in a per-block global slot for the large-L path); scanA/scanB are
+// the shared-memory warp-total scratch used by buildPrefixPair.
 //
 // Called once per block (shared mode) or repeatedly via a grid-stride loop
 // (global mode).  Issues __syncthreads, so all threads must call it uniformly.
 // ---------------------------------------------------------------------------
-template<typename ACC>
+template<typename ACC, bool SMALL_QI>
 __device__ void scoreSplit(
     int s,
     const int* __restrict__ splits,
@@ -368,7 +445,8 @@ __device__ void scoreSplit(
     const int* __restrict__ orderings,
     const int* __restrict__ invIndex,
     int numPartTrees, int partTreeOffset, int numTaxa, int totalN,
-    int* __restrict__ pA, int* __restrict__ pB, int* __restrict__ scan,
+    int* __restrict__ pA, int* __restrict__ pB,
+    int* __restrict__ scanA, int* __restrict__ scanB,
     int tid, int nthreads,
     long long* __restrict__ twoScores)
 {
@@ -391,11 +469,6 @@ __device__ void scoreSplit(
     size_t aBase = (size_t)aTree * numTaxa;
     size_t bBase = (size_t)bTree * numTaxa;
 
-    // 6 permutations for 2*QI.
-    const int PI[6] = {0, 0, 1, 1, 2, 2};
-    const int PJ[6] = {1, 2, 0, 2, 0, 1};
-    const int PK[6] = {2, 1, 2, 0, 1, 0};
-
     ACC threadAccum = (ACC) 0;
 
     for (int g = 0; g < numPartTrees; g++) {
@@ -408,8 +481,10 @@ __device__ void scoreSplit(
         int    L     = partLeafCount[g];
         size_t gBase = (size_t)(partTreeOffset + g) * numTaxa;
 
-        buildPrefix(pA, scan, L, gBase, aBase, aLo, aHi, aComp, aRngOff, aRngCnt, rangeData, orderings, invIndex, tid, nthreads);
-        buildPrefix(pB, scan, L, gBase, bBase, bLo, bHi, bComp, bRngOff, bRngCnt, rangeData, orderings, invIndex, tid, nthreads);
+        buildPrefixPair(pA, pB, scanA, scanB, L, gBase,
+            aBase, aLo, aHi, aComp, aRngOff, aRngCnt,
+            bBase, bLo, bHi, bComp, bRngOff, bRngCnt,
+            rangeData, orderings, invIndex, tid, nthreads);
 
         int lgA = pA[L];
         int lgB = pB[L];
@@ -437,18 +512,8 @@ __device__ void scoreSplit(
 
             if (a2 < 0 || b2 < 0 || c0 < 0 || c1 < 0 || c2 < 0) continue;
 
-            // Products accumulated in ACC (long long = exact; double = overflow-safe).
-            ACC a[3] = {(ACC)a0, (ACC)a1, (ACC)a2};
-            ACC b[3] = {(ACC)b0, (ACC)b1, (ACC)b2};
-            ACC c[3] = {(ACC)c0, (ACC)c1, (ACC)c2};
-
-            ACC twoQI = (ACC) 0;
-            #pragma unroll
-            for (int p = 0; p < 6; p++) {
-                ACC ai = a[PI[p]], bj = b[PJ[p]], ck = c[PK[p]];
-                ACC su = ai + bj + ck - 3;
-                if (su > 0) twoQI += ai * bj * ck * su;
-            }
+            ACC twoQI = binaryTwoQI<ACC, SMALL_QI>(
+                a0, a1, a2, b0, b1, b2, c0, c1, c2);
             threadAccum += (ACC) nodeFreq[ni] * twoQI;   // weight by occurrence count
         }
 
@@ -480,10 +545,10 @@ __device__ void scoreSplit(
 //                  block grid-strides over splits.  Large-L path, bounded VRAM.
 //
 // Dynamic shared layout:
-//   GLOBAL=false : pA[stride], pB[stride], scan[WB_BLOCK]
-//   GLOBAL=true  : scan[WB_BLOCK]                       (pA/pB in gPrefix)
+//   GLOBAL=false : pA[stride], pB[stride], scanA[WB_BLOCK], scanB[WB_BLOCK]
+//   GLOBAL=true  : scanA[WB_BLOCK], scanB[WB_BLOCK]     (pA/pB in gPrefix)
 // ---------------------------------------------------------------------------
-template<bool GLOBAL, typename ACC>
+template<bool GLOBAL, typename ACC, bool SMALL_QI>
 __global__ void computeWeightsKernel(
     const int* __restrict__ splits,
     const int* __restrict__ splitRangeMeta,
@@ -513,26 +578,28 @@ __global__ void computeWeightsKernel(
     int nthreads = blockDim.x;
 
     if (GLOBAL) {
-        int* scan = smem;
+        int* scanA = smem;
+        int* scanB = smem + WB_BLOCK;
         int* pA   = gPrefix + (size_t)blockIdx.x * 2 * prefixStride;
         int* pB   = pA + prefixStride;
         for (int s = blockIdx.x; s < curBatch; s += gridDim.x) {
-            scoreSplit<ACC>(s, splits, splitRangeMeta, rangeData, nodeData, nodeFreq, nodeOffset, partLeafCount,
+            scoreSplit<ACC, SMALL_QI>(s, splits, splitRangeMeta, rangeData, nodeData, nodeFreq, nodeOffset, partLeafCount,
                        polyTreeOffset, polyBoundOffset, polyBounds, polyFreq,
                        orderings, invIndex, numPartTrees, partTreeOffset,
-                       numTaxa, totalN, pA, pB, scan, tid, nthreads, twoScores);
+                       numTaxa, totalN, pA, pB, scanA, scanB, tid, nthreads, twoScores);
             if (tid == 0 && dProgress) atomicAdd(dProgress, 1);   // one per finished split
         }
     } else {
         int* pA   = smem;
         int* pB   = smem + prefixStride;
-        int* scan = smem + 2 * prefixStride;
+        int* scanA = smem + 2 * prefixStride;
+        int* scanB = scanA + WB_BLOCK;
         int s = blockIdx.x;
         if (s < curBatch) {
-            scoreSplit<ACC>(s, splits, splitRangeMeta, rangeData, nodeData, nodeFreq, nodeOffset, partLeafCount,
+            scoreSplit<ACC, SMALL_QI>(s, splits, splitRangeMeta, rangeData, nodeData, nodeFreq, nodeOffset, partLeafCount,
                        polyTreeOffset, polyBoundOffset, polyBounds, polyFreq,
                        orderings, invIndex, numPartTrees, partTreeOffset,
-                       numTaxa, totalN, pA, pB, scan, tid, nthreads, twoScores);
+                       numTaxa, totalN, pA, pB, scanA, scanB, tid, nthreads, twoScores);
             if (tid == 0 && dProgress) atomicAdd(dProgress, 1);   // one per finished split
         }
     }
@@ -560,7 +627,8 @@ __device__ void scoreSplitI128(
     const int* __restrict__ orderings,
     const int* __restrict__ invIndex,
     int numPartTrees, int partTreeOffset, int numTaxa, int totalN,
-    int* __restrict__ pA, int* __restrict__ pB, int* __restrict__ scan,
+    int* __restrict__ pA, int* __restrict__ pB,
+    int* __restrict__ scanA, int* __restrict__ scanB,
     int tid, int nthreads,
     long long* __restrict__ twoScores)
 {
@@ -596,8 +664,10 @@ __device__ void scoreSplitI128(
         int    L     = partLeafCount[g];
         size_t gBase = (size_t)(partTreeOffset + g) * numTaxa;
 
-        buildPrefix(pA, scan, L, gBase, aBase, aLo, aHi, aComp, aRngOff, aRngCnt, rangeData, orderings, invIndex, tid, nthreads);
-        buildPrefix(pB, scan, L, gBase, bBase, bLo, bHi, bComp, bRngOff, bRngCnt, rangeData, orderings, invIndex, tid, nthreads);
+        buildPrefixPair(pA, pB, scanA, scanB, L, gBase,
+            aBase, aLo, aHi, aComp, aRngOff, aRngCnt,
+            bBase, bLo, bHi, bComp, bRngOff, bRngCnt,
+            rangeData, orderings, invIndex, tid, nthreads);
 
         int lgA = pA[L];
         int lgB = pB[L];
@@ -694,26 +764,28 @@ __global__ void computeWeightsKernelI128(
     int nthreads = blockDim.x;
 
     if (GLOBAL) {
-        int* scan = smem;
+        int* scanA = smem;
+        int* scanB = smem + WB_BLOCK;
         int* pA   = gPrefix + (size_t)blockIdx.x * 2 * prefixStride;
         int* pB   = pA + prefixStride;
         for (int s = blockIdx.x; s < curBatch; s += gridDim.x) {
             scoreSplitI128(s, splits, splitRangeMeta, rangeData, nodeData, nodeFreq, nodeOffset, partLeafCount,
                            polyTreeOffset, polyBoundOffset, polyBounds, polyFreq,
                            orderings, invIndex, numPartTrees, partTreeOffset,
-                           numTaxa, totalN, pA, pB, scan, tid, nthreads, twoScores);
+                           numTaxa, totalN, pA, pB, scanA, scanB, tid, nthreads, twoScores);
             if (tid == 0 && dProgress) atomicAdd(dProgress, 1);
         }
     } else {
         int* pA   = smem;
         int* pB   = smem + prefixStride;
-        int* scan = smem + 2 * prefixStride;
+        int* scanA = smem + 2 * prefixStride;
+        int* scanB = scanA + WB_BLOCK;
         int s = blockIdx.x;
         if (s < curBatch) {
             scoreSplitI128(s, splits, splitRangeMeta, rangeData, nodeData, nodeFreq, nodeOffset, partLeafCount,
                            polyTreeOffset, polyBoundOffset, polyBounds, polyFreq,
                            orderings, invIndex, numPartTrees, partTreeOffset,
-                           numTaxa, totalN, pA, pB, scan, tid, nthreads, twoScores);
+                           numTaxa, totalN, pA, pB, scanA, scanB, tid, nthreads, twoScores);
             if (tid == 0 && dProgress) atomicAdd(dProgress, 1);
         }
     }
@@ -816,7 +888,7 @@ __device__ int ssRowSum(
 //   ssPolyBoundOffset[pn]..[pn+1]   range into ssPolyBounds, length d
 //   ssPolyBounds[base + 0..d-1]     child i = [b[i],b[i+1]); part d-1 = complement
 // ---------------------------------------------------------------------------
-template<typename ACC>
+template<typename ACC, bool CACHE_ROWS>
 __device__ ACC ssScorePoly(
     int loTree, int loLeft, int loRight, int loComp, int sizeA, int aRngOff, int aRngCnt,
     int hiTree, int hiLeft, int hiRight, int hiComp, int sizeB, int bRngOff, int bRngCnt,
@@ -829,6 +901,7 @@ __device__ ACC ssScorePoly(
     int numPolyParts, int numTaxa, int totalN)
 {
     ACC twoScore = (ACC) 0;
+    int cachedTree = -1, cachedLgA = 0, cachedLgB = 0;
     for (int pn = 0; pn < numPolyParts; pn++) {
         int tGT  = ssPolyMeta[3 * pn];
         int L_GT = ssPolyMeta[3 * pn + 1];
@@ -838,10 +911,20 @@ __device__ ACC ssScorePoly(
         int b0   = ssPolyBounds[base];
         int bD   = ssPolyBounds[base + d - 1];
 
-        int lgA = (L_GT == totalN) ? sizeA
-            : ssRowSum(tGT, L_GT, loTree, loLeft, loRight, loComp, aRngOff, aRngCnt, rangeData, orderings, invIndex, numTaxa);
-        int lgB = (L_GT == totalN) ? sizeB
-            : ssRowSum(tGT, L_GT, hiTree, hiLeft, hiRight, hiComp, bRngOff, bRngCnt, rangeData, orderings, invIndex, numTaxa);
+        int lgA, lgB;
+        if (L_GT == totalN) { lgA = sizeA; lgB = sizeB; }
+        else {
+            if (CACHE_ROWS && tGT != cachedTree) {
+                cachedLgA = ssRowSum(tGT, L_GT, loTree, loLeft, loRight, loComp, aRngOff, aRngCnt, rangeData, orderings, invIndex, numTaxa);
+                cachedLgB = ssRowSum(tGT, L_GT, hiTree, hiLeft, hiRight, hiComp, bRngOff, bRngCnt, rangeData, orderings, invIndex, numTaxa);
+                cachedTree = tGT;
+            }
+            if (CACHE_ROWS) { lgA = cachedLgA; lgB = cachedLgB; }
+            else {
+                lgA = ssRowSum(tGT, L_GT, loTree, loLeft, loRight, loComp, aRngOff, aRngCnt, rangeData, orderings, invIndex, numTaxa);
+                lgB = ssRowSum(tGT, L_GT, hiTree, hiLeft, hiRight, hiComp, bRngOff, bRngCnt, rangeData, orderings, invIndex, numTaxa);
+            }
+        }
 
         // Pass 1: marginals over all d parts (child parts walked once).
         ACC Sa = 0, Sb = 0, Sc = 0, Sab = 0, Sac = 0, Sbc = 0;
@@ -881,6 +964,7 @@ __device__ ACC ssScorePoly(
 }
 
 // INT128 twin of ssScorePoly.
+template<bool CACHE_ROWS>
 __device__ I128 ssScorePolyI128(
     int loTree, int loLeft, int loRight, int loComp, int sizeA, int aRngOff, int aRngCnt,
     int hiTree, int hiLeft, int hiRight, int hiComp, int sizeB, int bRngOff, int bRngCnt,
@@ -893,6 +977,7 @@ __device__ I128 ssScorePolyI128(
     int numPolyParts, int numTaxa, int totalN)
 {
     I128 twoScore = i128_zero();
+    int cachedTree = -1, cachedLgA = 0, cachedLgB = 0;
     for (int pn = 0; pn < numPolyParts; pn++) {
         int tGT  = ssPolyMeta[3 * pn];
         int L_GT = ssPolyMeta[3 * pn + 1];
@@ -902,10 +987,20 @@ __device__ I128 ssScorePolyI128(
         int b0   = ssPolyBounds[base];
         int bD   = ssPolyBounds[base + d - 1];
 
-        int lgA = (L_GT == totalN) ? sizeA
-            : ssRowSum(tGT, L_GT, loTree, loLeft, loRight, loComp, aRngOff, aRngCnt, rangeData, orderings, invIndex, numTaxa);
-        int lgB = (L_GT == totalN) ? sizeB
-            : ssRowSum(tGT, L_GT, hiTree, hiLeft, hiRight, hiComp, bRngOff, bRngCnt, rangeData, orderings, invIndex, numTaxa);
+        int lgA, lgB;
+        if (L_GT == totalN) { lgA = sizeA; lgB = sizeB; }
+        else {
+            if (CACHE_ROWS && tGT != cachedTree) {
+                cachedLgA = ssRowSum(tGT, L_GT, loTree, loLeft, loRight, loComp, aRngOff, aRngCnt, rangeData, orderings, invIndex, numTaxa);
+                cachedLgB = ssRowSum(tGT, L_GT, hiTree, hiLeft, hiRight, hiComp, bRngOff, bRngCnt, rangeData, orderings, invIndex, numTaxa);
+                cachedTree = tGT;
+            }
+            if (CACHE_ROWS) { lgA = cachedLgA; lgB = cachedLgB; }
+            else {
+                lgA = ssRowSum(tGT, L_GT, loTree, loLeft, loRight, loComp, aRngOff, aRngCnt, rangeData, orderings, invIndex, numTaxa);
+                lgB = ssRowSum(tGT, L_GT, hiTree, hiLeft, hiRight, hiComp, bRngOff, bRngCnt, rangeData, orderings, invIndex, numTaxa);
+            }
+        }
 
         long long Sa = 0, Sb = 0, Sc = 0, Sab = 0, Sac = 0, Sbc = 0;
         int sumA = 0, sumB = 0;
@@ -946,7 +1041,7 @@ __device__ I128 ssScorePolyI128(
 }
 
 // One thread per split; loop all deduplicated tripartitions (parts, 9 ints each).
-template<typename ACC>
+template<typename ACC, bool CACHE_ROWS>
 __global__ void computeWeightsSmallerSideKernel(
     const int* __restrict__ splits,    // curBatch * 10
     const int* __restrict__ splitRangeMeta, // curBatch * 4  [aOff,aCnt,bOff,bCnt]
@@ -982,6 +1077,7 @@ __global__ void computeWeightsSmallerSideKernel(
     const int PK[6] = {2, 1, 2, 0, 1, 0};
 
     ACC twoScore = (ACC) 0;
+    int cachedTree = -1, cachedLgA = 0, cachedLgB = 0;
 
     for (int j = 0; j < numParts; j++) {
         const int* pt = parts + (size_t)j * 9;
@@ -1002,8 +1098,16 @@ __global__ void computeWeightsSmallerSideKernel(
             lgA = sizeA;
             lgB = sizeB;
         } else {
-            lgA = ssRowSum(tGT, L_GT, loTree, loLeft, loRight, loComp, aRngOff, aRngCnt, rangeData, orderings, invIndex, numTaxa);
-            lgB = ssRowSum(tGT, L_GT, hiTree, hiLeft, hiRight, hiComp, bRngOff, bRngCnt, rangeData, orderings, invIndex, numTaxa);
+            if (CACHE_ROWS && tGT != cachedTree) {
+                cachedLgA = ssRowSum(tGT, L_GT, loTree, loLeft, loRight, loComp, aRngOff, aRngCnt, rangeData, orderings, invIndex, numTaxa);
+                cachedLgB = ssRowSum(tGT, L_GT, hiTree, hiLeft, hiRight, hiComp, bRngOff, bRngCnt, rangeData, orderings, invIndex, numTaxa);
+                cachedTree = tGT;
+            }
+            if (CACHE_ROWS) { lgA = cachedLgA; lgB = cachedLgB; }
+            else {
+                lgA = ssRowSum(tGT, L_GT, loTree, loLeft, loRight, loComp, aRngOff, aRngCnt, rangeData, orderings, invIndex, numTaxa);
+                lgB = ssRowSum(tGT, L_GT, hiTree, hiLeft, hiRight, hiComp, bRngOff, bRngCnt, rangeData, orderings, invIndex, numTaxa);
+            }
         }
 
         int a2 = lgA - a0 - a1;
@@ -1030,7 +1134,7 @@ __global__ void computeWeightsSmallerSideKernel(
 
     // Polytomy (d>3) parts — two-pass-rewalk O(d) QI.
     if (numPolyParts > 0)
-        twoScore += ssScorePoly<ACC>(
+        twoScore += ssScorePoly<ACC, CACHE_ROWS>(
             loTree, loLeft, loRight, loComp, sizeA, aRngOff, aRngCnt,
             hiTree, hiLeft, hiRight, hiComp, sizeB, bRngOff, bRngCnt,
             rangeData, ssPolyMeta, ssPolyBoundOffset, ssPolyBounds,
@@ -1046,6 +1150,7 @@ __global__ void computeWeightsSmallerSideKernel(
 }
 
 // INT128 variant of the smaller-side kernel (one thread per split, exact 128-bit).
+template<bool CACHE_ROWS>
 __global__ void computeWeightsSmallerSideKernelI128(
     const int* __restrict__ splits,
     const int* __restrict__ splitRangeMeta,
@@ -1081,6 +1186,7 @@ __global__ void computeWeightsSmallerSideKernelI128(
     const int PK[6] = {2, 1, 2, 0, 1, 0};
 
     I128 twoScore = i128_zero();
+    int cachedTree = -1, cachedLgA = 0, cachedLgB = 0;
 
     for (int j = 0; j < numParts; j++) {
         const int* pt = parts + (size_t)j * 9;
@@ -1101,8 +1207,16 @@ __global__ void computeWeightsSmallerSideKernelI128(
             lgA = sizeA;
             lgB = sizeB;
         } else {
-            lgA = ssRowSum(tGT, L_GT, loTree, loLeft, loRight, loComp, aRngOff, aRngCnt, rangeData, orderings, invIndex, numTaxa);
-            lgB = ssRowSum(tGT, L_GT, hiTree, hiLeft, hiRight, hiComp, bRngOff, bRngCnt, rangeData, orderings, invIndex, numTaxa);
+            if (CACHE_ROWS && tGT != cachedTree) {
+                cachedLgA = ssRowSum(tGT, L_GT, loTree, loLeft, loRight, loComp, aRngOff, aRngCnt, rangeData, orderings, invIndex, numTaxa);
+                cachedLgB = ssRowSum(tGT, L_GT, hiTree, hiLeft, hiRight, hiComp, bRngOff, bRngCnt, rangeData, orderings, invIndex, numTaxa);
+                cachedTree = tGT;
+            }
+            if (CACHE_ROWS) { lgA = cachedLgA; lgB = cachedLgB; }
+            else {
+                lgA = ssRowSum(tGT, L_GT, loTree, loLeft, loRight, loComp, aRngOff, aRngCnt, rangeData, orderings, invIndex, numTaxa);
+                lgB = ssRowSum(tGT, L_GT, hiTree, hiLeft, hiRight, hiComp, bRngOff, bRngCnt, rangeData, orderings, invIndex, numTaxa);
+            }
         }
 
         int a2 = lgA - a0 - a1;
@@ -1133,7 +1247,7 @@ __global__ void computeWeightsSmallerSideKernelI128(
 
     // Polytomy (d>3) parts — two-pass-rewalk O(d) QI (exact 128-bit).
     if (numPolyParts > 0)
-        twoScore = i128_add(twoScore, ssScorePolyI128(
+        twoScore = i128_add(twoScore, ssScorePolyI128<CACHE_ROWS>(
             loTree, loLeft, loRight, loComp, sizeA, aRngOff, aRngCnt,
             hiTree, hiLeft, hiRight, hiComp, sizeB, bRngOff, bRngCnt,
             rangeData, ssPolyMeta, ssPolyBoundOffset, ssPolyBounds,
@@ -1173,6 +1287,38 @@ __device__ inline int bs_popAnd(const unsigned long long* __restrict__ x,
                                  const unsigned long long* __restrict__ y, int W) {
     int c = 0;
     for (int k = 0; k < W; k++) c += __popcll(x[k] & y[k]);
+    return c;
+}
+
+// Gather candidate A/B bitsets into a warp-coalesced per-batch layout:
+//   out[(side*W + word)*batch + split].
+// All one-thread-per-split kernels then read adjacent addresses across a warp.
+__global__ void gatherCandidateBits(
+    const int* __restrict__ splits,
+    const unsigned long long* __restrict__ clusterBits,
+    unsigned long long* __restrict__ out,
+    int batch, int W)
+{
+    size_t q = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    size_t total = (size_t)batch * W;
+    if (q >= total) return;
+    size_t word = q / batch;
+    int split = (int)(q - word * batch);
+    const int* sp = splits + (size_t)split * 4;
+    out[(size_t)word * batch + split] =
+        clusterBits[(size_t)sp[0] * W + word];
+    out[((size_t)W + word) * batch + split] =
+        clusterBits[(size_t)sp[1] * W + word];
+}
+
+__device__ inline int bs_popAndCandidate(
+    const unsigned long long* __restrict__ candidate,
+    const unsigned long long* __restrict__ mask,
+    int W, int candidateStride)
+{
+    int c = 0;
+    for (int k = 0; k < W; k++)
+        c += __popcll(candidate[(size_t)k * candidateStride] & mask[k]);
     return c;
 }
 
@@ -1420,10 +1566,10 @@ __global__ void computeWeightsBitsetKernelI128(
 // come from popcount(A/B & geneLgBits[g]); complete trees short-circuit to aSize/bSize.
 // ===========================================================================
 
-template<typename ACC>
+template<typename ACC, bool SMALL_QI, int STACK_CAP>
 __global__ void computeWeightsTreeWalkKernel(
     const int* __restrict__ splits,                     // curBatch * 4
-    const unsigned long long* __restrict__ clusterBits,
+    const unsigned long long* __restrict__ candidateBits,
     const unsigned long long* __restrict__ geneLgBits,
     const int* __restrict__ nodeStream,
     const int* __restrict__ treeNodeOffset,
@@ -1435,17 +1581,13 @@ __global__ void computeWeightsTreeWalkKernel(
     if (idx >= curBatch) return;
 
     const int* sp = splits + (size_t)idx * 4;
-    int aCid = sp[0], bCid = sp[1], aSize = sp[2], bSize = sp[3];
+    int aSize = sp[2], bSize = sp[3];
     if (totalN - aSize - bSize < 0) { twoScores[idx] = 0LL; return; }
 
-    const unsigned long long* A = clusterBits + (size_t)aCid * W;
-    const unsigned long long* B = clusterBits + (size_t)bCid * W;
+    const unsigned long long* A = candidateBits + idx;
+    const unsigned long long* B = candidateBits + (size_t)W * curBatch + idx;
 
-    const int PI[6] = {0, 0, 1, 1, 2, 2};
-    const int PJ[6] = {1, 2, 0, 2, 0, 1};
-    const int PK[6] = {2, 1, 2, 0, 1, 0};
-
-    int stack[WB_TW_STACK_CAP * 3];
+    int stack[STACK_CAP * 3];
     ACC twoScore = (ACC) 0;
 
     for (int g = 0; g < numTrees; g++) {
@@ -1455,14 +1597,15 @@ __global__ void computeWeightsTreeWalkKernel(
         int lgA, lgB;
         if (LgSize == totalN) { lgA = aSize; lgB = bSize; }
         else { const unsigned long long* Lg = geneLgBits + (size_t)g * W;
-               lgA = bs_popAnd(A, Lg, W); lgB = bs_popAnd(B, Lg, W); }
+               lgA = bs_popAndCandidate(A, Lg, W, curBatch);
+               lgB = bs_popAndCandidate(B, Lg, W, curBatch); }
 
         int top = 0;
         for (int i = segBeg; i < segEnd; i++) {
             int tok = nodeStream[i];
             if (tok >= 0) {                                   // leaf
-                int inA = (int)((A[tok >> 6] >> (tok & 63)) & 1ULL);
-                int inB = (int)((B[tok >> 6] >> (tok & 63)) & 1ULL);
+                int inA = (int)((A[(size_t)(tok >> 6) * curBatch] >> (tok & 63)) & 1ULL);
+                int inB = (int)((B[(size_t)(tok >> 6) * curBatch] >> (tok & 63)) & 1ULL);
                 int e = top * 3;
                 stack[e] = inA; stack[e + 1] = inB; stack[e + 2] = 1;
                 top++;
@@ -1477,16 +1620,8 @@ __global__ void computeWeightsTreeWalkKernel(
                     int sz3 = LgSize - s0 - s1;
                     int c0 = s0 - a0 - b0, c1 = s1 - a1 - b1, c2 = sz3 - a2 - b2;
                     if (!(a2 < 0 || b2 < 0 || c0 < 0 || c1 < 0 || c2 < 0)) {
-                        ACC a[3] = {(ACC)a0, (ACC)a1, (ACC)a2};
-                        ACC b[3] = {(ACC)b0, (ACC)b1, (ACC)b2};
-                        ACC c[3] = {(ACC)c0, (ACC)c1, (ACC)c2};
-                        ACC twoQI = (ACC) 0;
-                        #pragma unroll
-                        for (int p = 0; p < 6; p++) {
-                            ACC ai = a[PI[p]], bj = b[PJ[p]], ck = c[PK[p]];
-                            ACC su = ai + bj + ck - 3;
-                            if (su > 0) twoQI += ai * bj * ck * su;
-                        }
+                        ACC twoQI = binaryTwoQI<ACC, SMALL_QI>(
+                            a0, a1, a2, b0, b1, b2, c0, c1, c2);
                         twoScore += twoQI;
                     }
                     stack[e0] = a0 + a1; stack[e0 + 1] = b0 + b1; stack[e0 + 2] = s0 + s1;
@@ -1535,9 +1670,10 @@ __global__ void computeWeightsTreeWalkKernel(
 }
 
 // INT128 twin of the tree-walk kernel (one thread per split, exact 128-bit).
+template<int STACK_CAP>
 __global__ void computeWeightsTreeWalkKernelI128(
     const int* __restrict__ splits,
-    const unsigned long long* __restrict__ clusterBits,
+    const unsigned long long* __restrict__ candidateBits,
     const unsigned long long* __restrict__ geneLgBits,
     const int* __restrict__ nodeStream,
     const int* __restrict__ treeNodeOffset,
@@ -1549,17 +1685,17 @@ __global__ void computeWeightsTreeWalkKernelI128(
     if (idx >= curBatch) return;
 
     const int* sp = splits + (size_t)idx * 4;
-    int aCid = sp[0], bCid = sp[1], aSize = sp[2], bSize = sp[3];
+    int aSize = sp[2], bSize = sp[3];
     if (totalN - aSize - bSize < 0) { storeTwoScoreI128(twoScores, idx, i128_zero()); return; }
 
-    const unsigned long long* A = clusterBits + (size_t)aCid * W;
-    const unsigned long long* B = clusterBits + (size_t)bCid * W;
+    const unsigned long long* A = candidateBits + idx;
+    const unsigned long long* B = candidateBits + (size_t)W * curBatch + idx;
 
     const int PI[6] = {0, 0, 1, 1, 2, 2};
     const int PJ[6] = {1, 2, 0, 2, 0, 1};
     const int PK[6] = {2, 1, 2, 0, 1, 0};
 
-    int stack[WB_TW_STACK_CAP * 3];
+    int stack[STACK_CAP * 3];
     I128 twoScore = i128_zero();
 
     for (int g = 0; g < numTrees; g++) {
@@ -1569,14 +1705,15 @@ __global__ void computeWeightsTreeWalkKernelI128(
         int lgA, lgB;
         if (LgSize == totalN) { lgA = aSize; lgB = bSize; }
         else { const unsigned long long* Lg = geneLgBits + (size_t)g * W;
-               lgA = bs_popAnd(A, Lg, W); lgB = bs_popAnd(B, Lg, W); }
+               lgA = bs_popAndCandidate(A, Lg, W, curBatch);
+               lgB = bs_popAndCandidate(B, Lg, W, curBatch); }
 
         int top = 0;
         for (int i = segBeg; i < segEnd; i++) {
             int tok = nodeStream[i];
             if (tok >= 0) {                                   // leaf
-                int inA = (int)((A[tok >> 6] >> (tok & 63)) & 1ULL);
-                int inB = (int)((B[tok >> 6] >> (tok & 63)) & 1ULL);
+                int inA = (int)((A[(size_t)(tok >> 6) * curBatch] >> (tok & 63)) & 1ULL);
+                int inB = (int)((B[(size_t)(tok >> 6) * curBatch] >> (tok & 63)) & 1ULL);
                 int e = top * 3;
                 stack[e] = inA; stack[e + 1] = inB; stack[e + 2] = 1;
                 top++;
@@ -1837,8 +1974,8 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsGPU(
     // bounded global-memory pool (large-L path).
     // -------------------------------------------------------------------------
     int    stride            = maxLeafCount + 1;
-    size_t sharedBytesShared = ((size_t)2 * stride + WB_BLOCK) * sizeof(int); // pA+pB+scan
-    size_t sharedBytesGlobal = (size_t)WB_BLOCK * sizeof(int);                // scan only
+    size_t sharedBytesShared = ((size_t)2 * stride + 2 * WB_BLOCK) * sizeof(int); // pA+pB+warp scans
+    size_t sharedBytesGlobal = (size_t)2 * WB_BLOCK * sizeof(int);                // warp scans only
     size_t redBytes          = (size_t)WB_BLOCK * sizeof(long long);          // static red[]
 
     int maxOptin = 0;
@@ -1859,11 +1996,15 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsGPU(
                                  cudaFuncAttributeMaxDynamicSharedMemorySize,
                                  (int)sharedBytesShared);
         else if (useDouble)
-            cudaFuncSetAttribute(computeWeightsKernel<false, double>,
+            cudaFuncSetAttribute(computeWeightsKernel<false, double, false>,
+                                 cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                 (int)sharedBytesShared);
+        else if (numTaxa <= WB_SMALL_QI_MAX_N)
+            cudaFuncSetAttribute(computeWeightsKernel<false, long long, true>,
                                  cudaFuncAttributeMaxDynamicSharedMemorySize,
                                  (int)sharedBytesShared);
         else
-            cudaFuncSetAttribute(computeWeightsKernel<false, long long>,
+            cudaFuncSetAttribute(computeWeightsKernel<false, long long, false>,
                                  cudaFuncAttributeMaxDynamicSharedMemorySize,
                                  (int)sharedBytesShared);
     }
@@ -1953,10 +2094,13 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsGPU(
                 &blocksPerSM, computeWeightsKernelI128<true>, WB_BLOCK, sharedBytesGlobal);
         else if (useDouble)
             cudaOccupancyMaxActiveBlocksPerMultiprocessor(
-                &blocksPerSM, computeWeightsKernel<true, double>, WB_BLOCK, sharedBytesGlobal);
+                &blocksPerSM, computeWeightsKernel<true, double, false>, WB_BLOCK, sharedBytesGlobal);
+        else if (numTaxa <= WB_SMALL_QI_MAX_N)
+            cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+                &blocksPerSM, computeWeightsKernel<true, long long, true>, WB_BLOCK, sharedBytesGlobal);
         else
             cudaOccupancyMaxActiveBlocksPerMultiprocessor(
-                &blocksPerSM, computeWeightsKernel<true, long long>, WB_BLOCK, sharedBytesGlobal);
+                &blocksPerSM, computeWeightsKernel<true, long long, false>, WB_BLOCK, sharedBytesGlobal);
         if (blocksPerSM < 1) blocksPerSM = 1;
         maxResident = numSM * blocksPerSM;
         if (maxResident < 1)         maxResident = 1;
@@ -2137,13 +2281,19 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsGPU(
                     curBatch, numPartTrees, partTreeOffset, stride, numTaxa, numTaxa,
                     NULL, dTwoScores, dProgress);
             else if (useDouble)
-                computeWeightsKernel<false, double><<<curBatch, WB_BLOCK, sharedBytes, wbStream>>>(
+                computeWeightsKernel<false, double, false><<<curBatch, WB_BLOCK, sharedBytes, wbStream>>>(
+                    dSplits, dSplitRangeMeta, dRangeData, dNodeData, dNodeFreq, dNodeOffset, dPartLeafCount,
+                    dPolyTreeOffset, dPolyBoundOffset, dPolyBounds, dPolyFreq, dOrderings, dInvIndex,
+                    curBatch, numPartTrees, partTreeOffset, stride, numTaxa, numTaxa,
+                    NULL, dTwoScores, dProgress);
+            else if (numTaxa <= WB_SMALL_QI_MAX_N)
+                computeWeightsKernel<false, long long, true><<<curBatch, WB_BLOCK, sharedBytes, wbStream>>>(
                     dSplits, dSplitRangeMeta, dRangeData, dNodeData, dNodeFreq, dNodeOffset, dPartLeafCount,
                     dPolyTreeOffset, dPolyBoundOffset, dPolyBounds, dPolyFreq, dOrderings, dInvIndex,
                     curBatch, numPartTrees, partTreeOffset, stride, numTaxa, numTaxa,
                     NULL, dTwoScores, dProgress);
             else
-                computeWeightsKernel<false, long long><<<curBatch, WB_BLOCK, sharedBytes, wbStream>>>(
+                computeWeightsKernel<false, long long, false><<<curBatch, WB_BLOCK, sharedBytes, wbStream>>>(
                     dSplits, dSplitRangeMeta, dRangeData, dNodeData, dNodeFreq, dNodeOffset, dPartLeafCount,
                     dPolyTreeOffset, dPolyBoundOffset, dPolyBounds, dPolyFreq, dOrderings, dInvIndex,
                     curBatch, numPartTrees, partTreeOffset, stride, numTaxa, numTaxa,
@@ -2159,13 +2309,19 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsGPU(
                     curBatch, numPartTrees, partTreeOffset, stride, numTaxa, numTaxa,
                     dPrefix, dTwoScores, dProgress);
             else if (useDouble)
-                computeWeightsKernel<true, double><<<gridDim, WB_BLOCK, sharedBytes, wbStream>>>(
+                computeWeightsKernel<true, double, false><<<gridDim, WB_BLOCK, sharedBytes, wbStream>>>(
+                    dSplits, dSplitRangeMeta, dRangeData, dNodeData, dNodeFreq, dNodeOffset, dPartLeafCount,
+                    dPolyTreeOffset, dPolyBoundOffset, dPolyBounds, dPolyFreq, dOrderings, dInvIndex,
+                    curBatch, numPartTrees, partTreeOffset, stride, numTaxa, numTaxa,
+                    dPrefix, dTwoScores, dProgress);
+            else if (numTaxa <= WB_SMALL_QI_MAX_N)
+                computeWeightsKernel<true, long long, true><<<gridDim, WB_BLOCK, sharedBytes, wbStream>>>(
                     dSplits, dSplitRangeMeta, dRangeData, dNodeData, dNodeFreq, dNodeOffset, dPartLeafCount,
                     dPolyTreeOffset, dPolyBoundOffset, dPolyBounds, dPolyFreq, dOrderings, dInvIndex,
                     curBatch, numPartTrees, partTreeOffset, stride, numTaxa, numTaxa,
                     dPrefix, dTwoScores, dProgress);
             else
-                computeWeightsKernel<true, long long><<<gridDim, WB_BLOCK, sharedBytes, wbStream>>>(
+                computeWeightsKernel<true, long long, false><<<gridDim, WB_BLOCK, sharedBytes, wbStream>>>(
                     dSplits, dSplitRangeMeta, dRangeData, dNodeData, dNodeFreq, dNodeOffset, dPartLeafCount,
                     dPolyTreeOffset, dPolyBoundOffset, dPolyBounds, dPolyFreq, dOrderings, dInvIndex,
                     curBatch, numPartTrees, partTreeOffset, stride, numTaxa, numTaxa,
@@ -2296,6 +2452,15 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsSmallerSideGPU(
     jint* hInvIndex  = env->GetIntArrayElements(jInvIndex,  NULL);
     jsize rangeDataLen   = env->GetArrayLength(jRangeData);
     jsize ssPolyBoundsLen= env->GetArrayLength(jSsPolyBounds);
+
+    bool cacheRows = false;
+    for (int j = 0; j < numParts && !cacheRows; j++) {
+        const jint* pt = hParts + (size_t)j * 9;
+        cacheRows = (pt[5] + pt[6] + pt[7] != totalN);
+    }
+    for (int p = 0; p < numPolyParts && !cacheRows; p++)
+        cacheRows = (hSsPolyMeta[(size_t)p * 3 + 1] != totalN);
+    if (getenv("ASTRALX_WEIGHT_DISABLE_ROW_CACHE")) cacheRows = false;
 
     // --- Upload static data once (parts, poly CSR, orderings, invIndex, rangeData) ---
     int *dParts, *dOrderings, *dInvIndex, *dRangeData;
@@ -2428,18 +2593,33 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsSmallerSideGPU(
         cudaMemsetAsync(dProgress, 0, sizeof(int), wbStream);
 
         int gridSize = (curBatch + blockSize - 1) / blockSize;
-        if (useI128)
-            computeWeightsSmallerSideKernelI128<<<gridSize, blockSize, 0, wbStream>>>(
+        if (useI128 && cacheRows)
+            computeWeightsSmallerSideKernelI128<true><<<gridSize, blockSize, 0, wbStream>>>(
+                dSplits, dSplitRangeMeta, dRangeData, dParts,
+                dSsPolyMeta, dSsPolyBoundOffset, dSsPolyBounds, dOrderings, dInvIndex,
+                curBatch, numParts, numPolyParts, numTaxa, totalN, dTwoScores, dProgress);
+        else if (useI128)
+            computeWeightsSmallerSideKernelI128<false><<<gridSize, blockSize, 0, wbStream>>>(
+                dSplits, dSplitRangeMeta, dRangeData, dParts,
+                dSsPolyMeta, dSsPolyBoundOffset, dSsPolyBounds, dOrderings, dInvIndex,
+                curBatch, numParts, numPolyParts, numTaxa, totalN, dTwoScores, dProgress);
+        else if (useDouble && cacheRows)
+            computeWeightsSmallerSideKernel<double, true><<<gridSize, blockSize, 0, wbStream>>>(
                 dSplits, dSplitRangeMeta, dRangeData, dParts,
                 dSsPolyMeta, dSsPolyBoundOffset, dSsPolyBounds, dOrderings, dInvIndex,
                 curBatch, numParts, numPolyParts, numTaxa, totalN, dTwoScores, dProgress);
         else if (useDouble)
-            computeWeightsSmallerSideKernel<double><<<gridSize, blockSize, 0, wbStream>>>(
+            computeWeightsSmallerSideKernel<double, false><<<gridSize, blockSize, 0, wbStream>>>(
+                dSplits, dSplitRangeMeta, dRangeData, dParts,
+                dSsPolyMeta, dSsPolyBoundOffset, dSsPolyBounds, dOrderings, dInvIndex,
+                curBatch, numParts, numPolyParts, numTaxa, totalN, dTwoScores, dProgress);
+        else if (cacheRows)
+            computeWeightsSmallerSideKernel<long long, true><<<gridSize, blockSize, 0, wbStream>>>(
                 dSplits, dSplitRangeMeta, dRangeData, dParts,
                 dSsPolyMeta, dSsPolyBoundOffset, dSsPolyBounds, dOrderings, dInvIndex,
                 curBatch, numParts, numPolyParts, numTaxa, totalN, dTwoScores, dProgress);
         else
-            computeWeightsSmallerSideKernel<long long><<<gridSize, blockSize, 0, wbStream>>>(
+            computeWeightsSmallerSideKernel<long long, false><<<gridSize, blockSize, 0, wbStream>>>(
                 dSplits, dSplitRangeMeta, dRangeData, dParts,
                 dSsPolyMeta, dSsPolyBoundOffset, dSsPolyBounds, dOrderings, dInvIndex,
                 curBatch, numParts, numPolyParts, numTaxa, totalN, dTwoScores, dProgress);
@@ -2786,8 +2966,8 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsTreeWalkGPU(
     jint batchSizeHint, jdouble vramFraction, jint scoreMode, jdouble progressIntervalSec)
 {
     // Defense in depth: Java measures the exact token-stream frontier before
-    // building resident data, but native code independently enforces the fixed
-    // private-array bound before launching either kernel.
+    // building resident data, but native code independently enforces the compiled
+    // maximum before dispatching the smallest fitting private-array variant.
     if (maxFrontier < 1 || maxFrontier > WB_TW_STACK_CAP) {
         fprintf(stderr,
                 "[ASTRAL-X GPU] tree-walk: measured frontier=%d outside stack cap %d → CPU fallback\n",
@@ -2855,7 +3035,7 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsTreeWalkGPU(
         fflush(stderr);
     }
 
-    // --- Determine batch size (per-split: 16 B in + 8/16 B out) ---
+    // --- Determine batch size (metadata + transposed A/B candidate bits + score) ---
     int batchSize;
     if (batchSizeHint == -1) {
         batchSize = numSplits;
@@ -2867,7 +3047,9 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsTreeWalkGPU(
         size_t freeVRAM = 0, totalVRAM = 0;
         cudaMemGetInfo(&freeVRAM, &totalVRAM);
         size_t usable = (size_t)((double)freeVRAM * (double)vramFraction);
-        size_t perSplitBytes = 4 * sizeof(int) + scoresPerSplit * sizeof(long long);
+        size_t perSplitBytes = 4 * sizeof(int)
+                             + (size_t)2 * W * sizeof(unsigned long long)
+                             + scoresPerSplit * sizeof(long long);
         long long autoSize = (long long)(usable / perSplitBytes);
         if (autoSize < 1) autoSize = 1;
         if (autoSize > (long long)numSplits) autoSize = (long long)numSplits;
@@ -2879,20 +3061,24 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsTreeWalkGPU(
             perSplitBytes, batchSize, numSplits, (numSplits + batchSize - 1) / batchSize);
     }
 
-    int*       dSplits    = NULL;
-    long long* dTwoScores = NULL;
+    int*       dSplits        = NULL;
+    long long* dTwoScores     = NULL;
+    unsigned long long* dCandidateBits = NULL;
     while (batchSize > 0) {
         size_t splitBufSz = (size_t)batchSize * 4 * sizeof(int);
         size_t scoreBufSz = (size_t)batchSize * scoresPerSplit * sizeof(long long);
-        cudaError_t e1 = cudaMalloc(&dSplits,    splitBufSz);
-        cudaError_t e2 = cudaMalloc(&dTwoScores, scoreBufSz);
-        if (e1 == cudaSuccess && e2 == cudaSuccess) break;
+        size_t candidateBufSz = (size_t)batchSize * 2 * W * sizeof(unsigned long long);
+        cudaError_t e1 = cudaMalloc(&dSplits,        splitBufSz);
+        cudaError_t e2 = cudaMalloc(&dTwoScores,     scoreBufSz);
+        cudaError_t e3 = cudaMalloc(&dCandidateBits, candidateBufSz);
+        if (e1 == cudaSuccess && e2 == cudaSuccess && e3 == cudaSuccess) break;
         if (dSplits)    { cudaFree(dSplits);    dSplits    = NULL; }
         if (dTwoScores) { cudaFree(dTwoScores); dTwoScores = NULL; }
+        if (dCandidateBits) { cudaFree(dCandidateBits); dCandidateBits = NULL; }
         batchSize /= 2;
         fprintf(stderr, "[ASTRAL-X GPU] cudaMalloc failed, retrying with batchSize=%d\n", batchSize);
     }
-    if (batchSize <= 0 || dSplits == NULL || dTwoScores == NULL) {
+    if (batchSize <= 0 || dSplits == NULL || dTwoScores == NULL || dCandidateBits == NULL) {
         fprintf(stderr, "[ASTRAL-X GPU] FATAL: cannot allocate GPU batch buffers (tree-walk)\n");
         cudaFree(dClusterBits); cudaFree(dGeneLgBits); cudaFree(dNodeStream);
         cudaFree(dTreeNodeOffset); cudaFree(dLeafCount);
@@ -2929,19 +3115,37 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsTreeWalkGPU(
                    (size_t)curBatch * 4 * sizeof(int), cudaMemcpyHostToDevice);
         cudaMemsetAsync(dProgress, 0, sizeof(int), wbStream);
 
+        size_t gatherTotal = (size_t)curBatch * W;
+        unsigned int gatherGrid = (unsigned int)((gatherTotal + WB_BLOCK - 1) / WB_BLOCK);
+        gatherCandidateBits<<<gatherGrid, WB_BLOCK, 0, wbStream>>>(
+            dSplits, dClusterBits, dCandidateBits, curBatch, W);
+
         int gridSize = (curBatch + blockSize - 1) / blockSize;
-        if (useI128)
-            computeWeightsTreeWalkKernelI128<<<gridSize, blockSize, 0, wbStream>>>(
-                dSplits, dClusterBits, dGeneLgBits, dNodeStream, dTreeNodeOffset, dLeafCount,
-                curBatch, numTrees, W, totalN, dTwoScores, dProgress);
-        else if (useDouble)
-            computeWeightsTreeWalkKernel<double><<<gridSize, blockSize, 0, wbStream>>>(
-                dSplits, dClusterBits, dGeneLgBits, dNodeStream, dTreeNodeOffset, dLeafCount,
-                curBatch, numTrees, W, totalN, dTwoScores, dProgress);
-        else
-            computeWeightsTreeWalkKernel<long long><<<gridSize, blockSize, 0, wbStream>>>(
-                dSplits, dClusterBits, dGeneLgBits, dNodeStream, dTreeNodeOffset, dLeafCount,
-                curBatch, numTrees, W, totalN, dTwoScores, dProgress);
+        #define WB_LAUNCH_TREE_WALK(CAP) do { \
+            if (useI128) \
+                computeWeightsTreeWalkKernelI128<CAP><<<gridSize, blockSize, 0, wbStream>>>( \
+                    dSplits, dCandidateBits, dGeneLgBits, dNodeStream, dTreeNodeOffset, dLeafCount, \
+                    curBatch, numTrees, W, totalN, dTwoScores, dProgress); \
+            else if (useDouble) \
+                computeWeightsTreeWalkKernel<double, false, CAP><<<gridSize, blockSize, 0, wbStream>>>( \
+                    dSplits, dCandidateBits, dGeneLgBits, dNodeStream, dTreeNodeOffset, dLeafCount, \
+                    curBatch, numTrees, W, totalN, dTwoScores, dProgress); \
+            else if (totalN <= WB_SMALL_QI_MAX_N) \
+                computeWeightsTreeWalkKernel<long long, true, CAP><<<gridSize, blockSize, 0, wbStream>>>( \
+                    dSplits, dCandidateBits, dGeneLgBits, dNodeStream, dTreeNodeOffset, dLeafCount, \
+                    curBatch, numTrees, W, totalN, dTwoScores, dProgress); \
+            else \
+                computeWeightsTreeWalkKernel<long long, false, CAP><<<gridSize, blockSize, 0, wbStream>>>( \
+                    dSplits, dCandidateBits, dGeneLgBits, dNodeStream, dTreeNodeOffset, dLeafCount, \
+                    curBatch, numTrees, W, totalN, dTwoScores, dProgress); \
+        } while (0)
+
+        if      (maxFrontier <= 32)  WB_LAUNCH_TREE_WALK(32);
+        else if (maxFrontier <= 64)  WB_LAUNCH_TREE_WALK(64);
+        else if (maxFrontier <= 128) WB_LAUNCH_TREE_WALK(128);
+        else if (maxFrontier <= 256) WB_LAUNCH_TREE_WALK(256);
+        else                         WB_LAUNCH_TREE_WALK(512);
+        #undef WB_LAUNCH_TREE_WALK
 
         char wbLabel[64];
         snprintf(wbLabel, sizeof wbLabel,
@@ -2985,7 +3189,7 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsTreeWalkGPU(
     env->SetLongArrayRegion(result, 0, outLen, (jlong*)hTwoScores);
 
     delete[] hTwoScores;
-    cudaFree(dSplits); cudaFree(dTwoScores);
+    cudaFree(dSplits); cudaFree(dTwoScores); cudaFree(dCandidateBits);
     cudaFree(dClusterBits); cudaFree(dGeneLgBits); cudaFree(dNodeStream);
     cudaFree(dTreeNodeOffset); cudaFree(dLeafCount);
     cudaFree(dProgress); cudaFreeHost(hProgress);

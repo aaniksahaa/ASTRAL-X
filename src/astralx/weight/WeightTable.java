@@ -509,42 +509,55 @@ public class WeightTable {
         // treeIdx stored as (p.treeIndex + partTreeOffset) so the kernel reads the
         // original-tree half of the combined orderings/invIndex.
         // [treeIdx, lo1, hi1, lo2, hi2, sz1, sz2, sz3, frequency]
-        int numParts = 0, numPolyParts = 0;
-        long polyBoundsLen = 0;
+        List<PartitionTable.Entry> binEntries = new ArrayList<>();
+        List<PartitionTable.Entry> polyEntries = new ArrayList<>();
         for (PartitionTable.Entry pe : partTable.entries()) {
-            if (pe.exemplar.d == 3) numParts++;
-            else { numPolyParts++; polyBoundsLen += pe.exemplar.d; }
+            if (pe.exemplar.d == 3) binEntries.add(pe);
+            else                    polyEntries.add(pe);
         }
+        Comparator<PartitionTable.Entry> byExemplarTree =
+            Comparator.comparingInt(e -> e.exemplar.treeIndex);
+        // Group equal exemplar trees only for exact accumulators.  LONG/INT128
+        // addition is order-independent here; retaining the original iteration
+        // order in DOUBLE mode also retains its previous rounding behavior.
+        if (!useDouble && partTrees.stream().anyMatch(t -> !t.isComplete)) {
+            binEntries.sort(byExemplarTree);
+            polyEntries.sort(byExemplarTree);
+        }
+        int numParts = binEntries.size(), numPolyParts = polyEntries.size();
+        long polyBoundsLen = 0;
+        for (PartitionTable.Entry pe : polyEntries) polyBoundsLen += pe.exemplar.d;
         int[] partsData = new int[numParts * 9];
         int[] ssPolyMeta        = new int[numPolyParts * 3];
         int[] ssPolyBoundOffset = new int[numPolyParts + 1];
         int[] ssPolyBounds      = new int[(int) polyBoundsLen];
-        int j = 0, pj = 0, boundCur = 0;
-        for (PartitionTable.Entry pe : partTable.entries()) {
+        int j = 0;
+        for (PartitionTable.Entry pe : binEntries) {
             Partition p = pe.exemplar;
-            if (p.d == 3) {
-                int base = j * 9;
-                partsData[base + 0] = p.treeIndex + partTreeOffset;
-                partsData[base + 1] = p.leftStart;
-                partsData[base + 2] = p.leftEnd;
-                partsData[base + 3] = p.rightStart;
-                partsData[base + 4] = p.rightEnd;
-                partsData[base + 5] = p.size1;
-                partsData[base + 6] = p.size2;
-                partsData[base + 7] = p.size3;
-                partsData[base + 8] = pe.frequency;
-                j++;
-            } else {
-                ssPolyMeta[pj * 3 + 0] = p.treeIndex + partTreeOffset;
-                ssPolyMeta[pj * 3 + 1] = partTrees.get(p.treeIndex).leafCount;  // L_GT
-                ssPolyMeta[pj * 3 + 2] = pe.frequency;
-                ssPolyBoundOffset[pj] = boundCur;
-                int k = p.d - 1;                         // # child intervals
-                for (int i = 0; i < k; i++) ssPolyBounds[boundCur + i] = p.partStarts[i];
-                ssPolyBounds[boundCur + k] = p.partEnds[k - 1];   // final boundary = hi
-                boundCur += p.d;
-                pj++;
-            }
+            int base = j * 9;
+            partsData[base + 0] = p.treeIndex + partTreeOffset;
+            partsData[base + 1] = p.leftStart;
+            partsData[base + 2] = p.leftEnd;
+            partsData[base + 3] = p.rightStart;
+            partsData[base + 4] = p.rightEnd;
+            partsData[base + 5] = p.size1;
+            partsData[base + 6] = p.size2;
+            partsData[base + 7] = p.size3;
+            partsData[base + 8] = pe.frequency;
+            j++;
+        }
+        int pj = 0, boundCur = 0;
+        for (PartitionTable.Entry pe : polyEntries) {
+            Partition p = pe.exemplar;
+            ssPolyMeta[pj * 3]     = p.treeIndex + partTreeOffset;
+            ssPolyMeta[pj * 3 + 1] = partTrees.get(p.treeIndex).leafCount;
+            ssPolyMeta[pj * 3 + 2] = pe.frequency;
+            ssPolyBoundOffset[pj] = boundCur;
+            int k = p.d - 1;
+            for (int i = 0; i < k; i++) ssPolyBounds[boundCur + i] = p.partStarts[i];
+            ssPolyBounds[boundCur + k] = p.partEnds[k - 1];
+            boundCur += p.d;
+            pj++;
         }
         ssPolyBoundOffset[numPolyParts] = boundCur;
 
@@ -1658,11 +1671,15 @@ public class WeightTable {
         // a few dozen stack entries, while a pathologically ordered caterpillar can
         // still approach its leaf count.
         TreeWalkFrontier frontier = measureTreeWalkFrontier(partTrees);
+        int selectedStackCap = frontier.entries <= 32 ? 32
+            : frontier.entries <= 64 ? 64
+            : frontier.entries <= 128 ? 128
+            : frontier.entries <= 256 ? 256 : TW_GPU_STACK_CAP;
         Logging.info("GPU tree-walk frontier: required=%d entries (%d B/thread logically; "
-            + "treeIndex=%d, leaves=%d), compiled cap=%d (%d B/thread), numTaxa=%d",
+            + "treeIndex=%d, leaves=%d), selected cap=%d (%d B/thread; compiled max=%d), numTaxa=%d",
             frontier.entries, frontier.entries * 3 * Integer.BYTES,
-            frontier.treeIndex, frontier.leafCount, TW_GPU_STACK_CAP,
-            TW_GPU_STACK_CAP * 3 * Integer.BYTES, n);
+            frontier.treeIndex, frontier.leafCount, selectedStackCap,
+            selectedStackCap * 3 * Integer.BYTES, TW_GPU_STACK_CAP, n);
         if (frontier.entries > TW_GPU_STACK_CAP) {
             Logging.info("GPU tree-walk: measured frontier=%d exceeds stack cap %d — using CPU tree-walk",
                 frontier.entries, TW_GPU_STACK_CAP);
@@ -1675,7 +1692,8 @@ public class WeightTable {
 
         long residentMem = 8L * (d.clusterBits.length + d.geneLgBits.length)
                          + 4L * ((long) d.nodeStream.length + d.treeNodeOffset.length + d.leafCount.length);
-        long perSplit = 4L * Integer.BYTES + (useInt128 ? 2L : 1L) * Long.BYTES;
+        long perSplit = 4L * Integer.BYTES + 2L * d.W * Long.BYTES
+                      + (useInt128 ? 2L : 1L) * Long.BYTES;
 
         int batchSizeHint; String batchDesc;
         if (!cfg.isGpuBatch()) {
