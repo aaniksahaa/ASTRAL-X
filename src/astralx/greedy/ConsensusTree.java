@@ -5,6 +5,8 @@ import astralx.taxon.TaxonRegistry;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.TreeSet;
 import java.util.function.Consumer;
@@ -102,7 +104,9 @@ public final class ConsensusTree {
     public static ConsensusTree snapshot(LaminarForest forest, TaxonHasher hasher) {
         int n = forest.numTaxa;
         int[] counters = new int[3];   // [0]=nextId, [1]=internals, [2]=polytomies
-        SNode root = copyRec(forest.virtualRoot, counters);
+        IdentityHashMap<LaminarNode, Integer> minTaxon = new IdentityHashMap<>();
+        computeMinTaxon(forest.virtualRoot, minTaxon);
+        SNode root = copyRec(forest.virtualRoot, counters, minTaxon);
 
         int[] aCons = new int[n];
         int[] pos = {0};
@@ -130,13 +134,31 @@ public final class ConsensusTree {
                                   aCons, p1, p2);
     }
 
-    private static SNode copyRec(LaminarNode src, int[] counters) {
+    /** Precompute a canonical, order-independent key for every disjoint child. */
+    private static int computeMinTaxon(LaminarNode src,
+                                       IdentityHashMap<LaminarNode, Integer> minima) {
+        int min = src.isLeaf() ? src.taxonId : Integer.MAX_VALUE;
+        for (LaminarNode child : src.children) {
+            min = Math.min(min, computeMinTaxon(child, minima));
+        }
+        minima.put(src, min);
+        return min;
+    }
+
+    private static SNode copyRec(LaminarNode src, int[] counters,
+                                 IdentityHashMap<LaminarNode, Integer> minima) {
         int id = counters[0]++;
         if (src.isLeaf()) {
             return new SNode(id, src.taxonId, Collections.emptyList());
         }
-        List<SNode> kids = new ArrayList<>(src.children.size());
-        for (LaminarNode c : src.children) kids.add(copyRec(c, counters));
+        // Laminar insertion may move children in thread-dependent encounter order.
+        // The children are disjoint, so their minimum taxon IDs are unique and give
+        // a cheap canonical ordering.  This stabilises node IDs, aCons ranges, and
+        // the mapping from deterministic RNG draws to polytomy groups.
+        List<LaminarNode> ordered = new ArrayList<>(src.children);
+        ordered.sort(Comparator.comparingInt(minima::get));
+        List<SNode> kids = new ArrayList<>(ordered.size());
+        for (LaminarNode c : ordered) kids.add(copyRec(c, counters, minima));
         // Don't count the virtual root itself
         if (src.parent >= 0) {
             counters[1]++;

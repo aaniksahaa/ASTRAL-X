@@ -686,11 +686,24 @@ public class Main {
         PhaseLogger.end("Score mode  Species-tree clusters", tc, false);
 
         long tg = PhaseLogger.begin("Score mode  Gene-tree tripartitions", false);
-        PartitionTable genePartitions = new PartitionTable(geneTrees, genePref);
+        // Simple tree-walk consumes the original gene-tree topology directly; it
+        // never reads PartitionTable.  Avoid materialising that very large table
+        // in score-only mode (notably, the 9,524-taxon angiosperm data otherwise
+        // needs tens of GiB merely to reach the weight kernel).
+        PartitionTable genePartitions = null;
+        if (cfg.getWeightIntersectionMethod()
+                != Config.WeightIntersectionMethod.SIMPLE_TREE_WALK) {
+            genePartitions = new PartitionTable(geneTrees, genePref);
+        } else {
+            Logging.info("Score-only tree-walk: skipped unused gene-tree PartitionTable");
+        }
         PhaseLogger.end("Score mode  Gene-tree tripartitions", tg, false);
 
         long td = PhaseLogger.begin("Score mode  Fixed-tree DP transitions", false);
         DPTable speciesDP = new DPTable(speciesTrees, speciesPref, speciesClusters);
+        if (cfg.isAnchorOutgroup()) {
+            speciesDP.applyAnchoredRoot(speciesClusters.getAnchorHash());
+        }
         PhaseLogger.end("Score mode  Fixed-tree DP transitions", td, false);
 
         long tw = PhaseLogger.begin("Score mode  Weight calculation", false);

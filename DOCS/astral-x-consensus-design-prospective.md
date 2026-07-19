@@ -442,16 +442,17 @@ than any micro-optimization in this phase.
 Adaptivity ("≥5 new clusters ⇒ +2 rounds") keys off novelty. Two choices:
 
 - **Local novelty (recommended for scalability):** measure against the
-  thread-local buffer. Removes the race entirely; final X is identical after
-  dedup-on-merge. **Not bit-identical to sequential** (adaptivity now keys off
-  local novelty), but a defensible — arguably better — criterion.
+  task-local buffer. Removes the race entirely and makes the number of rounds
+  reproducible. The resulting X need not equal a racy shared-buffer run because
+  the adaptive stopping point can differ; dedup-on-merge only guarantees that
+  duplicate emissions collapse, not that unexecuted rounds are recovered.
 - **Global novelty (bit-identical to sequential):** measure against global X →
   forces serialization on the shared structure across polytomies that share
   bipartitions. Kills the parallelism.
 
 This is a genuine **speed ↔ exact-reproducibility tradeoff** to decide
-deliberately, not paper over. Recommendation: local novelty, since the final X
-is set-identical and the DP consumes a set.
+deliberately, not paper over. ASTRAL-X uses task-local novelty and canonical
+task ordering/seeding so a fixed input and option set produces a stable X.
 
 ## 11. End-to-End Trace (one polytomy)
 

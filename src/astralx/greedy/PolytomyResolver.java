@@ -45,20 +45,20 @@ public final class PolytomyResolver {
      * costly polytomies start first and short ones fill the gaps — effectively
      * "work-stealing-lite" via the standard executor without any custom queue.
      *
-     * Per-task RNG is seeded deterministically from
-     * {@code baseSeed XOR (thresholdIndex << 32) XOR node.id} so the emission
-     * set is reproducible across runs and threading configurations.
+     * Per-task RNG is seeded deterministically from the threshold and the
+     * polytomy's order-independent taxon-set signature, so the emission set is
+     * reproducible across runs and threading configurations.
      *
      * NO nested {@code Threading.processRangeParallel}: Step A's UPGMA and
      * Step B's resolveByDistance use {@link MiniUPGMA}, which is sequential.
      * This is what makes the outer parallelism safe — otherwise blocked
      * polytomy workers would prevent inner sub-tasks from ever starting.
      *
-     * The shared {@link EmissionBuffer} is a {@code ConcurrentHashMap}; the
-     * Step B adaptive-bonus check uses the {@code putIfAbsent} return value
-     * (one true per newly-accepted signature) so it is unaffected by races
-     * from other threads emitting overlapping signatures — local novelty
-     * (design §10.4 recommendation).
+     * Each task writes to a private {@link EmissionBuffer}.  This is essential:
+     * Step B decides how many adaptive rounds to run from the number of signatures
+     * added by that task.  Measuring a shared concurrent buffer makes that decision
+     * depend on which unrelated task happens to publish first.  Private buffers are
+     * merged in deterministic LPT order after each task completes.
      */
     public static int runAllParallel(List<PolytomyTask> tasks,
                                       List<Tree> geneTrees, SimilarityMatrix sim,
@@ -82,23 +82,33 @@ public final class PolytomyResolver {
         List<PolytomyTask> sorted = new ArrayList<>(tasks);
         sorted.sort((a, b) -> Long.compare(b.estimatedCost(), a.estimatedCost()));
 
-        List<Future<int[]>> futures = new ArrayList<>(sorted.size());
+        List<Future<EmissionBuffer>> futures = new ArrayList<>(sorted.size());
         for (PolytomyTask task : sorted) {
             final PolytomyTask t = task;
-            long seed = baseSeed ^ ((long) t.thresholdIndex << 32) ^ (long) t.node.id;
+            int lo = t.node.rangeLo(), hi = t.node.rangeHi();
+            long signatureSeed = t.tree.sigma1(0, lo, hi)
+                               ^ Long.rotateLeft(t.tree.sigma2(0, lo, hi), 29);
+            long seed = baseSeed ^ ((long) t.thresholdIndex << 32)
+                       ^ signatureSeed ^ ((long) t.node.rangeSize() << 1);
             futures.add(Threading.submit(() -> {
                 Random rng = new Random(seed);
-                int aCount = (sim != null) ? stepA(t, sim, buffer, numTaxa) : 0;
-                int bCount = stepB(t, geneTrees, tours, buffer, numTaxa, rng, sim);
-                return new int[]{aCount, bCount};
+                EmissionBuffer local = new EmissionBuffer();
+                if (sim != null) stepA(t, sim, local, numTaxa);
+                stepB(t, geneTrees, tours, local, numTaxa, rng, sim);
+                return local;
             }));
         }
 
-        int totalA = 0, totalB = 0;
-        for (Future<int[]> f : futures) {
+        int total = 0;
+        for (int i = 0; i < futures.size(); i++) {
             try {
-                int[] c = f.get();
-                totalA += c[0]; totalB += c[1];
+                EmissionBuffer local = futures.get(i).get();
+                for (EmittedBipartition emission : local.all()) {
+                    if (buffer.add(emission)) total++;
+                }
+                // FutureTask retains its result; release completed private buffers
+                // while later (potentially much larger) tasks are still running.
+                futures.set(i, null);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 throw new RuntimeException(e);
@@ -106,7 +116,7 @@ public final class PolytomyResolver {
                 throw new RuntimeException(e.getCause());
             }
         }
-        return totalA + totalB;
+        return total;
     }
 
     /** Stable insertion-order accessor for the polytomy list — used by callers

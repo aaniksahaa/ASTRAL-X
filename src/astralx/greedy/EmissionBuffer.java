@@ -10,8 +10,9 @@ import java.util.concurrent.ConcurrentHashMap;
  *
  * Keyed by {@link ClusterHash} signature.  First-writer-wins: if two threads
  * emit the same signature, only the first record is retained.  This is the
- * "local novelty" model from design §10.4 — each thread tracks newness against
- * its own (or this shared) buffer; final X is set-identical after merge.
+ * In parallel polytomy resolution each task owns one instance, so adaptive-round
+ * novelty cannot be contaminated by emissions from unrelated tasks.  Completed
+ * task buffers are merged deterministically into the caller's instance.
  *
  * Phase 5 integration of these emissions into the global ClusterTable (with
  * exemplars, either by gene-tree lookup or by synthesizing multi-range

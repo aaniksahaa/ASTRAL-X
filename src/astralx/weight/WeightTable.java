@@ -132,6 +132,15 @@ public class WeightTable {
         }
         int numSplits = splitList.size();
 
+        // Nothing below is meaningful for an empty launch, and the native auto-
+        // batching code necessarily divides by the resolved batch size.  This can
+        // occur for a malformed or externally constructed DP table; return a valid
+        // empty weight table instead of entering JNI with numSplits == 0.
+        if (numSplits == 0) {
+            Logging.info("Weight table: no reachable splits to score");
+            return;
+        }
+
         // Per-split score buffers — exactly one is non-null, matching the mode.
         long[]   scoreArray  = (mode == Mode.LONG)   ? new long[numSplits]    : null;  // exact integer
         double[] scoreArrayD = (mode == Mode.DOUBLE) ? new double[numSplits]  : null;  // floating point
