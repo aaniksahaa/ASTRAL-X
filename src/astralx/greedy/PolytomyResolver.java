@@ -57,8 +57,10 @@ public final class PolytomyResolver {
      * Each task writes to a private {@link EmissionBuffer}.  This is essential:
      * Step B decides how many adaptive rounds to run from the number of signatures
      * added by that task.  Measuring a shared concurrent buffer makes that decision
-     * depend on which unrelated task happens to publish first.  Private buffers are
-     * merged in deterministic LPT order after each task completes.
+     * depend on which unrelated task happens to publish first.  Each completed task
+     * merges immediately into the shared buffer; deterministic duplicate selection
+     * there keeps the final set and provenance schedule-independent without retaining
+     * every completed task map behind the slowest LPT task.
      */
     public static int runAllParallel(List<PolytomyTask> tasks,
                                       List<Tree> geneTrees, SimilarityMatrix sim,
@@ -82,7 +84,7 @@ public final class PolytomyResolver {
         List<PolytomyTask> sorted = new ArrayList<>(tasks);
         sorted.sort((a, b) -> Long.compare(b.estimatedCost(), a.estimatedCost()));
 
-        List<Future<EmissionBuffer>> futures = new ArrayList<>(sorted.size());
+        List<Future<Integer>> futures = new ArrayList<>(sorted.size());
         for (PolytomyTask task : sorted) {
             final PolytomyTask t = task;
             int lo = t.node.rangeLo(), hi = t.node.rangeHi();
@@ -95,20 +97,18 @@ public final class PolytomyResolver {
                 EmissionBuffer local = new EmissionBuffer();
                 if (sim != null) stepA(t, sim, local, numTaxa);
                 stepB(t, geneTrees, tours, local, numTaxa, rng, sim);
-                return local;
+                int added = 0;
+                for (EmittedBipartition emission : local.all()) {
+                    if (buffer.add(emission)) added++;
+                }
+                return added;
             }));
         }
 
         int total = 0;
-        for (int i = 0; i < futures.size(); i++) {
+        for (Future<Integer> future : futures) {
             try {
-                EmissionBuffer local = futures.get(i).get();
-                for (EmittedBipartition emission : local.all()) {
-                    if (buffer.add(emission)) total++;
-                }
-                // FutureTask retains its result; release completed private buffers
-                // while later (potentially much larger) tasks are still running.
-                futures.set(i, null);
+                total += future.get();
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 throw new RuntimeException(e);
@@ -275,6 +275,7 @@ public final class PolytomyResolver {
     public static final int STEPB_MAX               = 100;
     public static final int STEPB_IMPROVEMENT_REWARD = 2;
     public static final int STEPB_MIN_FREQ          = 5;
+    public static final double STEPB_MIN_RATIO      = 0.01;
     /** Quadratic NN-ball emission fires only for thresholdIndex < this (ASTRAL-MP
      *  GREEDY_DIST_ADDITTION_LAST_THRESHOLD_INDX = 3): the loosest 3 thresholds. */
     public static final int STEPB_QUADRATIC_MAX_THRESHOLD_INDEX = 3;
@@ -283,8 +284,9 @@ public final class PolytomyResolver {
      * Step B — sampleAndResolve.  Runs {@link #STEPB_DEFAULT_RUNS} base rounds
      * and up to {@link #STEPB_MAX} adaptive bonus rounds (each productive round
      * adds {@link #STEPB_IMPROVEMENT_REWARD} more), per the legacy adaptive
-     * scheme.  A round is "productive" if it adds ≥ {@link #STEPB_MIN_FREQ}
-     * new signatures to the buffer (local novelty per §10.4).
+     * scheme.  As in ASTRAL-MP, a round is productive only when it adds a new
+     * accepted cluster whose support is greater than {@link #STEPB_MIN_FREQ}
+     * and at least {@link #STEPB_MIN_RATIO} of the gene trees.
      *
      * Each round:
      *   1. Pick one random representative taxon per group.
@@ -320,10 +322,11 @@ public final class PolytomyResolver {
         int j = 0;
         while (j < STEPB_DEFAULT_RUNS + adaptBonus) {
             int beforeSize = buffer.size();
-            stepBRound(task, geneTrees, tours, buffer, numTaxa, rng, sim, j, simBuf);
+            boolean productive = stepBRound(
+                task, geneTrees, tours, buffer, numTaxa, rng, sim, j, simBuf);
             int newThisRound = buffer.size() - beforeSize;
             totalNewSignatures += newThisRound;
-            if (newThisRound >= STEPB_MIN_FREQ && adaptBonus < STEPB_MAX) {
+            if (productive && adaptBonus < STEPB_MAX) {
                 adaptBonus += STEPB_IMPROVEMENT_REWARD;
             }
             j++;
@@ -353,15 +356,15 @@ public final class PolytomyResolver {
      *   6. Each accepted bipartition → emit full-taxa bipartition via
      *      smaller-side selection, hashed via the consensus prefix-scan.
      */
-    private static void stepBRound(PolytomyTask task, List<Tree> geneTrees,
-                                    EulerTourBuilder.TourData[] tours,
-                                    EmissionBuffer buffer, int numTaxa, Random rng,
-                                    SimilarityMatrix sim, int roundIndex, double[] simBuf) {
+    private static boolean stepBRound(PolytomyTask task, List<Tree> geneTrees,
+                                      EulerTourBuilder.TourData[] tours,
+                                      EmissionBuffer buffer, int numTaxa, Random rng,
+                                      SimilarityMatrix sim, int roundIndex, double[] simBuf) {
         int d = task.numGroups;
         // Large polytomy: rep-subsets no longer fit in an int → long[] path.
         if (d > 31) {
-            stepBRoundLong(task, geneTrees, tours, buffer, numTaxa, rng, sim, roundIndex, simBuf);
-            return;
+            return stepBRoundLong(
+                task, geneTrees, tours, buffer, numTaxa, rng, sim, roundIndex, simBuf);
         }
         int[] aCons = task.tree.aCons();
         int allBits = (1 << d) - 1;
@@ -407,7 +410,7 @@ public final class PolytomyResolver {
                 counts.put(bm, 1);
             }
         }
-        if (counts.isEmpty()) return;
+        if (counts.isEmpty()) return false;
 
         // ── Step (4): sort by freq desc; deterministic tie-break by bitmap ──
         List<int[]> sorted = new ArrayList<>(counts.size());
@@ -421,13 +424,14 @@ public final class PolytomyResolver {
         //              semantics (LCA + ≥ 2 children moved).
         MiniGreedyBuilder mg = new MiniGreedyBuilder(d);
         boolean anyAccepted = false;
+        boolean productive = false;
         for (int[] entry : sorted) {
-            anyAccepted |= mg.tryInsert(entry[0]);
+            if (mg.tryInsert(entry[0])) {
+                anyAccepted = true;
+                boolean added = emitInducedSplit(entry[0], task, numTaxa, buffer);
+                if (added && isHighSupport(entry[1], geneTrees.size())) productive = true;
+            }
         }
-
-        // ── Step (6): emit each accepted internal cluster bitmap as a full-taxa
-        //              bipartition (smaller side, hashed via consensus prefix scan).
-        mg.forEachAcceptedInternal(bm -> emitInducedSplit(bm, task, numTaxa, buffer));
 
         // ── Step (6b) D2: random resolution of leftover multifurcations (opt-in).
         //   ASTRAL-MP resolveLinearly runs this only when the round accepted ≥1 cluster.
@@ -444,6 +448,12 @@ public final class PolytomyResolver {
         if (sim != null) {
             stepBResolveByDistance(task, reps, sim, numTaxa, buffer, roundIndex);
         }
+        return productive;
+    }
+
+    private static boolean isHighSupport(int frequency, int numGeneTrees) {
+        return frequency > STEPB_MIN_FREQ
+            && (double) frequency / Math.max(1, numGeneTrees) >= STEPB_MIN_RATIO;
     }
 
     /**
@@ -657,8 +667,8 @@ public final class PolytomyResolver {
     }
 
     /** Convert a rep-bitmap into a group-bipartition and emit (smaller side). */
-    private static void emitInducedSplit(int repBitmap, PolytomyTask task,
-                                          int numTaxa, EmissionBuffer buffer) {
+    private static boolean emitInducedSplit(int repBitmap, PolytomyTask task,
+                                             int numTaxa, EmissionBuffer buffer) {
         int d = task.numGroups;
         boolean[] selected = new boolean[d];
         int selectedSize = 0;
@@ -669,8 +679,8 @@ public final class PolytomyResolver {
             }
         }
         int complementSize = numTaxa - selectedSize;
-        if (selectedSize <= 1 || complementSize <= 1) return;
-        if (selectedSize == numTaxa) return;
+        if (selectedSize <= 1 || complementSize <= 1) return false;
+        if (selectedSize == numTaxa) return false;
 
         MultiRange canonical;
         int canonicalSize;
@@ -690,7 +700,7 @@ public final class PolytomyResolver {
             xors[s] = task.tree.combineDisjointSigma2(s, canonical.los, canonical.his);
         }
         ClusterHash sig = new ClusterHash(sums, xors, canonicalSize, m);
-        buffer.add(new EmittedBipartition(
+        return buffer.add(new EmittedBipartition(
             sig, canonical, canonicalSize, 'B', task.thresholdIndex));
     }
 
@@ -830,11 +840,10 @@ public final class PolytomyResolver {
         for (int p = lo; p <= hi; p++) { int g = grp[p]; buf[g >>> 6] |= (1L << (g & 63)); }
     }
 
-    /** Shared Step-B round tail: emit accepted clusters, D2 leftover, resolveByDistance. */
+    /** Shared large-polytomy round tail: D2 leftover and resolveByDistance. */
     private static void finishRoundLong(MiniGreedyBuilderLong mg, boolean anyAccepted,
             PolytomyTask task, int numTaxa, EmissionBuffer buffer, Random rng,
             SimilarityMatrix sim, int[] reps, int W, double[] simBuf) {
-        mg.forEachAcceptedInternal(bm -> emitInducedSplitLong(bm, task, numTaxa, buffer));
         if (Config.getInstance().isStepBRandomLeftoverResolution() && anyAccepted) {
             mg.resolveLeftoverPolytomiesRandomly(rng,
                 bm -> emitInducedSplitLong(bm, task, numTaxa, buffer));
@@ -842,10 +851,10 @@ public final class PolytomyResolver {
         if (sim != null) stepBResolveByDistanceLong(task, reps, sim, numTaxa, buffer, W, simBuf);
     }
 
-    private static void stepBRoundLong(PolytomyTask task, List<Tree> geneTrees,
-                                       EulerTourBuilder.TourData[] tours,
-                                       EmissionBuffer buffer, int numTaxa, Random rng,
-                                       SimilarityMatrix sim, int roundIndex, double[] simBuf) {
+    private static boolean stepBRoundLong(PolytomyTask task, List<Tree> geneTrees,
+                                          EulerTourBuilder.TourData[] tours,
+                                          EmissionBuffer buffer, int numTaxa, Random rng,
+                                          SimilarityMatrix sim, int roundIndex, double[] simBuf) {
         int d = task.numGroups;
         int W = (d + 63) >>> 6;
         int[] aCons = task.tree.aCons();
@@ -868,6 +877,7 @@ public final class PolytomyResolver {
         // ── (2)–(5) collect induced bipartitions, sort by freq, mini-greedy build ──
         MiniGreedyBuilderLong mg = new MiniGreedyBuilderLong(d);
         boolean anyAccepted = false;
+        boolean productive = false;
 
         if (tours != null) {
             // FAST path: 128-bit hash counting + JIT bitmap materialization (memory-lean).
@@ -884,7 +894,7 @@ public final class PolytomyResolver {
                 grpCache[ti] = collectCladesHash(geneTrees.get(ti), tours[ti], reps, d, vg,
                                                  ti, allSum, allXor, counts);
             }
-            if (counts.isEmpty()) return;
+            if (counts.isEmpty()) return false;
             List<java.util.Map.Entry<CladeKey, CladeEntry>> sorted =
                 new ArrayList<>(counts.entrySet());
             sorted.sort((a, b) -> {
@@ -895,7 +905,11 @@ public final class PolytomyResolver {
             for (var e : sorted) {
                 CladeEntry ce = e.getValue();
                 materializeClade(buf, W, grpCache[ce.ti], ce.lo, ce.hi);
-                anyAccepted |= mg.tryInsert(buf);
+                if (mg.tryInsert(buf)) {
+                    anyAccepted = true;
+                    boolean added = emitInducedSplitLong(buf, task, numTaxa, buffer);
+                    if (added && isHighSupport(ce.freq, geneTrees.size())) productive = true;
+                }
             }
         } else {
             // REFERENCE (non-fast) path: exact long[] bitmap counting.
@@ -917,18 +931,26 @@ public final class PolytomyResolver {
                     counts.put(key, 1);
                 }
             }
-            if (counts.isEmpty()) return;
+            if (counts.isEmpty()) return false;
             List<java.util.Map.Entry<BitKey, Integer>> sorted =
                 new ArrayList<>(counts.entrySet());
             sorted.sort((a, b) -> {
                 int c = Integer.compare(b.getValue(), a.getValue());
                 return (c != 0) ? c : BitKey.compare(a.getKey(), b.getKey());
             });
-            for (var e : sorted) anyAccepted |= mg.tryInsert(e.getKey().w);
+            for (var e : sorted) {
+                if (mg.tryInsert(e.getKey().w)) {
+                    anyAccepted = true;
+                    boolean added = emitInducedSplitLong(
+                        e.getKey().w, task, numTaxa, buffer);
+                    if (added && isHighSupport(e.getValue(), geneTrees.size())) productive = true;
+                }
+            }
         }
 
         // ── (6)+(7) emit accepted, D2 leftover, resolveByDistance (shared tail) ──
         finishRoundLong(mg, anyAccepted, task, numTaxa, buffer, rng, sim, reps, W, simBuf);
+        return productive;
     }
 
     private static void stepBResolveByDistanceLong(PolytomyTask task, int[] reps,
@@ -1066,8 +1088,8 @@ public final class PolytomyResolver {
     }
 
     /** Convert a long[] rep-bitmap into a group bipartition and emit (smaller side). */
-    private static void emitInducedSplitLong(long[] repBitmap, PolytomyTask task,
-                                             int numTaxa, EmissionBuffer buffer) {
+    private static boolean emitInducedSplitLong(long[] repBitmap, PolytomyTask task,
+                                                int numTaxa, EmissionBuffer buffer) {
         int d = task.numGroups;
         boolean[] selected = new boolean[d];
         int selectedSize = 0;
@@ -1078,8 +1100,8 @@ public final class PolytomyResolver {
             }
         }
         int complementSize = numTaxa - selectedSize;
-        if (selectedSize <= 1 || complementSize <= 1) return;
-        if (selectedSize == numTaxa) return;
+        if (selectedSize <= 1 || complementSize <= 1) return false;
+        if (selectedSize == numTaxa) return false;
 
         MultiRange canonical;
         int canonicalSize;
@@ -1099,7 +1121,7 @@ public final class PolytomyResolver {
             xors[s] = task.tree.combineDisjointSigma2(s, canonical.los, canonical.his);
         }
         ClusterHash sig = new ClusterHash(sums, xors, canonicalSize, m);
-        buffer.add(new EmittedBipartition(
+        return buffer.add(new EmittedBipartition(
             sig, canonical, canonicalSize, 'B', task.thresholdIndex));
     }
 

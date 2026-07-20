@@ -451,6 +451,7 @@ public class Main {
                 case "--gpu-batches"     -> { if (++i>=args.length) return false; cfg.setGpuNumBatches(Integer.parseInt(args[i])); }
                 case "--gpu-vram-control-factor"   -> { if (++i>=args.length) return false; cfg.setGpuVramControlFactor(Double.parseDouble(args[i])); }
                 case "--gpu-vram-occupancy-factor" -> { if (++i>=args.length) return false; cfg.setGpuVramFraction(Double.parseDouble(args[i])); }
+                case "--gpu-treewalk-vram-cap-mb"  -> { if (++i>=args.length) return false; cfg.setGpuTreeWalkVramCapMiB(Integer.parseInt(args[i])); }
                 case "--gpu-progress-interval"     -> { if (++i>=args.length) return false; cfg.setGpuProgressIntervalSec(Double.parseDouble(args[i])); }
                 case "--gpu-dp-state-space-construction-output-cap" -> { if (++i>=args.length) return false; cfg.setGpuDpStateSpaceConstructionOutputCap(args[i]); }
                 case "--gpu-dp-state-space-progress-time-interval"  -> { if (++i>=args.length) return false; cfg.setGpuDpProgressInterval(Double.parseDouble(args[i])); }

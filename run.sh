@@ -65,6 +65,7 @@ Optional:
   --gpu-batch-size            GPU batch size (manual)
   --gpu-batches               Number of GPU batches (manual)
   --gpu-vram-occupancy-factor Fraction of free VRAM to use for batching (default: 0.75)
+  --gpu-treewalk-vram-cap-mb  Simple-tree-walk automatic batch scratch cap in MiB (default: 512)
   --gpu-progress-interval     GPU weight-kernel progress update interval, seconds (default: auto)
   --gpu-vram-control-factor   Resident-relative batch sizing override
   --gpu-dist-tile-size        Tile size B for GPU distance matrix kernel
@@ -131,7 +132,7 @@ while [[ $# -gt 0 ]]; do
       PROGRAM_ARGS+=("$1" "$2")
       shift 2
       ;;
-    --search-mode|-t|--threads|-m|--seeds|--weight-intersection-method|--anchor-taxon|--gpu-batch-size|--gpu-batches|--gpu-vram-control-factor|--gpu-vram-occupancy-factor|--gpu-progress-interval|--gpu-dp-state-space-construction-output-cap|--gpu-dist-tile-size|--gpu-sim-vram-cap-mb|--dump-completed-gene-trees|--completion-method)
+    --search-mode|-t|--threads|-m|--seeds|--weight-intersection-method|--anchor-taxon|--gpu-batch-size|--gpu-batches|--gpu-vram-control-factor|--gpu-vram-occupancy-factor|--gpu-treewalk-vram-cap-mb|--gpu-progress-interval|--gpu-dp-state-space-construction-output-cap|--gpu-dist-tile-size|--gpu-sim-vram-cap-mb|--dump-completed-gene-trees|--completion-method)
       PROGRAM_ARGS+=("$1" "$2")
       shift 2
       ;;

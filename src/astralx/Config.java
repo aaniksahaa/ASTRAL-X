@@ -105,7 +105,8 @@ public class Config {
 
     /**
      * Manual GPU batch size override (ignored when gpuBatch=false).
-     *   0 (default) — auto: derived from free VRAM via cudaMemGetInfo.
+     *   0 (default) — method-specific auto sizing (free-VRAM occupancy for the
+     *                 legacy scorers; bounded scratch for simple-tree-walk).
      *   > 0         — use exactly this many splits per kernel launch.
      */
     private int gpuBatchSize = 0;
@@ -147,10 +148,23 @@ public class Config {
      * free-VRAM adaptive path (gpuVramFraction) is used.
      *
      * Priority: --no-gpu-batch  >  --gpu-batches  >  --gpu-batch-size
-     *         >  --gpu-vram-control-factor  >  auto (--gpu-vram-occupancy-factor)
+     *         >  --gpu-vram-control-factor  >  method-specific auto sizing
      */
     private double gpuVramControlFactor    = 1.0;
     private boolean gpuVramControlFactorSet = false;
+
+    /**
+     * Maximum automatic batch scratch allocation for the GPU simple-tree-walk
+     * scorer.  The optimized kernel stages both candidate sides in a transposed
+     * [word][split] layout, so its scratch cost is proportional to
+     * 2 * wordsPerSet * numberOfSplits.  Capping that staging area prevents a
+     * large-taxon dataset from consuming most otherwise-free VRAM merely to
+     * reduce the number of equivalent kernel launches.
+     *
+     * Manual batching flags retain priority over this automatic cap.
+     * Configured via --gpu-treewalk-vram-cap-mb. Default: 512 MiB.
+     */
+    private int gpuTreeWalkVramCapMiB = 512;
 
     /**
      * GPU output buffer size for the cross-tree DP state-space construction phase
@@ -244,6 +258,8 @@ public class Config {
     public double getGpuVramControlFactor()       { return gpuVramControlFactor; }
     public boolean isGpuVramControlFactorSet()    { return gpuVramControlFactorSet; }
     public void setGpuVramControlFactor(double f) { this.gpuVramControlFactor = Math.max(0.001, Math.min(1.0, f)); this.gpuVramControlFactorSet = true; }
+    public int getGpuTreeWalkVramCapMiB()         { return gpuTreeWalkVramCapMiB; }
+    public void setGpuTreeWalkVramCapMiB(int cap) { this.gpuTreeWalkVramCapMiB = Math.max(1, cap); }
     /** Raw byte count of the GPU DP output buffer. */
     public long getGpuDpOutputCapBytes()      { return gpuDpOutputCapBytes; }
 

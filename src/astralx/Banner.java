@@ -196,7 +196,7 @@ public class Banner {
         } else if (cfg.isGpuVramControlFactorSet()) {
             batchStr = c(WHT, "vram-control-factor") + c(DIM, "  (resident-relative)");
         } else {
-            batchStr = c(WHT, "auto") + c(DIM, "  (free-VRAM adaptive)");
+            batchStr = c(WHT, "auto") + c(DIM, "  (method-specific)");
         }
         out.println("    " + row("Weight batching",          batchStr));
 
@@ -210,6 +210,9 @@ public class Banner {
                 out.println("    " + row("  VRAM occupancy factor",
                     c(WHT, String.format("%.2f", cfg.getGpuVramFraction()))
                     + c(DIM, "  →  batch = freeVRAM × factor")));
+                out.println("    " + row("  Tree-walk scratch cap",
+                    c(WHT, cfg.getGpuTreeWalkVramCapMiB() + " MiB")
+                    + c(DIM, "  (automatic simple-tree-walk batches)")));
             }
         }
 

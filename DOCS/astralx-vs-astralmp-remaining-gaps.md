@@ -94,13 +94,14 @@ for any node still with ≥3 children, **randomly pairs children** and adds the 
 ASTRAL-X's `MiniGreedyBuilder` emits only the **accepted laminar** clusters — it does **not**
 randomly resolve the leftover polytomies of the sampled tree. → another missing candidate set.
 
-**D3 — Adaptive-round criterion differs.**
+**D3 — Adaptive-round novelty scope differs (support threshold now matched).**
 ASTRAL-MP counts a round "productive" iff it added a bipartition with `freq/|trees| ≥
 GREEDY_ADDITION_MIN_RATIO (0.01)` **and** `freq > GREEDY_ADDITION_MIN_FREQ (5)` (:1421–1426);
 each productive round grants `+2` rounds up to `GREEDY_ADDITION_MAX (100)`.
-ASTRAL-X grants the bonus when a round adds `≥ STEPB_MIN_FREQ (5)` **new signatures** to the buffer
-(local-novelty). Different trigger ⇒ different number of rounds ⇒ different emitted set
-(compounds with the nondeterminism in §3).
+ASTRAL-X now uses those same support conditions. Its newness check is deliberately task-local,
+then task buffers merge concurrently with deterministic duplicate selection. ASTRAL-MP checks
+addition to its shared X, so overlapping polytomies can still receive a different number of bonus
+rounds; ASTRAL-X's choice removes that scheduling race while retaining parallel execution.
 
 ### Smaller detail to verify (probably matched)
 - **Step A exactness**: ASTRAL-MP's `resolveByUPGMA(arms, original=true)` vs ASTRAL-X's `g×g`

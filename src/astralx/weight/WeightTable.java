@@ -1721,8 +1721,16 @@ public class WeightTable {
             batchDesc = String.format("vram-control-factor=%.3f  resident=%.1f MB  batch→%d",
                 F, residentMem / 1e6, (numSplits + batchSizeHint - 1) / Math.max(1, batchSizeHint));
         } else {
-            batchSizeHint = 0;
-            batchDesc = String.format("auto (free-VRAM adaptive, occupancy=%.0f%%)", cfg.getGpuVramFraction() * 100);
+            long capBytes = (long) cfg.getGpuTreeWalkVramCapMiB() * 1024L * 1024L;
+            batchSizeHint = (int) Math.max(1, Math.min((long) numSplits, capBytes / perSplit));
+            int numBatches = (numSplits + batchSizeHint - 1) / batchSizeHint;
+            batchDesc = String.format("auto scratch cap=%d MiB → %d batch%s (batchSize=%d)",
+                cfg.getGpuTreeWalkVramCapMiB(), numBatches, numBatches == 1 ? "" : "es", batchSizeHint);
+            if (numBatches > 1) {
+                Logging.info("GPU tree-walk scratch capped at %d MiB: %d batches; "
+                    + "raise --gpu-treewalk-vram-cap-mb only if this weight step is unusually launch-overhead limited",
+                    cfg.getGpuTreeWalkVramCapMiB(), numBatches);
+            }
         }
 
         Logging.info("Weight table: GPU path (simple-tree-walk)  splits=%d  W=%d  clusters=%d  trees=%d  tokens=%d  resident=%.1f MB  batching=%s",

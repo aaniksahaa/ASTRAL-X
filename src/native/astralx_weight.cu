@@ -3042,7 +3042,7 @@ Java_astralx_gpu_GPUWeightCalculator_computeWeightsTreeWalkGPU(
         fprintf(stderr, "[ASTRAL-X GPU] batching disabled — single launch, %d splits\n", numSplits);
     } else if (batchSizeHint > 0) {
         batchSize = (batchSizeHint < numSplits) ? batchSizeHint : numSplits;
-        fprintf(stderr, "[ASTRAL-X GPU] manual batch size: %d  (numSplits=%d)\n", batchSize, numSplits);
+        fprintf(stderr, "[ASTRAL-X GPU] configured batch size: %d  (numSplits=%d)\n", batchSize, numSplits);
     } else {
         size_t freeVRAM = 0, totalVRAM = 0;
         cudaMemGetInfo(&freeVRAM, &totalVRAM);
