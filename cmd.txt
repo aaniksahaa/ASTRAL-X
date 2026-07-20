@@ -49,12 +49,12 @@
 
 
 # angio complete full with consensus, prefix sum and anchor 
-./run-astralx-with-monitor.sh -i data/all_gt_angio.tre -o data/out-astralx-angio-complete-full.tre --opts "--search-mode full -vv --autocomplete-incomplete-gene-trees --consensus-experimental --stepb-quadratic-nn-balls --stepb-random-leftover-resolution --stepb-process-large-polytomies" --reference-species-tree data/s_tree_angio.tre
+./run-astralx-with-monitor.sh -i data/angio/all_gt_angio.tre -o data/angio/out-astralx-angio-complete-full.tre --opts "--search-mode full -vv --autocomplete-incomplete-gene-trees --consensus-experimental --stepb-quadratic-nn-balls --stepb-random-leftover-resolution --stepb-process-large-polytomies" --reference-species-tree data/angio/s_tree_angio.tre
 
 
 
 # angio complete full with consensus and anchor and simple-tree-walk 
-./run-astralx-with-monitor.sh -i data/all_gt_angio.tre -o data/out-astralx-angio-complete-full.tre --opts "--search-mode full -vv --autocomplete-incomplete-gene-trees --consensus-experimental --stepb-quadratic-nn-balls --stepb-random-leftover-resolution --stepb-process-large-polytomies --weight-intersection-method simple-tree-walk" --reference-species-tree data/s_tree_angio.tre
+./run-astralx-with-monitor.sh -i data/angio/all_gt_angio.tre -o data/angio/out-astralx-angio-complete-full.tre --opts "--search-mode full -vv --autocomplete-incomplete-gene-trees --consensus-experimental --stepb-quadratic-nn-balls --stepb-random-leftover-resolution --stepb-process-large-polytomies --weight-intersection-method simple-tree-walk" --reference-species-tree data/angio/s_tree_angio.tre
 
 
 
