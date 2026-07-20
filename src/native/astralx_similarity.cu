@@ -37,14 +37,12 @@
 #include <string.h>
 #include <math.h>
 #include <time.h>
-#include <unistd.h>
+#include "astralx_platform.h"
 
 // ── Utility: timing ──────────────────────────────────────────────────────────
 
 static double sim_now_sec() {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return ts.tv_sec + ts.tv_nsec * 1e-9;
+    return astralx_now_sec();
 }
 
 static void sim_fmt_duration(double sec, char* buf, int bufsz) {
@@ -57,7 +55,7 @@ static void sim_fmt_duration(double sec, char* buf, int bufsz) {
 static int sim_use_color() {
     if (getenv("NO_COLOR"))    return 0;
     if (getenv("FORCE_COLOR")) return 1;
-    return isatty(STDERR_FILENO);
+    return astralx_stderr_isatty();
 }
 
 static void sim_fmt_rate(double rate, char* buf, int bufsz) {

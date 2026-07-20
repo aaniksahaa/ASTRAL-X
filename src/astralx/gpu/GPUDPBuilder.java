@@ -15,6 +15,7 @@ public class GPUDPBuilder {
 
     private static volatile boolean loaded = false;
     private static volatile boolean loadAttempted = false;
+    private static volatile String loadError = "not attempted";
 
     public static synchronized boolean tryLoad() {
         if (loadAttempted) return loaded;
@@ -22,11 +23,15 @@ public class GPUDPBuilder {
         try {
             System.loadLibrary("astralx_dp");
             loaded = true;
-        } catch (UnsatisfiedLinkError e) {
+            loadError = "";
+        } catch (UnsatisfiedLinkError | SecurityException e) {
             loaded = false;
+            loadError = e.getClass().getSimpleName() + ": " + e.getMessage();
         }
         return loaded;
     }
+
+    public static String getLoadError() { return loadError; }
 
     /**
      * Find all cross-tree DP transitions on GPU.

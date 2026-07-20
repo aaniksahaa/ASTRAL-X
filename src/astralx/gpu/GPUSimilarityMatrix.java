@@ -36,6 +36,7 @@ public class GPUSimilarityMatrix {
 
     private static volatile boolean loaded    = false;
     private static volatile boolean attempted = false;
+    private static volatile String loadError = "not attempted";
 
     public static synchronized boolean tryLoad() {
         if (attempted) return loaded;
@@ -43,13 +44,16 @@ public class GPUSimilarityMatrix {
         try {
             System.loadLibrary("astralx_sim");
             loaded = true;
-        } catch (UnsatisfiedLinkError e) {
+            loadError = "";
+        } catch (UnsatisfiedLinkError | SecurityException e) {
             loaded = false;
+            loadError = e.getClass().getSimpleName() + ": " + e.getMessage();
         }
         return loaded;
     }
 
     public static boolean isLoaded() { return loaded; }
+    public static String getLoadError() { return loadError; }
 
     /**
      * Compute the pairwise similarity matrix on GPU using the bridge formula.

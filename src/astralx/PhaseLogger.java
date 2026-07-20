@@ -20,6 +20,7 @@ import java.util.concurrent.atomic.AtomicLong;
  *           peak VRAM (this step): 231 MiB │ peak VRAM (so far): 231 MiB
  */
 public class PhaseLogger {
+    private static volatile String currentPhase = "startup";
 
     // ── ANSI colours (shared detection with Banner) ───────────────────────────
     private static final boolean COLOR = Banner.useColor();
@@ -169,6 +170,7 @@ public class PhaseLogger {
      * @return System.nanoTime() snapshot for passing to {@link #end}
      */
     public static long begin(String label, boolean gpu) {
+        currentPhase = label;
         startCpuPolling();
         if (gpu) startVramPolling();
         String tag = gpu ? c(GRN, "[GPU]") : c(CYAN, "[CPU]");
@@ -195,5 +197,9 @@ public class PhaseLogger {
         if (vramStr != null) {
             System.err.println("        " + vramStr);
         }
+        currentPhase = "between phases";
     }
+
+    /** Last phase label, included in fatal diagnostic reports. */
+    public static String currentPhase() { return currentPhase; }
 }

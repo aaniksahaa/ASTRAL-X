@@ -11,4 +11,6 @@ backups/
 
 *.zip
 
+# Self-contained release images and archives produced by build_portable.*
+dist/
 

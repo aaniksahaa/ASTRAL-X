@@ -20,6 +20,15 @@ public class GPUWeightCalculator {
 
     private static volatile boolean loaded = false;
     private static volatile boolean loadAttempted = false;
+    private static volatile String loadError = "not attempted";
+    private static volatile Probe cachedProbe;
+
+    /** Result of probing the actual CUDA runtime, independent of nvidia-smi. */
+    public record Probe(boolean libraryLoaded, boolean cudaAvailable,
+                        String deviceName, int deviceCount,
+                        int computeMajor, int computeMinor,
+                        int driverVersion, int runtimeVersion,
+                        long freeMiB, long totalMiB, String detail) {}
 
     /** Try to load the native library; returns true on success. */
     public static synchronized boolean tryLoad() {
@@ -28,13 +37,68 @@ public class GPUWeightCalculator {
         try {
             System.loadLibrary("astralx_weight");
             loaded = true;
-        } catch (UnsatisfiedLinkError e) {
+            loadError = "";
+        } catch (UnsatisfiedLinkError | SecurityException e) {
             // Not a fatal error — caller falls back to CPU path
+            loaded = false;
+            loadError = e.getClass().getSimpleName() + ": " + e.getMessage();
         }
         return loaded;
     }
 
     public static boolean isLoaded() { return loaded; }
+    public static String getLoadError() { return loadError; }
+
+    /**
+     * Load the backend and ask CUDA itself whether a usable device/driver exists.
+     * The result is cached because probing initializes the CUDA runtime.
+     */
+    public static synchronized Probe probe() {
+        if (cachedProbe != null) return cachedProbe;
+        if (!tryLoad()) {
+            cachedProbe = new Probe(false, false, "", 0, 0, 0, 0, 0, 0, 0,
+                "native CUDA backend could not be loaded: " + loadError);
+            return cachedProbe;
+        }
+        try {
+            String status = queryGPUStatus();
+            cachedProbe = parseProbe(status);
+        } catch (Throwable t) {
+            cachedProbe = new Probe(true, false, "", 0, 0, 0, 0, 0, 0, 0,
+                "CUDA probe failed: " + t.getClass().getSimpleName() + ": " + t.getMessage());
+        }
+        return cachedProbe;
+    }
+
+    private static Probe parseProbe(String status) {
+        if (status == null || status.isBlank()) {
+            return new Probe(true, false, "", 0, 0, 0, 0, 0, 0, 0,
+                "CUDA probe returned no status");
+        }
+        java.util.Map<String,String> kv = new java.util.HashMap<>();
+        String[] fields = status.split(";", -1);
+        for (int i = 1; i < fields.length; i++) {
+            int eq = fields[i].indexOf('=');
+            if (eq > 0) kv.put(fields[i].substring(0, eq), fields[i].substring(eq + 1));
+        }
+        boolean ok = fields[0].equals("OK");
+        return new Probe(true, ok,
+            kv.getOrDefault("name", ""), intValue(kv, "devices"),
+            intValue(kv, "ccMajor"), intValue(kv, "ccMinor"),
+            intValue(kv, "driver"), intValue(kv, "runtime"),
+            longValue(kv, "freeMiB"), longValue(kv, "totalMiB"),
+            kv.getOrDefault("detail", status));
+    }
+
+    private static int intValue(java.util.Map<String,String> kv, String key) {
+        try { return Integer.parseInt(kv.getOrDefault(key, "0")); }
+        catch (NumberFormatException e) { return 0; }
+    }
+
+    private static long longValue(java.util.Map<String,String> kv, String key) {
+        try { return Long.parseLong(kv.getOrDefault(key, "0")); }
+        catch (NumberFormatException e) { return 0L; }
+    }
 
     /**
      * Compute 2*score for every split on the GPU (prefix-sum tree-DP) with
@@ -280,4 +344,7 @@ public class GPUWeightCalculator {
      * Returns long[2] = {freeMiB, totalMiB}, or null if unavailable.
      */
     public static native long[] queryVRAMMiB();
+
+    /** Machine-readable CUDA/device probe used for auto-selection and diagnostics. */
+    private static native String queryGPUStatus();
 }

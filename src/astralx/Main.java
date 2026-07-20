@@ -37,12 +37,27 @@ import java.util.List;
 public class Main {
     public static final String VERSION = "0.1.0";
 
-    public static void main(String[] args) throws Exception {
+    public static void main(String[] args) {
+        try {
+            run(args);
+        } catch (Throwable t) {
+            FatalReporter.report(t, args);
+            System.exit(1);
+        }
+    }
+
+    private static void run(String[] args) throws Exception {
         Config cfg = Config.getInstance();
         if (!parseArgs(args, cfg)) { printUsage(); System.exit(1); }
 
         Logging.setLevel(cfg.getVerbosity());
+        resolveComputeMode(cfg);
         Banner.print(cfg);
+
+        if (cfg.isDiagnose()) {
+            RuntimeDiagnostics.print(cfg);
+            return;
+        }
 
         Threading.start(cfg.getThreadCount());
         long t0 = System.nanoTime();
@@ -382,8 +397,10 @@ public class Main {
                     cfg.setScoreSpeciesTreeFile(args[i]);
                 }
                 case "-t","--threads"  -> { if (++i>=args.length) return false; cfg.setThreadCount(Integer.parseInt(args[i])); }
+                case "--auto"          -> cfg.setComputeMode(Config.ComputeMode.AUTO);
                 case "--cpu"           -> cfg.setComputeMode(Config.ComputeMode.CPU);
                 case "--gpu"           -> cfg.setComputeMode(Config.ComputeMode.GPU);
+                case "--gpu-strict"    -> { cfg.setComputeMode(Config.ComputeMode.GPU); cfg.setGpuStrict(true); }
                 case "--search-mode"   -> {
                     if (++i >= args.length) return false;
                     cfg.setSearchMode(args[i].equalsIgnoreCase("full")
@@ -488,11 +505,44 @@ public class Main {
                 case "--dump-completed-gene-trees" -> { if (++i>=args.length) return false; cfg.setDumpCompletedTreesFile(args[i]); }
                 case "--gpu-dist-tile-size" -> { if (++i>=args.length) return false; cfg.setGpuDistTileSizeB(Integer.parseInt(args[i])); }
                 case "--gpu-sim-vram-cap-mb" -> { if (++i>=args.length) return false; cfg.setGpuSimilarityVramCapMiB(Integer.parseInt(args[i])); }
+                case "--diagnose"       -> cfg.setDiagnose(true);
+                case "--version"        -> { System.out.println("ASTRAL-X " + VERSION); System.exit(0); }
                 case "-h","--help"     -> { printUsage(); System.exit(0); }
                 default -> { System.err.println("Unknown arg: " + args[i]); return false; }
             }
         }
-        return cfg.getInputFile() != null;
+        return cfg.getInputFile() != null || cfg.isDiagnose();
+    }
+
+    /** Resolve AUTO/GPU requests using the bundled CUDA backend itself. */
+    private static void resolveComputeMode(Config cfg) {
+        Config.ComputeMode requested = cfg.getRequestedComputeMode();
+        if (requested == Config.ComputeMode.CPU) {
+            cfg.resolveComputeMode(Config.ComputeMode.CPU, "explicit --cpu");
+            return;
+        }
+
+        GPUWeightCalculator.Probe probe = GPUWeightCalculator.probe();
+        if (probe.cudaAvailable()) {
+            String selection = requested == Config.ComputeMode.AUTO
+                ? "auto-selected CUDA device " + probe.deviceName()
+                : "CUDA device " + probe.deviceName();
+            cfg.resolveComputeMode(Config.ComputeMode.GPU, selection);
+            return;
+        }
+
+        String reason = probe.detail();
+        if (requested == Config.ComputeMode.GPU && cfg.isGpuStrict()) {
+            throw new IllegalStateException("--gpu-strict requested, but CUDA is unavailable: " + reason);
+        }
+        cfg.resolveComputeMode(Config.ComputeMode.CPU,
+            (requested == Config.ComputeMode.AUTO ? "automatic CPU fallback: " : "GPU unavailable; CPU fallback: ")
+            + reason);
+        if (requested == Config.ComputeMode.GPU) {
+            Logging.warn("GPU requested but unavailable; continuing on CPU. %s", reason);
+        } else {
+            Logging.info("CUDA unavailable; using CPU. %s", reason);
+        }
     }
 
     /**
@@ -656,13 +706,74 @@ public class Main {
     }
 
     private static void printUsage() {
-        System.err.println("ASTRAL-X v" + VERSION);
-        System.err.println("Usage: astralx -i <input.tre> [-o <out>] [options]");
-        System.err.println("       astralx -i <gene_trees.tre> --score-species-tree <species.tre>");
-        System.err.println("  --verify-parse   dump Phase-1 output and exit");
-        System.err.println("  --verify-hash    dump Phase-2 output and exit");
-        System.err.println("  -c, --score, --species-tree <tree>  score supplied species tree and exit");
-        System.err.println("  -v/-vv/-vvv      verbosity levels");
+        System.err.print("""
+            ASTRAL-X %s
+
+            Usage:
+              astralx -i <gene_trees.tre> [-o <species_tree.tre>] [options]
+              astralx -i <gene_trees.tre> --score-species-tree <species_tree.tre> [options]
+              astralx --diagnose
+
+            General:
+              -i, --input FILE                 Input gene trees (one Newick tree per line)
+              -o, --output FILE                Output species tree (stdout when omitted)
+              -c, --score-species-tree FILE    Score one supplied species tree and exit
+              -t, --threads N                  CPU worker threads (default: available cores)
+              --auto                           Automatically use CUDA or fall back to CPU (default)
+              --cpu                            Force CPU execution; do not require GPU libraries
+              --gpu                            Prefer CUDA; warn and fall back to CPU if unavailable
+              --gpu-strict                     Require CUDA; fail before reading input if unavailable
+              --diagnose                       Print installation/hardware diagnostics and exit
+              --version                        Print version and exit
+              -h, --help                       Show this help and exit
+              -q, --quiet | -v | -vv | -vvv   Quiet, info, debug, or trace logging
+
+            Search and scoring:
+              --search-mode local|full         DP search mode (default: local)
+              --weight-intersection-method M   prefix-sum | smaller-side-traversal |
+                                                bitset | simple-tree-walk
+              --large-n-score-type T            int128 (exact) | double
+              --anchor-outgroup                 Enable anchored outgroup reduction (default)
+              --no-anchor-outgroup              Disable anchored outgroup reduction
+              --anchor-taxon ID                 Anchor taxon ID (default: 0)
+              --no-prune-search-space           Disable reachability pruning
+              --rooted | --unrooted             Input treatment (default: unrooted)
+              -m, --seeds N                     Number of cluster-hash seeds
+
+            Incomplete trees and enrichment:
+              --autocomplete-incomplete-gene-trees
+              --completion-method similarity|distance
+              --consensus-experimental
+              --stepb-restriction dlogd|n
+              --stepb-quadratic-nn-balls
+              --stepb-random-leftover-resolution
+              --stepb-process-large-polytomies
+              --resolve-input-gene-tree-polytomies
+
+            GPU memory and batching:
+              --no-gpu-batch
+              --gpu-batch-size N
+              --gpu-batches N
+              --gpu-vram-occupancy-factor F
+              --gpu-vram-control-factor F
+              --gpu-treewalk-vram-cap-mb MiB    Default: 512
+              --gpu-sim-vram-cap-mb MiB         Default: 512
+              --gpu-dist-tile-size N
+              --gpu-dp-state-space-construction-output-cap SIZE
+              --gpu-progress-interval SECONDS
+
+            Verification/debug outputs:
+              --verify-parse | --verify-hash | --verify-clusters
+              --verify-partitions | --verify-dp | --verify-weights
+              --verify-distance-matrix | --verify-similarity-matrix
+              --verify-upgma | --verify-greedy-consensus
+              --dump-clusters FILE
+              --dump-completed-gene-trees FILE
+
+            The standalone distribution includes its own Java runtime. CUDA is optional;
+            a missing/incompatible NVIDIA driver always has a CPU fallback unless
+            --gpu-strict is used.
+            """.formatted(VERSION));
     }
 
     private static void runScoreOnly(Config cfg, TaxonRegistry registry,

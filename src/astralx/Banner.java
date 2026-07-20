@@ -2,10 +2,7 @@ package astralx;
 
 import astralx.gpu.GPUWeightCalculator;
 
-import java.io.BufferedReader;
-import java.io.InputStreamReader;
 import java.io.PrintStream;
-import java.util.concurrent.TimeUnit;
 
 /**
  * Startup banner: system info + run configuration.
@@ -49,38 +46,6 @@ public class Banner {
         return USE_COLOR ? code + text + RST : text;
     }
 
-    // ── GPU info via nvidia-smi (500 ms timeout, non-fatal) ───────────────────
-
-    private record GpuInfo(String name, long totalMiB, long freeMiB) {}
-
-    private static GpuInfo queryGpuInfo() {
-        try {
-            Process p = new ProcessBuilder(
-                "nvidia-smi",
-                "--query-gpu=name,memory.total,memory.free",
-                "--format=csv,noheader,nounits"
-            ).redirectErrorStream(true).start();
-
-            boolean done = p.waitFor(500, TimeUnit.MILLISECONDS);
-            if (!done) { p.destroyForcibly(); return null; }
-
-            try (BufferedReader br = new BufferedReader(
-                    new InputStreamReader(p.getInputStream()))) {
-                String line = br.readLine();
-                if (line == null) return null;
-                String[] parts = line.split(",");
-                if (parts.length < 3) return null;
-                return new GpuInfo(
-                    parts[0].trim(),
-                    Long.parseLong(parts[1].trim()),
-                    Long.parseLong(parts[2].trim())
-                );
-            }
-        } catch (Exception e) {
-            return null;
-        }
-    }
-
     private static String fmtMiB(long mib) {
         return mib >= 1024 ? String.format("%.1f GB", mib / 1024.0) : mib + " MB";
     }
@@ -121,21 +86,24 @@ public class Banner {
             c(WHT, available + " cores available"),
             c(available == using ? WHT : YLW, using + " threads configured")));
 
-        boolean libLoaded = GPUWeightCalculator.tryLoad();
-        GpuInfo gpu = queryGpuInfo();
-        if (gpu != null) {
-            String libTag = libLoaded
-                ? "  " + c(GRN, "✓ library loaded")
-                : "  " + c(YLW, "⚠ library not found (CPU fallback)");
+        GPUWeightCalculator.Probe gpuProbe = GPUWeightCalculator.probe();
+        if (gpuProbe.cudaAvailable()) {
+            String device = gpuProbe.deviceName() + "  (CC "
+                + gpuProbe.computeMajor() + "." + gpuProbe.computeMinor() + ")";
             out.println("    " + String.format("%-8s %s  ·  %s total  ·  %s free%s",
                 "GPU",
-                c(WHT, gpu.name()),
-                c(WHT, fmtMiB(gpu.totalMiB())),
-                c(gpu.freeMiB() > gpu.totalMiB() / 4 ? GRN : YLW, fmtMiB(gpu.freeMiB())),
-                libTag));
+                c(WHT, device),
+                c(WHT, fmtMiB(gpuProbe.totalMiB())),
+                c(gpuProbe.freeMiB() > gpuProbe.totalMiB() / 4 ? GRN : YLW,
+                    fmtMiB(gpuProbe.freeMiB())),
+                "  " + c(GRN, "✓ CUDA usable")));
         } else {
             out.println("    " + String.format("%-8s %s",
-                "GPU", c(YLW, "not detected  (nvidia-smi unavailable)")));
+                "GPU", c(YLW, "unavailable  (CPU fallback ready)")));
+            if (cfg.getRequestedComputeMode() != Config.ComputeMode.CPU) {
+                out.println("    " + String.format("%-8s %s", "",
+                    c(DIM, gpuProbe.detail())));
+            }
         }
         out.println();
 
@@ -163,7 +131,9 @@ public class Banner {
         out.println();
 
         // ── Compute ────────────────────────────────────────────────────────
-        out.println("    " + row("Compute mode",   gpuMode ? c(GRN, "GPU") : c(WHT, "CPU")));
+        String computeValue = gpuMode ? c(GRN, "GPU") : c(WHT, "CPU");
+        computeValue += c(DIM, "  (" + cfg.getComputeModeDetail() + ")");
+        out.println("    " + row("Compute mode", computeValue));
         out.println("    " + row("CPU threads",    c(available == using ? WHT : YLW, String.valueOf(using))
                                                   + c(DIM, "  (" + available + " available)")));
         out.println("    " + row("Tree treatment", c(WHT, cfg.getTreatAsUnrooted() ? "unrooted" : "rooted")));

@@ -1,0 +1,125 @@
+name: Portable artifact set
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+# One artifact is published per OS/CPU family. Linux and Windows artifacts are
+# built on native NVIDIA runners and include both CUDA and automatic CPU
+# fallback. macOS artifacts are CPU-only because CUDA is unavailable there.
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x86-64
+            runs_on: '["self-hosted","linux","x64","nvidia-cuda"]'
+            family: unix
+            cuda: true
+          - name: Linux ARM64
+            runs_on: '["self-hosted","linux","arm64","nvidia-cuda"]'
+            family: unix
+            cuda: true
+          - name: Windows x86-64
+            runs_on: '["self-hosted","windows","x64","nvidia-cuda"]'
+            family: windows
+            cuda: true
+          - name: macOS Intel
+            runs_on: '"macos-15-intel"'
+            family: unix
+            cuda: false
+          - name: macOS Apple Silicon
+            runs_on: '"macos-15"'
+            family: unix
+            cuda: false
+    runs-on: ${{ fromJSON(matrix.runs_on) }}
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Build CUDA + CPU-fallback artifact
+        if: matrix.family == 'unix' && matrix.cuda
+        shell: bash
+        run: ./build_portable.sh --with-cuda
+
+      - name: Build CPU-only macOS artifact
+        if: matrix.family == 'unix' && !matrix.cuda
+        shell: bash
+        run: ./build_portable.sh --cpu-only
+
+      - name: Build CUDA + CPU-fallback artifact
+        if: matrix.family == 'windows'
+        shell: pwsh
+        run: ./build_portable.ps1 -WithCuda
+
+      - name: Validate real CUDA execution
+        if: matrix.cuda && matrix.family == 'unix'
+        shell: bash
+        run: |
+          launcher="$(find dist -maxdepth 3 -type f -path '*/bin/astralx' | head -1)"
+          "$launcher" --gpu-strict --diagnose
+          output="$("$launcher" --gpu-strict --search-mode full \
+            --weight-intersection-method simple-tree-walk \
+            -i test/input/tc1_complete_only.tre -o cuda-smoke.tre -vv 2>&1)"
+          grep -q 'optimal quartet score = 10' <<<"$output"
+
+      - name: Validate real CUDA execution
+        if: matrix.cuda && matrix.family == 'windows'
+        shell: pwsh
+        run: |
+          $launcher = Get-ChildItem dist -Recurse -Filter astralx.exe | Select-Object -First 1
+          & $launcher.FullName --gpu-strict --diagnose
+          if ($LASTEXITCODE -ne 0) { throw "CUDA diagnostic failed." }
+          $output = (& $launcher.FullName --gpu-strict --search-mode full `
+            --weight-intersection-method simple-tree-walk `
+            -i test/input/tc1_complete_only.tre -o cuda-smoke.tre -vv 2>&1 | Out-String)
+          if ($LASTEXITCODE -ne 0 -or $output -notmatch 'optimal quartet score = 10') {
+            throw "Packaged CUDA inference did not produce the exact oracle score."
+          }
+
+      - name: Upload canonical checksummed archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: |
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256
+            dist/*.zip
+            dist/*.zip.sha256
+          if-no-files-found: error
+
+  publish-release:
+    name: Publish one artifact per platform
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download complete native artifact set
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Create GitHub release and upload artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1 || \
+            gh release create "${GITHUB_REF_NAME}" --title "ASTRAL-X ${GITHUB_REF_NAME}" --generate-notes
+          gh release upload "${GITHUB_REF_NAME}" release-assets/* --clobber
+

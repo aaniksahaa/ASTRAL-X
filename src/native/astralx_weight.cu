@@ -61,9 +61,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
-#include <unistd.h>
 #include <cuda_runtime.h>
 #include <jni.h>
+#include "astralx_platform.h"
 
 // Fixed block size.  Must match the static reduction buffer below and the
 // dynamic shared-memory scan area sized on the host.
@@ -1795,9 +1795,7 @@ __global__ void computeWeightsTreeWalkKernelI128(
 // ---------------------------------------------------------------------------
 
 static double wb_now_sec(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+    return astralx_now_sec();
 }
 
 // Format a duration in seconds as "4s", "1m23s", "2h05m"
@@ -1871,8 +1869,7 @@ static cudaError_t wb_poll_progress(cudaStream_t kStream, cudaStream_t pollStrea
             if (printed) { fprintf(stderr, "\n"); fflush(stderr); }   // finalize the line
             return q;
         }
-        struct timespec ts = { 0, 100L * 1000L * 1000L };  // 100 ms slice (responsive)
-        nanosleep(&ts, NULL);
+        astralx_sleep_millis(100);  // responsive polling without busy-waiting
 
         double now = wb_now_sec();
         if (now - t0 < interval || now - lastPrint < interval) continue;
@@ -1907,9 +1904,77 @@ static cudaError_t wb_poll_progress(cudaStream_t kStream, cudaStream_t pollStrea
 
 extern "C" {
 
+#ifndef ASTRALX_MIN_CUDA_CC
+#define ASTRALX_MIN_CUDA_CC 0
+#endif
+
 // ---------------------------------------------------------------------------
 // queryVRAMMiB: lightweight VRAM probe for Java-side phase logging
 // ---------------------------------------------------------------------------
+JNIEXPORT jstring JNICALL
+Java_astralx_gpu_GPUWeightCalculator_queryGPUStatus(JNIEnv* env, jclass cls)
+{
+    int driverVersion = 0, runtimeVersion = 0, deviceCount = 0;
+    cudaError_t driverErr = cudaDriverGetVersion(&driverVersion);
+    cudaError_t runtimeErr = cudaRuntimeGetVersion(&runtimeVersion);
+    cudaError_t countErr = cudaGetDeviceCount(&deviceCount);
+    char buf[1024];
+
+    if (driverErr != cudaSuccess || runtimeErr != cudaSuccess
+            || countErr != cudaSuccess || deviceCount < 1) {
+        cudaError_t primary = driverErr != cudaSuccess ? driverErr
+                            : runtimeErr != cudaSuccess ? runtimeErr : countErr;
+        const char* detail = deviceCount < 1 && primary == cudaSuccess
+            ? "no CUDA-capable device found" : cudaGetErrorString(primary);
+        snprintf(buf, sizeof(buf),
+            "ERROR;devices=%d;driver=%d;runtime=%d;detail=%s (%s, code %d)",
+            deviceCount, driverVersion, runtimeVersion, detail,
+            cudaGetErrorName(primary), (int)primary);
+        return env->NewStringUTF(buf);
+    }
+
+    int device = 0;
+    cudaError_t devErr = cudaGetDevice(&device);
+    cudaDeviceProp prop{};
+    cudaError_t propErr = devErr == cudaSuccess
+        ? cudaGetDeviceProperties(&prop, device) : devErr;
+    size_t freeBytes = 0, totalBytes = 0;
+    cudaError_t memErr = propErr == cudaSuccess
+        ? cudaMemGetInfo(&freeBytes, &totalBytes) : propErr;
+    if (propErr != cudaSuccess || memErr != cudaSuccess) {
+        cudaError_t primary = propErr != cudaSuccess ? propErr : memErr;
+        snprintf(buf, sizeof(buf),
+            "ERROR;devices=%d;driver=%d;runtime=%d;detail=%s (%s, code %d)",
+            deviceCount, driverVersion, runtimeVersion, cudaGetErrorString(primary),
+            cudaGetErrorName(primary), (int)primary);
+        return env->NewStringUTF(buf);
+    }
+
+    const int deviceCc = prop.major * 10 + prop.minor;
+    if (ASTRALX_MIN_CUDA_CC > 0 && deviceCc < ASTRALX_MIN_CUDA_CC) {
+        snprintf(buf, sizeof(buf),
+            "ERROR;devices=%d;name=%s;ccMajor=%d;ccMinor=%d;driver=%d;runtime=%d;"
+            "detail=GPU compute capability %d.%d is older than this artifact's minimum %d.%d; use CPU fallback",
+            deviceCount, prop.name, prop.major, prop.minor, driverVersion, runtimeVersion,
+            prop.major, prop.minor, ASTRALX_MIN_CUDA_CC / 10, ASTRALX_MIN_CUDA_CC % 10);
+        return env->NewStringUTF(buf);
+    }
+
+    // Semicolons are field separators in the Java parser; NVIDIA device names do
+    // not normally contain them, but sanitize defensively for stable diagnostics.
+    char name[256];
+    snprintf(name, sizeof(name), "%s", prop.name);
+    for (char* p = name; *p; ++p) if (*p == ';') *p = ',';
+    snprintf(buf, sizeof(buf),
+        "OK;devices=%d;name=%s;ccMajor=%d;ccMinor=%d;driver=%d;runtime=%d;"
+        "freeMiB=%llu;totalMiB=%llu;detail=CUDA device usable (artifact minimum CC %d.%d)",
+        deviceCount, name, prop.major, prop.minor, driverVersion, runtimeVersion,
+        (unsigned long long)(freeBytes / (1024ULL * 1024ULL)),
+        (unsigned long long)(totalBytes / (1024ULL * 1024ULL)),
+        ASTRALX_MIN_CUDA_CC / 10, ASTRALX_MIN_CUDA_CC % 10);
+    return env->NewStringUTF(buf);
+}
+
 JNIEXPORT jlongArray JNICALL
 Java_astralx_gpu_GPUWeightCalculator_queryVRAMMiB(JNIEnv* env, jclass cls)
 {

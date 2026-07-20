@@ -15,6 +15,7 @@ public class Logging {
     public static boolean isTrace()    { return level >= TRACE; }
 
     public static void info (String fmt, Object... a) { if (level>=INFO)  log("INFO ", fmt, a); }
+    public static void warn (String fmt, Object... a) { if (level>=INFO)  log("WARN ", fmt, a); }
     public static void debug(String fmt, Object... a) { if (level>=DEBUG) log("DEBUG", fmt, a); }
     public static void trace(String fmt, Object... a) { if (level>=TRACE) log("TRACE", fmt, a); }
     public static void error(String fmt, Object... a) { log("ERROR", fmt, a); }

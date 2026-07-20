@@ -1,7 +1,7 @@
 package astralx;
 
 public class Config {
-    public enum ComputeMode      { CPU, GPU }
+    public enum ComputeMode      { AUTO, CPU, GPU }
     public enum SearchMode       { LOCAL, FULL }
     /**
      * Which matrix is used to guide taxon insertion when auto-completing
@@ -61,7 +61,11 @@ public class Config {
     private String inputFile;
     private String outputFile;
     private String scoreSpeciesTreeFile;
-    private ComputeMode computeMode = ComputeMode.CPU;
+    /** AUTO probes the bundled CUDA backend and falls back safely to CPU. */
+    private ComputeMode computeMode = ComputeMode.AUTO;
+    private ComputeMode requestedComputeMode = ComputeMode.AUTO;
+    private boolean gpuStrict = false;
+    private String computeModeDetail = "not resolved";
     private int threadCount = Runtime.getRuntime().availableProcessors();
     private int numHashSeeds = 2;
     private long baseSeed = 0xDEADBEEFCAFEL;
@@ -216,8 +220,20 @@ public class Config {
     public String getScoreSpeciesTreeFile()      { return scoreSpeciesTreeFile; }
     public void setScoreSpeciesTreeFile(String f){ this.scoreSpeciesTreeFile = f; }
     public boolean isScoreOnly()       { return scoreSpeciesTreeFile != null; }
-    public ComputeMode getComputeMode()        { return computeMode; }
-    public void setComputeMode(ComputeMode m)  { this.computeMode = m; }
+    public ComputeMode getComputeMode()          { return computeMode; }
+    public ComputeMode getRequestedComputeMode() { return requestedComputeMode; }
+    public void setComputeMode(ComputeMode m) {
+        this.computeMode = m;
+        this.requestedComputeMode = m;
+    }
+    /** Set the resolved mode without losing whether AUTO/GPU/CPU was requested. */
+    public void resolveComputeMode(ComputeMode m, String detail) {
+        this.computeMode = m;
+        this.computeModeDetail = detail == null ? "" : detail;
+    }
+    public String getComputeModeDetail()       { return computeModeDetail; }
+    public boolean isGpuStrict()               { return gpuStrict; }
+    public void setGpuStrict(boolean v)         { this.gpuStrict = v; }
     public int getThreadCount()               { return threadCount; }
     public void setThreadCount(int t)         { this.threadCount = Math.max(1, t); }
     public int getNumHashSeeds()              { return numHashSeeds; }
@@ -331,6 +347,11 @@ public class Config {
     private int gpuSimilarityVramCapMiB = 512;
     public int  getGpuSimilarityVramCapMiB()          { return gpuSimilarityVramCapMiB; }
     public void setGpuSimilarityVramCapMiB(int cap)   { this.gpuSimilarityVramCapMiB = Math.max(1, cap); }
+
+    // Standalone deployment self-check. Does not require an input dataset.
+    private boolean diagnose = false;
+    public boolean isDiagnose()          { return diagnose; }
+    public void setDiagnose(boolean v)   { this.diagnose = v; }
 
     // Testing flags
     private boolean verifyParse = false;
