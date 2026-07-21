@@ -320,6 +320,33 @@
   --reference-species-tree data/1kp/1kp-st-33-astral.tre
 
 
+
+==========================================================================================
+### RUNNING ASTER on Biological Datasets
+==========================================================================================
+
+## avian-48
+
+./run-baseline-with-monitor.sh \
+  -m aster \
+  -i ~/phylogeny/ASTRAL-X/data/avian-48/avian-14k-og-strca.tre \
+  -o ~/phylogeny/ASTRAL-X/data/avian-48/out-aster-avian-48.tre \
+  --aster-opts "-t 32"
+
+## avian-363
+
+./run-baseline-with-monitor.sh \
+  -m aster \
+  -i ~/phylogeny/ASTRAL-X/data/avian-363/63430.gene.trees \
+  -o ~/phylogeny/ASTRAL-X/data/avian-363/out-aster-avian-363.tre \
+  --aster-opts "-t 32"
+
+
+==========================================================================================
+
+
+
+
 ###############################################################################
 # A10K runs
 ###############################################################################
