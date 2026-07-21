@@ -1812,7 +1812,7 @@ static void wb_fmt_duration(double secs, char* buf, int buflen) {
 static int wb_use_color(void) {
     if (getenv("NO_COLOR"))    return 0;
     if (getenv("FORCE_COLOR")) return 1;
-    return 0;
+    return astralx_stderr_isatty();
 }
 
 #define WB_BAR_W 28
@@ -1852,7 +1852,7 @@ static cudaError_t wb_poll_progress(cudaStream_t kStream, cudaStream_t pollStrea
     if (ev) { double v = atof(ev); if (v > 0.0) interval = v; }
     if (flagSec > 0.0) interval = flagSec;                     // --gpu-progress-interval wins
 
-    bool col = (getenv("NO_COLOR") == NULL);     // progress is colorized by default
+    bool col = wb_use_color() != 0;               // env override, otherwise real TTY
     const char* GRN = col ? "\033[32m" : "";     // [GPU] + bar
     const char* CYN = col ? "\033[36m" : "";     // done/total
     const char* YEL = col ? "\033[33m" : "";     // percent

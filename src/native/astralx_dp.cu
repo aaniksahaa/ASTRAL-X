@@ -68,7 +68,7 @@ static void dp_fmt_duration(double secs, char* buf, int buflen) {
 static int dp_use_color(void) {
     if (getenv("NO_COLOR"))    return 0;
     if (getenv("FORCE_COLOR")) return 1;
-    return 0;
+    return astralx_stderr_isatty();
 }
 
 #define DP_BAR_W 28
