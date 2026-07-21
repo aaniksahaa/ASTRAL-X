@@ -341,8 +341,23 @@
   -o ~/phylogeny/ASTRAL-X/data/avian-363/out-aster-avian-363.tre \
   --aster-opts "-t 32"
 
+==========================================================================================
+
 
 ==========================================================================================
+### RUNNING ASTRAL-MP on Biological Datasets
+==========================================================================================
+
+
+./run-baseline-with-monitor.sh \
+  -m astral \
+  -i ~/phylogeny/ASTRAL-X/data/avian-363/63430.gene.trees \
+  -o ~/phylogeny/ASTRAL-X/data/avian-363/out-astralmp-avian-363.tre \
+  --astral-opts "-T 32 -t 4"
+
+==========================================================================================
+
+
 
 
 
