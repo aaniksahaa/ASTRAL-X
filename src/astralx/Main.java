@@ -396,7 +396,10 @@ public class Main {
                     if (++i>=args.length) return false;
                     cfg.setScoreSpeciesTreeFile(args[i]);
                 }
-                case "-t","--threads"  -> { if (++i>=args.length) return false; cfg.setThreadCount(Integer.parseInt(args[i])); }
+                case "-t", "-T", "--threads", "--num-threads" -> {
+                    if (++i>=args.length) return false;
+                    cfg.setThreadCount(Integer.parseInt(args[i]));
+                }
                 case "--auto"          -> cfg.setComputeMode(Config.ComputeMode.AUTO);
                 case "--cpu"           -> cfg.setComputeMode(Config.ComputeMode.CPU);
                 case "--gpu"           -> cfg.setComputeMode(Config.ComputeMode.GPU);
@@ -718,7 +721,8 @@ public class Main {
               -i, --input FILE                 Input gene trees (one Newick tree per line)
               -o, --output FILE                Output species tree (stdout when omitted)
               -c, --score-species-tree FILE    Score one supplied species tree and exit
-              -t, --threads N                  CPU worker threads (default: available cores)
+              -t, -T, --threads, --num-threads N
+                                                 CPU worker threads (default: available cores)
               --auto                           Automatically use CUDA or fall back to CPU (default)
               --cpu                            Force CPU execution; do not require GPU libraries
               --gpu                            Prefer CUDA; warn and fall back to CPU if unavailable

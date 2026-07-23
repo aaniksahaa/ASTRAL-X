@@ -57,7 +57,8 @@ Optional:
   --no-anchor-outgroup  Disable anchored-outgroup DP root/search-space reduction
   --anchor-taxon     Global taxon id to use as the anchor (default: 0)
   --no-prune-search-space  Disable the DP-reachability weight prune (default: on)
-  --threads, -t      Thread count
+  --threads, --num-threads, -t, -T
+                     Thread count
   --seeds, -m        Number of hash seeds
   --rooted           Treat input as rooted
   --unrooted         Treat input as unrooted
@@ -132,7 +133,7 @@ while [[ $# -gt 0 ]]; do
       PROGRAM_ARGS+=("$1" "$2")
       shift 2
       ;;
-    --search-mode|-t|--threads|-m|--seeds|--weight-intersection-method|--anchor-taxon|--gpu-batch-size|--gpu-batches|--gpu-vram-control-factor|--gpu-vram-occupancy-factor|--gpu-treewalk-vram-cap-mb|--gpu-progress-interval|--gpu-dp-state-space-construction-output-cap|--gpu-dist-tile-size|--gpu-sim-vram-cap-mb|--dump-completed-gene-trees|--completion-method)
+    --search-mode|-t|-T|--threads|--num-threads|-m|--seeds|--weight-intersection-method|--anchor-taxon|--gpu-batch-size|--gpu-batches|--gpu-vram-control-factor|--gpu-vram-occupancy-factor|--gpu-treewalk-vram-cap-mb|--gpu-progress-interval|--gpu-dp-state-space-construction-output-cap|--gpu-dist-tile-size|--gpu-sim-vram-cap-mb|--dump-completed-gene-trees|--completion-method)
       PROGRAM_ARGS+=("$1" "$2")
       shift 2
       ;;

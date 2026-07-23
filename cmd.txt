@@ -736,4 +736,14 @@ data/10k-astral-dataset/10k-simphy/R1/astralx_outputs/estimated/search-mode_loca
 ./run.sh -i data/avian-48/avian-14k-og-strca.tre --score-species-tree data/avian-48/avian14k_astral.tre --gpu
 
 
+===========================================================================
+CPU ONLY RUNS 
+===========================================================================
+
+./run-bulk-simulated.sh \
+  -m astralx \
+  --astralx-opts "--cpu --threads 32 --search-mode local --weight-intersection-method smaller-side-traversal" \
+  --num-replicates 5
+
+===========================================================================
 

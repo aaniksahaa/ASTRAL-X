@@ -41,6 +41,8 @@ Optional:
   --astralx-opts "..."  Compatibility alias for --opts
   --stelar-opts "..."   Compatibility alias for --opts
   --reference-species-tree  Reference species tree for RF rate calculation
+  --threads, --num-threads, -t, -T
+                         CPU worker threads
   --no-time-monitor     Disable time monitoring
   --no-gpu-monitor      Disable GPU monitoring
   --no-notify, -nn      Disable ntfy notifications
@@ -70,7 +72,7 @@ while [[ $# -gt 0 ]]; do
       ASTRALX_ARGS+=("$1")
       shift
       ;;
-    --search-mode|-t|--threads|-m|--seeds|--gpu-batch-size|--gpu-batches|--gpu-vram-control-factor|--gpu-vram-occupancy-factor|--gpu-dp-state-space-construction-output-cap|--gpu-dist-tile-size)
+    --search-mode|-t|-T|--threads|--num-threads|-m|--seeds|--gpu-batch-size|--gpu-batches|--gpu-vram-control-factor|--gpu-vram-occupancy-factor|--gpu-dp-state-space-construction-output-cap|--gpu-dist-tile-size)
       ASTRALX_ARGS+=("$1" "$2")
       shift 2
       ;;
