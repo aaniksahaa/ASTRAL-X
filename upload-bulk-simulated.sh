@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Discover validated SimPhy ZIP archives and upload them to Hugging Face.
+# Package discovered SimPhy datasets and upload them to Hugging Face.
 
 set -uo pipefail
 
@@ -10,7 +10,6 @@ REPO_ID="imAniksahA/blab"
 REPO_TYPE="dataset"
 REMOTE_DIR="ph/d/simulated/astralx-datasets/raw"
 UPLOADER="${HOME}/utils/hf-data-transfer/hf_upload.py"
-ARCHIVER="${SCRIPT_DIR}/archive-bulk-simulated.sh"
 PYTHON_BIN="python3"
 MIN_TAXA=1000
 MIN_GENE_TREES=1000
@@ -26,7 +25,7 @@ simphy/data. Missing, stale, or invalid ZIPs are created/rebuilt before their
 datasets are uploaded. The complete plan is shown before one confirmation.
 
 Options:
-  --data-dir PATH          Directory containing dataset ZIPs
+  --data-dir PATH          Directory containing datasets and ZIPs
                             (default: ${DATA_DIR})
   --min-taxa N             Minimum taxon count (default: ${MIN_TAXA})
   --min-gene-trees N       Minimum gene-tree count (default: ${MIN_GENE_TREES})
@@ -36,8 +35,6 @@ Options:
   --remote-dir PATH        Destination directory inside the repository
                             (default: ${REMOTE_DIR})
   --uploader PATH          Path to hf_upload.py (default: ${UPLOADER})
-  --archiver PATH          Path to archive-bulk-simulated.sh
-                            (default: ${ARCHIVER})
   --python COMMAND         Python interpreter (default: ${PYTHON_BIN})
   --dry-run                Validate and print commands without uploading
   --yes, -y                Do not ask for confirmation
@@ -74,7 +71,7 @@ require_positive_integer() {
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --data-dir|--min-taxa|--min-gene-trees|--repo-id|--repo-type|\
-    --remote-dir|--uploader|--archiver|--python)
+    --remote-dir|--uploader|--python)
       if [[ $# -lt 2 ]]; then
         echo "Error: option '$1' requires a value." >&2
         exit 2
@@ -98,8 +95,6 @@ while [[ $# -gt 0 ]]; do
     --remote-dir=*) REMOTE_DIR="${1#*=}"; shift ;;
     --uploader) UPLOADER="$2"; shift 2 ;;
     --uploader=*) UPLOADER="${1#*=}"; shift ;;
-    --archiver) ARCHIVER="$2"; shift 2 ;;
-    --archiver=*) ARCHIVER="${1#*=}"; shift ;;
     --python) PYTHON_BIN="$2"; shift 2 ;;
     --python=*) PYTHON_BIN="${1#*=}"; shift ;;
     --dry-run) DRY_RUN=true; shift ;;
@@ -118,7 +113,6 @@ require_positive_integer "--min-gene-trees" "$MIN_GENE_TREES"
 
 DATA_DIR="$(realpath -m "$(expand_home "$DATA_DIR")")"
 UPLOADER="$(realpath -m "$(expand_home "$UPLOADER")")"
-ARCHIVER="$(realpath -m "$(expand_home "$ARCHIVER")")"
 REMOTE_DIR="${REMOTE_DIR%/}"
 
 if [[ ! -d "$DATA_DIR" ]]; then
@@ -141,12 +135,12 @@ if ! command -v unzip >/dev/null 2>&1; then
   echo "Error: unzip is required but was not found." >&2
   exit 2
 fi
-if [[ ! -f "$UPLOADER" ]]; then
-  echo "Error: uploader was not found: $UPLOADER" >&2
+if ! command -v zip >/dev/null 2>&1; then
+  echo "Error: zip is required but was not found." >&2
   exit 2
 fi
-if [[ ! -x "$ARCHIVER" ]]; then
-  echo "Error: archiver is not executable: $ARCHIVER" >&2
+if [[ ! -f "$UPLOADER" ]]; then
+  echo "Error: uploader was not found: $UPLOADER" >&2
   exit 2
 fi
 if [[ "$PYTHON_BIN" == */* ]]; then
@@ -199,6 +193,74 @@ print_command() {
 
 directory_is_nonempty() {
   [[ -d "$1" ]] && [[ -n "$(find "$1" -mindepth 1 -print -quit 2>/dev/null)" ]]
+}
+
+CURRENT_TEMP_DIR=""
+cleanup() {
+  if [[ -n "$CURRENT_TEMP_DIR" && -d "$CURRENT_TEMP_DIR" ]]; then
+    rm -rf -- "$CURRENT_TEMP_DIR"
+  fi
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+archive_needs_rebuild() {
+  local dataset_name="$1"
+  local dataset_path="${DATA_DIR}/${dataset_name}"
+  local archive_path="${DATA_DIR}/${dataset_name}.zip"
+
+  [[ ! -f "$archive_path" ]] && return 0
+  archive_has_expected_root "$archive_path" "$dataset_name" || return 0
+  if directory_is_nonempty "$dataset_path" &&
+     [[ -n "$(find "$dataset_path" -type f -newer "$archive_path" -print -quit 2>/dev/null)" ]]; then
+    return 0
+  fi
+  return 1
+}
+
+build_archive() {
+  local dataset_name="$1"
+  local dataset_path="${DATA_DIR}/${dataset_name}"
+  local archive_path="${DATA_DIR}/${dataset_name}.zip"
+  local temp_archive
+
+  if ! directory_is_nonempty "$dataset_path"; then
+    echo "  Error: source directory is missing or empty: $dataset_path" >&2
+    return 1
+  fi
+
+  CURRENT_TEMP_DIR="$(mktemp -d "${DATA_DIR}/.${dataset_name}.archive.XXXXXX")" || {
+    echo "  Error: could not create a temporary archive directory." >&2
+    return 1
+  }
+  temp_archive="${CURRENT_TEMP_DIR}/${dataset_name}.zip"
+
+  echo "  Compressing..."
+  if ! (cd "$DATA_DIR" && zip -rq "$temp_archive" "$dataset_name"); then
+    echo "  Error: zip failed; any existing archive was left untouched." >&2
+    rm -rf -- "$CURRENT_TEMP_DIR"
+    CURRENT_TEMP_DIR=""
+    return 1
+  fi
+
+  echo "  Testing archive integrity and layout..."
+  if ! archive_has_expected_root "$temp_archive" "$dataset_name"; then
+    echo "  Error: archive validation failed; any existing archive was left untouched." >&2
+    rm -rf -- "$CURRENT_TEMP_DIR"
+    CURRENT_TEMP_DIR=""
+    return 1
+  fi
+
+  if ! mv -f -- "$temp_archive" "$archive_path"; then
+    echo "  Error: could not install the validated archive." >&2
+    rm -rf -- "$CURRENT_TEMP_DIR"
+    CURRENT_TEMP_DIR=""
+    return 1
+  fi
+  rmdir "$CURRENT_TEMP_DIR"
+  CURRENT_TEMP_DIR=""
+  echo "  Ready: $archive_path ($(human_size "$archive_path"))"
 }
 
 declare -A CANDIDATES=()
@@ -321,14 +383,10 @@ done
 
 if [[ "$DRY_RUN" == true ]]; then
   echo
-  echo "Commands:"
   if (( needs_archive > 0 )); then
-    print_command "$ARCHIVER" \
-      --data-dir "$DATA_DIR" \
-      --min-taxa "$MIN_TAXA" \
-      --min-gene-trees "$MIN_GENE_TREES" \
-      --yes
+    echo "ZIP preparation is performed internally and atomically before upload."
   fi
+  echo "Upload commands:"
   for archive_path in "${ARCHIVES[@]}"; do
     archive_name="${archive_path##*/}"
     print_command "$PYTHON_BIN" "$UPLOADER" \
@@ -353,12 +411,25 @@ fi
 if (( needs_archive > 0 )); then
   echo
   echo "Preparing missing, stale, or invalid ZIP archives..."
-  if ! "$ARCHIVER" \
-      --data-dir "$DATA_DIR" \
-      --min-taxa "$MIN_TAXA" \
-      --min-gene-trees "$MIN_GENE_TREES" \
-      --yes; then
-    echo "Error: archive preparation failed; uploads were not started." >&2
+  prepared=0
+  prepare_failed=0
+  for archive_path in "${ARCHIVES[@]}"; do
+    archive_name="${archive_path##*/}"
+    dataset_name="${archive_name%.zip}"
+    if ! archive_needs_rebuild "$dataset_name"; then
+      continue
+    fi
+
+    ((prepared++)) || true
+    echo
+    echo "[$prepared/$needs_archive] Creating or rebuilding: $archive_name"
+    if ! build_archive "$dataset_name"; then
+      ((prepare_failed++)) || true
+    fi
+  done
+
+  if (( prepare_failed > 0 )); then
+    echo "Error: $prepare_failed archive operation(s) failed; uploads were not started." >&2
     exit 1
   fi
 fi
