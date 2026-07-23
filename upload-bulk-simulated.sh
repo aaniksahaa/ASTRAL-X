@@ -10,6 +10,7 @@ REPO_ID="imAniksahA/blab"
 REPO_TYPE="dataset"
 REMOTE_DIR="ph/d/simulated/astralx-datasets/raw"
 UPLOADER="${HOME}/utils/hf-data-transfer/hf_upload.py"
+ARCHIVER="${SCRIPT_DIR}/archive-bulk-simulated.sh"
 PYTHON_BIN="python3"
 MIN_TAXA=1000
 MIN_GENE_TREES=1000
@@ -20,8 +21,9 @@ print_help() {
   cat <<EOF
 upload-bulk-simulated.sh
 
-Discovers canonical SimPhy ZIP archives directly under simphy/data, validates
-them, shows the exact upload plan, and asks once before uploading sequentially.
+Discovers canonical SimPhy dataset directories and ZIP archives directly under
+simphy/data. Missing, stale, or invalid ZIPs are created/rebuilt before their
+datasets are uploaded. The complete plan is shown before one confirmation.
 
 Options:
   --data-dir PATH          Directory containing dataset ZIPs
@@ -34,14 +36,16 @@ Options:
   --remote-dir PATH        Destination directory inside the repository
                             (default: ${REMOTE_DIR})
   --uploader PATH          Path to hf_upload.py (default: ${UPLOADER})
+  --archiver PATH          Path to archive-bulk-simulated.sh
+                            (default: ${ARCHIVER})
   --python COMMAND         Python interpreter (default: ${PYTHON_BIN})
   --dry-run                Validate and print commands without uploading
   --yes, -y                Do not ask for confirmation
   --help, -h               Show this message
 
-ZIPs for directories ending in "_incomplete" are intentionally excluded.
-If a matching source directory has files newer than its ZIP, the upload is
-stopped so the stale archive can be rebuilt first.
+Directories and ZIPs ending in "_incomplete" are intentionally excluded.
+Existing current ZIPs are reused. Missing, stale, and invalid ZIPs with a
+matching non-empty source directory are safely built before upload.
 
 Examples:
   ./upload-bulk-simulated.sh --dry-run
@@ -70,7 +74,7 @@ require_positive_integer() {
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --data-dir|--min-taxa|--min-gene-trees|--repo-id|--repo-type|\
-    --remote-dir|--uploader|--python)
+    --remote-dir|--uploader|--archiver|--python)
       if [[ $# -lt 2 ]]; then
         echo "Error: option '$1' requires a value." >&2
         exit 2
@@ -94,6 +98,8 @@ while [[ $# -gt 0 ]]; do
     --remote-dir=*) REMOTE_DIR="${1#*=}"; shift ;;
     --uploader) UPLOADER="$2"; shift 2 ;;
     --uploader=*) UPLOADER="${1#*=}"; shift ;;
+    --archiver) ARCHIVER="$2"; shift 2 ;;
+    --archiver=*) ARCHIVER="${1#*=}"; shift ;;
     --python) PYTHON_BIN="$2"; shift 2 ;;
     --python=*) PYTHON_BIN="${1#*=}"; shift ;;
     --dry-run) DRY_RUN=true; shift ;;
@@ -112,6 +118,7 @@ require_positive_integer "--min-gene-trees" "$MIN_GENE_TREES"
 
 DATA_DIR="$(realpath -m "$(expand_home "$DATA_DIR")")"
 UPLOADER="$(realpath -m "$(expand_home "$UPLOADER")")"
+ARCHIVER="$(realpath -m "$(expand_home "$ARCHIVER")")"
 REMOTE_DIR="${REMOTE_DIR%/}"
 
 if [[ ! -d "$DATA_DIR" ]]; then
@@ -136,6 +143,10 @@ if ! command -v unzip >/dev/null 2>&1; then
 fi
 if [[ ! -f "$UPLOADER" ]]; then
   echo "Error: uploader was not found: $UPLOADER" >&2
+  exit 2
+fi
+if [[ ! -x "$ARCHIVER" ]]; then
+  echo "Error: archiver is not executable: $ARCHIVER" >&2
   exit 2
 fi
 if [[ "$PYTHON_BIN" == */* ]]; then
@@ -177,7 +188,7 @@ archive_has_expected_root() {
 }
 
 human_size() {
-  du -h -- "$1" 2>/dev/null | awk '{print $1}'
+  du -sh -- "$1" 2>/dev/null | awk '{print $1}'
 }
 
 print_command() {
@@ -186,10 +197,41 @@ print_command() {
   printf '\n'
 }
 
+directory_is_nonempty() {
+  [[ -d "$1" ]] && [[ -n "$(find "$1" -mindepth 1 -print -quit 2>/dev/null)" ]]
+}
+
+declare -A CANDIDATES=()
 declare -a ARCHIVES=()
-declare -a SIZES=()
-invalid=0
-stale=0
+needs_archive=0
+blocked=0
+
+# Dataset directories are the primary source. Valid orphan ZIPs are also
+# supported so exported archives can be uploaded after their sources move.
+while IFS= read -r -d '' dataset_path; do
+  dataset_name="${dataset_path##*/}"
+  if ! dataset_name_is_valid "$dataset_name"; then
+    continue
+  fi
+  taxa="${BASH_REMATCH[1]}"
+  gene_trees="${BASH_REMATCH[2]}"
+  if (( taxa >= MIN_TAXA && gene_trees >= MIN_GENE_TREES )); then
+    CANDIDATES["$dataset_name"]=1
+  fi
+done < <(find "$DATA_DIR" -maxdepth 1 -mindepth 1 -type d -name 't_*' -print0 | sort -zV)
+
+while IFS= read -r -d '' archive_path; do
+  archive_name="${archive_path##*/}"
+  dataset_name="${archive_name%.zip}"
+  if ! dataset_name_is_valid "$dataset_name"; then
+    continue
+  fi
+  taxa="${BASH_REMATCH[1]}"
+  gene_trees="${BASH_REMATCH[2]}"
+  if (( taxa >= MIN_TAXA && gene_trees >= MIN_GENE_TREES )); then
+    CANDIDATES["$dataset_name"]=1
+  fi
+done < <(find "$DATA_DIR" -maxdepth 1 -mindepth 1 -type f -name 't_*_g_*.zip' -print0 | sort -zV)
 
 echo "ASTRAL-X simulated dataset uploader"
 echo "Data directory: $DATA_DIR"
@@ -199,60 +241,94 @@ echo "Selection:      taxa >= $MIN_TAXA, gene trees >= $MIN_GENE_TREES"
 [[ "$DRY_RUN" == true ]] && echo "Dry run:        yes"
 echo
 
-printf '%-7s %-7s %-9s %-10s %s\n' "TAXA" "GENES" "ZIP SIZE" "STATUS" "ARCHIVE"
-printf '%-7s %-7s %-9s %-10s %s\n' "-------" "-------" "---------" "----------" "-------"
-
-while IFS= read -r -d '' archive_path; do
-  archive_name="${archive_path##*/}"
-  dataset_name="${archive_name%.zip}"
-  if ! dataset_name_is_valid "$dataset_name"; then
-    continue
-  fi
-
-  taxa="${BASH_REMATCH[1]}"
-  gene_trees="${BASH_REMATCH[2]}"
-  if (( taxa < MIN_TAXA || gene_trees < MIN_GENE_TREES )); then
-    continue
-  fi
-
-  status="ready"
-  if ! archive_has_expected_root "$archive_path" "$dataset_name"; then
-    status="INVALID"
-    ((invalid++)) || true
-  elif [[ -d "${DATA_DIR}/${dataset_name}" ]] &&
-       [[ -n "$(find "${DATA_DIR}/${dataset_name}" -type f -newer "$archive_path" -print -quit 2>/dev/null)" ]]; then
-    status="STALE"
-    ((stale++)) || true
-  fi
-
-  printf '%-7s %-7s %-9s %-10s %s\n' "$taxa" "$gene_trees" "$(human_size "$archive_path")" "$status" "$archive_name"
-  ARCHIVES+=("$archive_path")
-  SIZES+=("$(human_size "$archive_path")")
-done < <(find "$DATA_DIR" -maxdepth 1 -mindepth 1 -type f -name 't_*_g_*.zip' -print0 | sort -zV)
-
-echo
-if [[ ${#ARCHIVES[@]} -eq 0 ]]; then
-  echo "No canonical ZIP archives matched the selection."
-  echo "Create them first with: ${SCRIPT_DIR}/archive-bulk-simulated.sh --min-taxa $MIN_TAXA --min-gene-trees $MIN_GENE_TREES"
+if [[ ${#CANDIDATES[@]} -eq 0 ]]; then
+  echo "No complete dataset directories or canonical ZIPs matched the selection."
   exit 0
 fi
 
-if (( invalid > 0 || stale > 0 )); then
-  echo "Error: refusing to upload: invalid=$invalid stale=$stale." >&2
-  echo "Rebuild the affected archives with: ${SCRIPT_DIR}/archive-bulk-simulated.sh --min-taxa $MIN_TAXA --min-gene-trees $MIN_GENE_TREES" >&2
+printf '%-7s %-7s %-11s %-10s %-27s %s\n' \
+  "TAXA" "GENES" "SOURCE" "ZIP" "ACTION" "DATASET"
+printf '%-7s %-7s %-11s %-10s %-27s %s\n' \
+  "-------" "-------" "-----------" "----------" "---------------------------" "-------"
+
+while IFS= read -r dataset_name; do
+  [[ -z "$dataset_name" ]] && continue
+  dataset_name_is_valid "$dataset_name"
+
+  taxa="${BASH_REMATCH[1]}"
+  gene_trees="${BASH_REMATCH[2]}"
+  dataset_path="${DATA_DIR}/${dataset_name}"
+  archive_path="${DATA_DIR}/${dataset_name}.zip"
+  source_size="-"
+  zip_size="missing"
+  source_available=false
+
+  if directory_is_nonempty "$dataset_path"; then
+    source_available=true
+    source_size="$(human_size "$dataset_path")"
+  elif [[ -d "$dataset_path" ]]; then
+    source_size="empty"
+  fi
+
+  if [[ -f "$archive_path" ]]; then
+    zip_size="$(human_size "$archive_path")"
+  fi
+
+  action="reuse ZIP, then upload"
+  if [[ ! -f "$archive_path" ]]; then
+    if [[ "$source_available" == true ]]; then
+      action="CREATE ZIP, then upload"
+      ((needs_archive++)) || true
+    else
+      action="BLOCKED: no usable source"
+      ((blocked++)) || true
+    fi
+  elif ! archive_has_expected_root "$archive_path" "$dataset_name"; then
+    if [[ "$source_available" == true ]]; then
+      action="REBUILD invalid ZIP, upload"
+      ((needs_archive++)) || true
+    else
+      action="BLOCKED: invalid ZIP"
+      ((blocked++)) || true
+    fi
+  elif [[ "$source_available" == true ]] &&
+       [[ -n "$(find "$dataset_path" -type f -newer "$archive_path" -print -quit 2>/dev/null)" ]]; then
+    action="REBUILD stale ZIP, upload"
+    ((needs_archive++)) || true
+  fi
+
+  printf '%-7s %-7s %-11s %-10s %-27s %s\n' \
+    "$taxa" "$gene_trees" "$source_size" "$zip_size" "$action" "$dataset_name"
+
+  if [[ "$action" != BLOCKED:* ]]; then
+    ARCHIVES+=("$archive_path")
+  fi
+done < <(printf '%s\n' "${!CANDIDATES[@]}" | sort -V)
+
+echo
+if (( blocked > 0 )); then
+  echo "Error: $blocked selected dataset(s) cannot be safely prepared." >&2
+  echo "Fix the blocked source/archive entries shown above, then rerun." >&2
   exit 1
 fi
 
-echo "Upload plan (${#ARCHIVES[@]} archive(s)):"
+echo "Plan: create/rebuild $needs_archive ZIP(s), reuse $((${#ARCHIVES[@]} - needs_archive)) ZIP(s), upload ${#ARCHIVES[@]} archive(s)."
+echo "Destinations:"
 for i in "${!ARCHIVES[@]}"; do
   archive_name="${ARCHIVES[$i]##*/}"
-  echo "  ${archive_name} (${SIZES[$i]})"
-  echo "    -> ${REPO_ID}/${REMOTE_DIR}/${archive_name}"
+  echo "  ${archive_name} -> ${REPO_ID}/${REMOTE_DIR}/${archive_name}"
 done
 
 if [[ "$DRY_RUN" == true ]]; then
   echo
   echo "Commands:"
+  if (( needs_archive > 0 )); then
+    print_command "$ARCHIVER" \
+      --data-dir "$DATA_DIR" \
+      --min-taxa "$MIN_TAXA" \
+      --min-gene-trees "$MIN_GENE_TREES" \
+      --yes
+  fi
   for archive_path in "${ARCHIVES[@]}"; do
     archive_name="${archive_path##*/}"
     print_command "$PYTHON_BIN" "$UPLOADER" \
@@ -261,17 +337,56 @@ if [[ "$DRY_RUN" == true ]]; then
       --local-path "$archive_path" \
       --path-in-repo "${REMOTE_DIR}/${archive_name}"
   done
-  echo "Dry run complete; nothing was uploaded."
+  echo "Dry run complete; no ZIPs were created and nothing was uploaded."
   exit 0
 fi
 
 if [[ "$ASSUME_YES" == false ]]; then
   echo
-  read -r -p "Upload ${#ARCHIVES[@]} archive(s) to $REPO_ID? [y/N]: " confirm
+  read -r -p "Proceed with $needs_archive ZIP operation(s) and ${#ARCHIVES[@]} upload(s)? [y/N]: " confirm
   if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
-    echo "Cancelled; nothing was uploaded."
+    echo "Cancelled; no ZIPs were changed and nothing was uploaded."
     exit 0
   fi
+fi
+
+if (( needs_archive > 0 )); then
+  echo
+  echo "Preparing missing, stale, or invalid ZIP archives..."
+  if ! "$ARCHIVER" \
+      --data-dir "$DATA_DIR" \
+      --min-taxa "$MIN_TAXA" \
+      --min-gene-trees "$MIN_GENE_TREES" \
+      --yes; then
+    echo "Error: archive preparation failed; uploads were not started." >&2
+    exit 1
+  fi
+fi
+
+echo
+echo "Revalidating every archive immediately before upload..."
+postcheck_failed=0
+for i in "${!ARCHIVES[@]}"; do
+  archive_path="${ARCHIVES[$i]}"
+  archive_name="${archive_path##*/}"
+  dataset_name="${archive_name%.zip}"
+  dataset_path="${DATA_DIR}/${dataset_name}"
+
+  if [[ ! -f "$archive_path" ]] || ! archive_has_expected_root "$archive_path" "$dataset_name"; then
+    echo "  Error: missing or invalid archive: $archive_path" >&2
+    ((postcheck_failed++)) || true
+  elif directory_is_nonempty "$dataset_path" &&
+       [[ -n "$(find "$dataset_path" -type f -newer "$archive_path" -print -quit 2>/dev/null)" ]]; then
+    echo "  Error: source changed after archive creation: $dataset_path" >&2
+    ((postcheck_failed++)) || true
+  else
+    echo "  Ready: $archive_name ($(human_size "$archive_path"))"
+  fi
+done
+
+if (( postcheck_failed > 0 )); then
+  echo "Error: pre-upload validation failed for $postcheck_failed archive(s); nothing was uploaded." >&2
+  exit 1
 fi
 
 succeeded=0
