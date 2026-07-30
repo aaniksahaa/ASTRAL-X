@@ -680,6 +680,45 @@ done
 # A10K runs
 ###############################################################################
 
+"--search-mode full -vv --autocomplete-incomplete-gene-trees --consensus-experimental --stepb-quadratic-nn-balls --stepb-random-leftover-resolution --stepb-process-large-polytomies"
+
+
+--weight-intersection-method smaller-side-traversal
+
+./run-a10k.sh \
+  --data-dir data/10k-astral-dataset \
+  --tree-type true \
+  --start-rep 1 --end-rep 10 \
+  --opts "--weight-intersection-method smaller-side-traversal --search-mode full -vv --autocomplete-incomplete-gene-trees --consensus-experimental --stepb-quadratic-nn-balls --stepb-random-leftover-resolution --stepb-process-large-polytomies"
+
+
+./run-a10k.sh \
+  --data-dir data/10k-astral-dataset \
+  --tree-type estimated \
+  --start-rep 1 --end-rep 10 \
+  --opts "--weight-intersection-method smaller-side-traversal --search-mode full -vv --autocomplete-incomplete-gene-trees --consensus-experimental --stepb-quadratic-nn-balls --stepb-random-leftover-resolution --stepb-process-large-polytomies"
+
+
+
+./run-a10k.sh \
+  --data-dir data/10k-astral-dataset \
+  --tree-type true \
+  --start-rep 1 --end-rep 10 \
+  --opts "--weight-intersection-method prefix-sum --search-mode full -vv --autocomplete-incomplete-gene-trees --consensus-experimental --stepb-quadratic-nn-balls --stepb-random-leftover-resolution --stepb-process-large-polytomies"
+
+
+./run-a10k.sh \
+  --data-dir data/10k-astral-dataset \
+  --tree-type estimated \
+  --start-rep 1 --end-rep 10 \
+  --opts "--weight-intersection-method prefix-sum --search-mode full -vv --autocomplete-incomplete-gene-trees --consensus-experimental --stepb-quadratic-nn-balls --stepb-random-leftover-resolution --stepb-process-large-polytomies"
+
+
+
+
+
+
+
 # Estimated gene trees, one setting
 ./run-a10k.sh --data-dir data/10k-astral-dataset --tree-type estimated --opts "--search-mode full"
 
