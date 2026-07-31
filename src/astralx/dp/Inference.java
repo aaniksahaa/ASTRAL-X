@@ -28,6 +28,7 @@ public class Inference {
     private final Map<ClusterHash, Double>           dpMemoD    = new HashMap<>();   // DOUBLE score path
     private final Map<ClusterHash, Int128>           dpMemoI    = new HashMap<>();   // INT128 score path
     private final Map<ClusterHash, BipartitionSplit> bestSplits = new HashMap<>();
+    private String lastQuartetScore;
 
     // -------------------------------------------------------------------------
 
@@ -53,16 +54,19 @@ public class Inference {
         // (default) or approximate DOUBLE.  The [tag] makes the type explicit.
         if (weightTable.isInt128()) {
             Int128 totalScore = solveI(root, dpTable, weightTable);
+            lastQuartetScore = totalScore.toString();
             long ms = (System.nanoTime() - t0) / 1_000_000;
             Logging.info("Inference DP: optimal quartet score = %s  [int128]  (%d ms)", totalScore, ms);
         } else if (weightTable.isDouble()) {
             double totalScore = solveD(root, dpTable, weightTable);
+            lastQuartetScore = String.format(java.util.Locale.ROOT, "%.0f", totalScore);
             long ms = (System.nanoTime() - t0) / 1_000_000;
             // %.0f keeps it a plain (huge) number for log parsers; the [double]
             // tag makes the active numeric type explicit in the logs.
             Logging.info("Inference DP: optimal quartet score = %.0f  [double]  (%d ms)", totalScore, ms);
         } else {
             long totalScore = solve(root, dpTable, weightTable);
+            lastQuartetScore = Long.toString(totalScore);
             long ms = (System.nanoTime() - t0) / 1_000_000;
             Logging.info("Inference DP: optimal quartet score = %d  [long]  (%d ms)", totalScore, ms);
         }
@@ -70,6 +74,9 @@ public class Inference {
         String newick = buildNewick(root, dpTable, clusterTable, trees, registry) + ";";
         return newick;
     }
+
+    /** Raw quartet score from the most recent successful inference run. */
+    public String getLastQuartetScore() { return lastQuartetScore; }
 
     /**
      * Score the fixed tree represented by {@code dpTable}; no tree reconstruction

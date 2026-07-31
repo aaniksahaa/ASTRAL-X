@@ -72,6 +72,10 @@ The defaults are `--auto`, `--search-space S1`, and
 `--intersection-method I2`: ASTRAL-X tries CUDA first, safely falls back to CPU,
 uses the smallest search space, and uses prefix-sum intersections.
 
+Every successful analysis ends with a built-in summary of the quartet score,
+running time, maximum CPU RAM, and maximum GPU VRAM. No monitoring wrapper is
+required for these core statistics.
+
 For a broader search on incomplete gene trees using cross-tree recombined
 transitions as well as tree-local ones:
 

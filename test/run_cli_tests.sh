@@ -26,7 +26,7 @@ HELP_TEXT="$(NO_COLOR=1 java -cp "${ROOT}/build" astralx.Main --help 2>&1)"
 run_score() {
   java -cp "${ROOT}/build" astralx.Main --cpu -q \
     -i "${ROOT}/test/input/tc1_complete_only.tre" "$@" 2>&1 |
-    sed -n 's/.*optimal quartet score = \([0-9][0-9]*\).*/\1/p'
+    sed -n 's/.*Quartet score[[:space:]]*\([0-9][0-9]*\).*/\1/p'
 }
 
 [[ "$(run_score --search-space S1 --intersection-method I2)" == \
@@ -45,5 +45,23 @@ if java -cp "${ROOT}/build" astralx.Main --cpu --diagnose --search-space S4 \
   echo "invalid search preset was unexpectedly accepted" >&2
   exit 1
 fi
+
+SUMMARY_TREE="${TEST_CLASSES}/summary-tree.tre"
+SUMMARY_OUTPUT="$(java -cp "${ROOT}/build" astralx.Main --cpu -q \
+  -i "${ROOT}/test/input/tc1_complete_only.tre" -o "$SUMMARY_TREE" 2>&1)"
+[[ -s "$SUMMARY_TREE" ]]
+[[ "$SUMMARY_OUTPUT" == *"Run Summary"* ]]
+[[ "$SUMMARY_OUTPUT" == *"Quartet score"* ]]
+[[ "$SUMMARY_OUTPUT" == *"Running time"* ]]
+[[ "$SUMMARY_OUTPUT" == *"Max CPU RAM"* ]]
+[[ "$SUMMARY_OUTPUT" == *"Max GPU VRAM"* ]]
+[[ "$SUMMARY_OUTPUT" == *"N/A (CPU execution)"* ]]
+
+SCORE_ONLY_OUTPUT="$(java -cp "${ROOT}/build" astralx.Main --cpu -q \
+  -i "${ROOT}/test/input/tc1_complete_only.tre" \
+  --score-species-tree "${ROOT}/test/input/tc1_true.tre" 2>&1)"
+[[ "$SCORE_ONLY_OUTPUT" == *"QUARTET_SCORE: 10"* ]]
+[[ "$SCORE_ONLY_OUTPUT" == *"Run Summary"* ]]
+[[ "$SCORE_ONLY_OUTPUT" == *"Quartet score"*"10"* ]]
 
 echo "CLI end-to-end aliases: PASS"

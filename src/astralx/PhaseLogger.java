@@ -30,6 +30,7 @@ public class PhaseLogger {
     private static final String CYAN = "\033[36m";
     private static final String GRN  = "\033[32m";
     private static final String YLW  = "\033[33m";
+    private static final String WHT  = "\033[97m";
 
     private static String c(String code, String text) {
         return COLOR ? code + text + RST : text;
@@ -198,6 +199,37 @@ public class PhaseLogger {
             System.err.println("        " + vramStr);
         }
         currentPhase = "between phases";
+    }
+
+    /** Print the four-field, wrapper-independent summary for a successful analysis. */
+    public static void printRunSummary(String quartetScore, long elapsedMs,
+                                       boolean gpuExecution) {
+        long cpuMiB = readVmRssMiB();
+        if (cpuMiB > 0) updateMaximum(peakCpuRssSoFarMiB, cpuMiB);
+        long peakCpuMiB = peakCpuRssSoFarMiB.get();
+        long peakGpuMiB = peakVramUsedSoFarMiB.get();
+
+        String cpuValue = peakCpuMiB > 0
+            ? c(CYAN, peakCpuMiB + " MiB")
+            : c(DIM, "N/A");
+        String gpuValue = peakGpuMiB > 0
+            ? c(GRN, peakGpuMiB + " MiB")
+            : c(DIM, gpuExecution ? "N/A (not observed)" : "N/A (CPU execution)");
+
+        System.err.println();
+        System.err.println("  " + c(BOLD, "Run Summary") + "  " + c(DIM, "─".repeat(50)));
+        System.err.println();
+        System.err.println("    " + summaryRow("Quartet score", c(WHT, quartetScore)));
+        System.err.println("    " + summaryRow("Running time", c(YLW,
+            String.format(java.util.Locale.ROOT, "%.3f s", elapsedMs / 1000.0))));
+        System.err.println("    " + summaryRow("Max CPU RAM", cpuValue));
+        System.err.println("    " + summaryRow("Max GPU VRAM", gpuValue));
+        System.err.println();
+    }
+
+    private static String summaryRow(String label, String value) {
+        String paddedLabel = String.format(java.util.Locale.ROOT, "%-18s", label);
+        return c(DIM, paddedLabel) + " " + value;
     }
 
     /** Last phase label, included in fatal diagnostic reports. */

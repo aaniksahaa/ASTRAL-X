@@ -61,6 +61,8 @@ public class Main {
 
         Threading.start(cfg.getThreadCount());
         long t0 = System.nanoTime();
+        String finalQuartetScore = null;
+        boolean analysisCompleted = false;
 
         try {
             // ── Phase 1: Parse gene trees ─────────────────────────────────────
@@ -201,7 +203,9 @@ public class Main {
             // signature parity, design §7.2 / verification §13.5).
 
             if (cfg.isScoreOnly()) {
-                runScoreOnly(cfg, registry, originalTrees, prefParts, hasher);
+                finalQuartetScore = runScoreOnly(
+                    cfg, registry, originalTrees, prefParts, hasher);
+                analysisCompleted = true;
                 return;
             }
 
@@ -367,6 +371,7 @@ public class Main {
             long t7 = PhaseLogger.begin("Phase 7  Inference", false);
             Inference inference = new Inference();
             String speciesTree = inference.run(dpTable, weightTable, clusterTable, trees, registry);
+            finalQuartetScore = inference.getLastQuartetScore();
             PhaseLogger.end("Phase 7  Inference", t7, false);
 
             // Write or print the species tree
@@ -379,11 +384,16 @@ public class Main {
             } else {
                 System.out.println(speciesTree);
             }
+            analysisCompleted = true;
 
         } finally {
             Threading.shutdown();
             long ms = (System.nanoTime() - t0) / 1_000_000;
             Logging.info("Total time: %d ms", ms);
+            if (analysisCompleted) {
+                PhaseLogger.printRunSummary(finalQuartetScore, ms,
+                    cfg.getComputeMode() == Config.ComputeMode.GPU);
+            }
         }
     }
 
@@ -792,9 +802,9 @@ public class Main {
             """);
     }
 
-    private static void runScoreOnly(Config cfg, TaxonRegistry registry,
-                                     List<Tree> geneTrees, PrefixHashArrays genePref,
-                                     TaxonHasher hasher) throws IOException {
+    private static String runScoreOnly(Config cfg, TaxonRegistry registry,
+                                       List<Tree> geneTrees, PrefixHashArrays genePref,
+                                       TaxonHasher hasher) throws IOException {
         Logging.info("Mode: SCORE-ONLY (score supplied species tree; no species-tree inference)");
         // The weight table dispatches GPU/CPU internally from the compute mode, so
         // both paths are supported here.  The GPU path falls back to CPU on its own
@@ -834,10 +844,12 @@ public class Main {
         }
         PhaseLogger.end("Score mode  Fixed-tree DP transitions", td, false);
 
-        long tw = PhaseLogger.begin("Score mode  Weight calculation", false);
+        boolean gpuWeight = cfg.getComputeMode() == Config.ComputeMode.GPU
+                            && GPUWeightCalculator.isLoaded();
+        long tw = PhaseLogger.begin("Score mode  Weight calculation", gpuWeight);
         WeightTable weightTable = new WeightTable(speciesDP, genePartitions, speciesClusters,
                                                   speciesTrees, geneTrees);
-        PhaseLogger.end("Score mode  Weight calculation", tw, false);
+        PhaseLogger.end("Score mode  Weight calculation", tw, gpuWeight);
 
         Inference scorer = new Inference();
         String score = scorer.scoreFixedTree(speciesDP, weightTable);
@@ -849,5 +861,6 @@ public class Main {
             }
             Logging.info("Quartet score written to %s", cfg.getOutputFile());
         }
+        return score;
     }
 }
