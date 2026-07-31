@@ -90,9 +90,11 @@ loading a dataset.
 
 ## Running ASTRAL-X on Biological Datasets
 
-The current biological example uses the 48-taxon avian dataset. From the
-directory where you want the `data/` folder, download, extract, clean up, and
-verify the dataset with:
+Run the commands below from the directory where you want the `data/` folder.
+
+### Avian-48
+
+Download, extract, clean up, and verify the 48-taxon avian dataset with:
 
 ```bash
 mkdir -p data/avian-48
@@ -114,6 +116,34 @@ astralx -i data/avian-48/avian-48-gt.tre \
   -o data/avian-48/out-astralx-avian-48.tre \
   --search-space S2 \
   --intersection-method I4 \
+  -vv
+```
+
+### Angiosperms
+
+Download, extract, clean up, and verify the angiosperm dataset with:
+
+```bash
+mkdir -p data/angio
+wget -c \
+  -O data/angio.tar \
+  "https://zenodo.org/records/21722787/files/angio.tar?download=1"
+tar -xf data/angio.tar \
+  -C data/angio \
+  --strip-components=1 &&
+  rm data/angio.tar
+test -s data/angio/all_gt_angio.tre &&
+  ls -lh data/angio/all_gt_angio.tre
+```
+
+Run ASTRAL-X with the exhaustive search space (with consensus) and simple-tree-walk
+intersections:
+
+```bash
+astralx -i data/angio/all_gt_angio.tre \
+  -o data/angio/out-astralx-angio.tre \
+  --search-space S3 \
+  --intersection-method I3 \
   -vv
 ```
 
