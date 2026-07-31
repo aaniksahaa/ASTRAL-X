@@ -22,41 +22,37 @@ use CUDA when it is available.
 ## One-time setup
 
 Keep the complete extracted application directory together: the launcher needs
-the accompanying `bin/` and `lib/` directories. The application directory can
-be stored anywhere, but it should not be moved after creating the link below.
+the accompanying `bin/` and `lib/` directories.
 
 Download `astralx-1.0.0-linux-x86_64.tar.gz` from the
-[GitHub Releases page](https://github.com/aaniksahaa/ASTRAL-X/releases). After
-cloning this repository, place the downloaded archive under `dist/1.0.0/` and
-extract it from the repository root:
+GitHub Releases page. The
+release archive is self-contained, so cloning this repository is not required.
+Replace `/path/to/downloaded/` below with the archive's actual location, then
+run this single setup block. It installs ASTRAL-X under `~/.local/opt/` and adds
+the launcher to your user `PATH` without requiring `sudo`:
 
 ```bash
-mkdir -p dist/1.0.0
-cp /path/to/downloaded/astralx-1.0.0-linux-x86_64.tar.gz dist/1.0.0/
-tar -xzf dist/1.0.0/astralx-1.0.0-linux-x86_64.tar.gz -C dist/1.0.0
-```
-
-Then add the extracted launcher to your user `PATH`:
-
-```bash
-ASTRALX_DIR="$(realpath dist/1.0.0/astralx-1.0.0-linux-x86_64)"
+mkdir -p "$HOME/.local/opt/astralx/1.0.0"
+tar -xzf /path/to/downloaded/astralx-1.0.0-linux-x86_64.tar.gz \
+  -C "$HOME/.local/opt/astralx/1.0.0"
+ASTRALX_DIR="$(realpath "$HOME/.local/opt/astralx/1.0.0/astralx-1.0.0-linux-x86_64")"
 mkdir -p "$HOME/.local/bin"
 ln -sfn "$ASTRALX_DIR/astralx" "$HOME/.local/bin/astralx"
 grep -qxF 'export PATH="$HOME/.local/bin:$PATH"' "$HOME/.bashrc" || \
   printf '%s\n' 'export PATH="$HOME/.local/bin:$PATH"' >> "$HOME/.bashrc"
 export PATH="$HOME/.local/bin:$PATH"
+```
+
+### Check the installation
+
+Verify that the launcher is available:
+
+```bash
 astralx --version
 ```
 
-If the application was extracted somewhere else, change only the first line to
-its actual absolute directory, for example:
-
-```bash
-ASTRALX_DIR="/path/to/astralx-1.0.0-linux-x86_64"
-```
-
-To move the application later, move the complete directory and recreate the
-link in `~/.local/bin` with the new location.
+It prints `Welcome to ASTRAL-X version 1.0.0!`, with “Welcome” in CPU cyan and
+“ASTRAL-X” in GPU green when run in a color-capable terminal.
 
 ## Quick start
 
@@ -68,7 +64,7 @@ astralx -i /path/to/gene_trees.tre -o /path/to/output_species_tree.tre
 
 Input and output may be relative to the current directory or given as absolute
 paths. For a directly runnable example, use the included 37-taxon dataset from
-this repository root:
+either the extracted application directory or this repository root:
 
 ```bash
 astralx -i example/all_gt_37.tre -o example/out_astralx_37.tre

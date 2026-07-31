@@ -7,7 +7,7 @@ import java.io.PrintStream;
 /**
  * Startup banner: system info + run configuration.
  * Written to stderr so it appears even when stdout is redirected.
- * ANSI colours are enabled only when stderr is a real terminal
+ * ANSI colours are enabled only when the target stream is a real terminal
  * (or FORCE_COLOR is set), and suppressed when NO_COLOR is set.
  */
 public class Banner {
@@ -21,24 +21,23 @@ public class Banner {
     private static final String YLW  = "\033[33m";
     private static final String WHT  = "\033[97m";
 
-    private static final boolean USE_COLOR = detectColor();
+    private static final boolean USE_COLOR = detectColor(2);
 
     /** Exposed so PhaseLogger and other classes can share the same colour decision. */
     public static boolean useColor() { return USE_COLOR; }
 
-    private static boolean detectColor() {
+    private static boolean detectColor(int fileDescriptor) {
         if (System.getenv("NO_COLOR")    != null) return false;
         if (System.getenv("FORCE_COLOR") != null) return true;
-        // System.console() requires stdin+stdout to be ttys, so it returns null when
-        // the JVM is spawned by a script (even if the terminal is visible).
-        // Fall back to checking whether stderr's file descriptor points to a tty.
-        if (System.console() != null) return true;
+        // Check the actual target descriptor first so redirected output remains
+        // machine-readable even when another stream is still attached to a terminal.
         try {
             String fd2 = java.nio.file.Files.readSymbolicLink(
-                java.nio.file.Paths.get("/proc/self/fd/2")).toString();
+                java.nio.file.Paths.get("/proc/self/fd/" + fileDescriptor)).toString();
             return fd2.startsWith("/dev/pts") || fd2.startsWith("/dev/tty");
         } catch (Exception e) {
-            return false;
+            // /proc is unavailable on some platforms; use Java's console signal.
+            return System.console() != null;
         }
     }
 
@@ -51,6 +50,14 @@ public class Banner {
     }
 
     // ── Public entry point ────────────────────────────────────────────────────
+
+    /** Print the compact, colour-aware version greeting to stdout. */
+    public static void printVersion() {
+        boolean color = detectColor(1);
+        String welcome = color ? CYAN + "Welcome" + RST : "Welcome";
+        String product = color ? GRN + "ASTRAL-X" + RST : "ASTRAL-X";
+        System.out.println(welcome + " to " + product + " version " + Main.VERSION + "!");
+    }
 
     public static void print(Config cfg) {
         PrintStream out = System.err;

@@ -520,7 +520,7 @@ public class Main {
                 case "--gpu-dist-tile-size" -> { if (++i>=args.length) return false; cfg.setGpuDistTileSizeB(Integer.parseInt(args[i])); }
                 case "--gpu-sim-vram-cap-mb" -> { if (++i>=args.length) return false; cfg.setGpuSimilarityVramCapMiB(Integer.parseInt(args[i])); }
                 case "--diagnose"       -> cfg.setDiagnose(true);
-                case "--version"        -> { System.out.println("ASTRAL-X " + VERSION); System.exit(0); }
+                case "--version"        -> { Banner.printVersion(); System.exit(0); }
                 case "-h","--help"     -> { printUsage(); System.exit(0); }
                 default -> { System.err.println("Unknown arg: " + args[i]); return false; }
             }

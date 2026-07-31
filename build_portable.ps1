@@ -176,8 +176,21 @@ when falling back would be undesirable.
     Set-Content -Path (Join-Path $Image "BUILD-INFO.txt") -Value $BuildInfo -Encoding UTF8
 
     $Launcher = Join-Path $Image "astralx.exe"
-    $VersionOutput = (& $Launcher --version | Out-String).Trim()
-    if ($LASTEXITCODE -ne 0 -or $VersionOutput -ne "ASTRAL-X $Version") {
+    $PreviousNoColor = $env:NO_COLOR
+    try {
+        $env:NO_COLOR = "1"
+        $VersionOutput = (& $Launcher --version | Out-String).Trim()
+        $VersionExitCode = $LASTEXITCODE
+    }
+    finally {
+        if ($null -eq $PreviousNoColor) {
+            Remove-Item Env:NO_COLOR -ErrorAction SilentlyContinue
+        }
+        else {
+            $env:NO_COLOR = $PreviousNoColor
+        }
+    }
+    if ($VersionExitCode -ne 0 -or $VersionOutput -ne "Welcome to ASTRAL-X version $Version!") {
         throw "Packaged --version smoke test failed: '$VersionOutput'."
     }
     & $Launcher --cpu --diagnose | Out-Null

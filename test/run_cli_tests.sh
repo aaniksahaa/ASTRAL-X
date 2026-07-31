@@ -9,6 +9,13 @@ trap 'rm -rf "$TEST_CLASSES"' EXIT
 javac -cp "${ROOT}/build" -d "$TEST_CLASSES" "${ROOT}/test/CliPresetsTest.java"
 java -cp "${ROOT}/build:${TEST_CLASSES}" astralx.CliPresetsTest
 
+VERSION_TEXT="$(NO_COLOR=1 java -cp "${ROOT}/build" astralx.Main --version)"
+[[ "$VERSION_TEXT" == "Welcome to ASTRAL-X version 1.0.0!" ]]
+
+VERSION_COLOR="$(env -u NO_COLOR FORCE_COLOR=1 java -cp "${ROOT}/build" astralx.Main --version)"
+EXPECTED_COLOR="$(printf '\033[36mWelcome\033[0m to \033[32mASTRAL-X\033[0m version 1.0.0!')"
+[[ "$VERSION_COLOR" == "$EXPECTED_COLOR" ]]
+
 run_score() {
   java -cp "${ROOT}/build" astralx.Main --cpu -q \
     -i "${ROOT}/test/input/tc1_complete_only.tre" "$@" 2>&1 |
