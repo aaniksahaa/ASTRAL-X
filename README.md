@@ -88,6 +88,35 @@ Use `astralx --help` for the complete option list and `astralx --diagnose` to
 check the packaged runtime, native libraries, driver, and GPU selection without
 loading a dataset.
 
+## Running ASTRAL-X on Biological Datasets
+
+The current biological example uses the 48-taxon avian dataset. From the
+directory where you want the `data/` folder, download, extract, clean up, and
+verify the dataset with:
+
+```bash
+mkdir -p data/avian-48
+wget -c \
+  -O data/avian-48.tar \
+  "https://zenodo.org/records/21722787/files/avian-48.tar?download=1"
+tar -xf data/avian-48.tar \
+  -C data/avian-48 \
+  --strip-components=1 &&
+  rm data/avian-48.tar
+test -s data/avian-48/avian-48-gt.tre &&
+  ls -lh data/avian-48/avian-48-gt.tre
+```
+
+Run ASTRAL-X with the complete, full search space and bitset intersections:
+
+```bash
+astralx -i data/avian-48/avian-48-gt.tre \
+  -o data/avian-48/out-astralx-avian-48.tre \
+  --search-space S2 \
+  --intersection-method I4 \
+  -vv
+```
+
 ## Search-space presets
 
 `--search-space` controls how broadly ASTRAL-X explores candidate species-tree
