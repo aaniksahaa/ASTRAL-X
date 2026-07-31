@@ -9,6 +9,10 @@ construction, and GPU-accelerated computation preserve ASTRAL's quartet-based
 optimization and statistical guarantees while making analyses with hundreds of
 thousands of taxa practical.
 
+ASTRAL-X reconstructed a 300,000-taxon species tree within only
+12 hours using 100 GB of memory, and inferred the evolutionary history of 9,524
+angiosperm species in just 16 minutes.
+
 An NVIDIA CUDA GPU is strongly recommended, particularly for large datasets,
 and is the primary high-performance execution path. CPU execution remains
 available as a reliable fallback for compatibility, smaller analyses, and
