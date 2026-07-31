@@ -51,9 +51,6 @@ Verify that the launcher is available:
 astralx --version
 ```
 
-It prints `Welcome to ASTRAL-X version 1.0.0!`, with “Welcome” in CPU cyan and
-“ASTRAL-X” in GPU green when run in a color-capable terminal.
-
 ## Quick start
 
 After the one-time setup, ASTRAL-X can be run from any directory:
