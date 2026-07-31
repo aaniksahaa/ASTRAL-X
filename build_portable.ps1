@@ -137,7 +137,7 @@ ASTRAL-X $Version - self-contained windows-$PlatformArch build
 Run in PowerShell or Command Prompt:
   .\astralx.exe --help
   .\astralx.exe --diagnose
-  .\astralx.exe -i gene_trees.tre -o species_tree.tre
+  .\astralx.exe -i C:\path\to\gene_trees.tre -o C:\path\to\output_species_tree.tre
 
 Ready-made 37-taxon example (run from this directory):
   .\astralx.exe -i example\all_gt_37.tre -o example\predicted_st_37.tre --search-space S1 -vv

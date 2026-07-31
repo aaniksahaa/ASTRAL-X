@@ -64,6 +64,8 @@ Artifacts, SHA-256 files, and concise JSON manifests are written under
 `dist/<version>/`. Pass `--version 1.2.0` (`-Version 1.2.0` on Windows) to build
 an explicit release version. Existing versions remain side-by-side; rebuilding
 the same version/platform is refused unless `--force` (`-Force`) is supplied.
+The local `dist/` directory is ignored by Git; release automation publishes the
+archives, checksums, and manifests as GitHub Release assets.
 
 The default CUDA architecture, `all-major`, embeds native code for every major
 GPU generation supported by the installed toolkit and PTX for forward

@@ -196,7 +196,7 @@ ASTRAL-X ${VERSION} — self-contained ${PLATFORM_OS}-${PLATFORM_ARCH} build
 Run:
   ./astralx --help
   ./astralx --diagnose
-  ./astralx -i gene_trees.tre -o species_tree.tre
+  ./astralx -i /path/to/gene_trees.tre -o /path/to/output_species_tree.tre
 
 Ready-made 37-taxon example (run from this directory):
   ./astralx -i example/all_gt_37.tre -o example/predicted_st_37.tre --search-space S1 -vv

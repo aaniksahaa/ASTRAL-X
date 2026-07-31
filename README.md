@@ -25,13 +25,23 @@ Keep the complete extracted application directory together: the launcher needs
 the accompanying `bin/` and `lib/` directories. The application directory can
 be stored anywhere, but it should not be moved after creating the link below.
 
-From this repository root, the version `1.0.0` Linux x86-64 build can be added to
-your user `PATH` with:
+Download `astralx-1.0.0-linux-x86_64.tar.gz` from the
+[GitHub Releases page](https://github.com/aaniksahaa/ASTRAL-X/releases). After
+cloning this repository, place the downloaded archive under `dist/1.0.0/` and
+extract it from the repository root:
+
+```bash
+mkdir -p dist/1.0.0
+cp /path/to/downloaded/astralx-1.0.0-linux-x86_64.tar.gz dist/1.0.0/
+tar -xzf dist/1.0.0/astralx-1.0.0-linux-x86_64.tar.gz -C dist/1.0.0
+```
+
+Then add the extracted launcher to your user `PATH`:
 
 ```bash
 ASTRALX_DIR="$(realpath dist/1.0.0/astralx-1.0.0-linux-x86_64)"
 mkdir -p "$HOME/.local/bin"
-ln -s "$ASTRALX_DIR/astralx" "$HOME/.local/bin/astralx"
+ln -sfn "$ASTRALX_DIR/astralx" "$HOME/.local/bin/astralx"
 grep -qxF 'export PATH="$HOME/.local/bin:$PATH"' "$HOME/.bashrc" || \
   printf '%s\n' 'export PATH="$HOME/.local/bin:$PATH"' >> "$HOME/.bashrc"
 export PATH="$HOME/.local/bin:$PATH"
@@ -53,20 +63,26 @@ link in `~/.local/bin` with the new location.
 After the one-time setup, ASTRAL-X can be run from any directory:
 
 ```bash
-astralx -i gene_trees.tre -o species_tree.tre
+astralx -i /path/to/gene_trees.tre -o /path/to/output_species_tree.tre
 ```
 
 Input and output may be relative to the current directory or given as absolute
-paths.
+paths. For a directly runnable example, use the included 37-taxon dataset from
+this repository root:
+
+```bash
+astralx -i example/all_gt_37.tre -o example/out_astralx_37.tre
+```
 
 The defaults are `--auto`, `--search-space S1`, and
 `--intersection-method I2`: ASTRAL-X tries CUDA first, safely falls back to CPU,
 uses the smallest search space, and uses prefix-sum intersections.
 
-For a broader search on incomplete gene trees using cross-tree recombined transitions as well as tree-local ones:
+For a broader search on incomplete gene trees using cross-tree recombined
+transitions as well as tree-local ones:
 
 ```bash
-astralx -i gene_trees.tre -o species_tree.tre \
+astralx -i /path/to/gene_trees.tre -o /path/to/output_species_tree.tre \
   --search-space S2 --intersection-method I2
 ```
 
@@ -136,6 +152,10 @@ dist/
     ├── astralx-1.0.0-<os>-<arch>.<archive>.sha256
     └── astralx-1.0.0-<os>-<arch>.manifest.json
 ```
+
+The entire local `dist/` directory is ignored by Git. Portable archives,
+checksums, and manifests are distributed through GitHub Releases rather than
+committed to the source repository.
 
 Different version directories are retained. Rebuilding an existing version and
 platform is refused by default; pass `--force` only when you intentionally want
