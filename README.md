@@ -32,10 +32,11 @@ run this single setup block. It installs ASTRAL-X under `~/.local/opt/` and adds
 the launcher to your user `PATH` without requiring `sudo`:
 
 ```bash
-mkdir -p "$HOME/.local/opt/astralx/1.0.0"
+ASTRALX_INSTALL_ROOT="$HOME/.local/opt/astralx/1.0.0"
+mkdir -p "$ASTRALX_INSTALL_ROOT"
 tar -xzf /path/to/downloaded/astralx-1.0.0-linux-x86_64.tar.gz \
-  -C "$HOME/.local/opt/astralx/1.0.0"
-ASTRALX_DIR="$(realpath "$HOME/.local/opt/astralx/1.0.0/astralx-1.0.0-linux-x86_64")"
+  -C "$ASTRALX_INSTALL_ROOT"
+ASTRALX_DIR="$(realpath "$ASTRALX_INSTALL_ROOT/astralx-1.0.0-linux-x86_64")"
 mkdir -p "$HOME/.local/bin"
 ln -sfn "$ASTRALX_DIR/astralx" "$HOME/.local/bin/astralx"
 grep -qxF 'export PATH="$HOME/.local/bin:$PATH"' "$HOME/.bashrc" || \
