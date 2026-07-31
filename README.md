@@ -63,7 +63,7 @@ The defaults are `--auto`, `--search-space S1`, and
 `--intersection-method I2`: ASTRAL-X tries CUDA first, safely falls back to CPU,
 uses the smallest search space, and uses prefix-sum intersections.
 
-For a broader practical search on incomplete gene trees:
+For a broader search on incomplete gene trees using cross-tree recombined transitions as well as tree-local ones:
 
 ```bash
 astralx -i gene_trees.tre -o species_tree.tre \
@@ -86,7 +86,7 @@ Quartet weights are still calculated from the original gene trees.
 |---|---|---|
 | **S1** | Incomplete, local | Uses topology candidates found directly within each original gene tree. Fastest and the default. |
 | **S2** | Complete, full | Completes incomplete gene trees, constructs a distance-based guide tree, and combines compatible candidates across trees. Recommended broader search. |
-| **S3** | Exhaustive | Includes everything in S2, then adds consensus-derived candidates, denser nearest-neighbour groups, remaining consensus-polytomy resolutions, large-polytomy handling, and resolutions derived from polytomous input gene trees. Largest and slowest. |
+| **S3** | Exhaustive | Includes everything in S2, then adds consensus-derived candidates, denser nearest-neighbour groups, remaining consensus-polytomy resolutions, large-polytomy handling, and resolutions derived from polytomous input gene trees. |
 
 Moving from S1 to S3 progressively broadens the candidate topology set. A
 larger preset can increase runtime and memory substantially and is not
