@@ -133,6 +133,18 @@ smoke testing, checksumming, and manifest generation:
 ./build_portable.sh --version 1.0.0
 ```
 
+The newly built application and release files are written under `dist/1.0.0/`.
+On Linux x86-64, you may relink the `astralx` command to the newly generated application:
+
+```bash
+ASTRALX_DIR="$(realpath dist/1.0.0/astralx-1.0.0-linux-x86_64)"
+mkdir -p "$HOME/.local/bin"
+ln -sfn "$ASTRALX_DIR/astralx" "$HOME/.local/bin/astralx"
+grep -qxF 'export PATH="$HOME/.local/bin:$PATH"' "$HOME/.bashrc" || \
+  printf '%s\n' 'export PATH="$HOME/.local/bin:$PATH"' >> "$HOME/.bashrc"
+export PATH="$HOME/.local/bin:$PATH"
+```
+
 On Linux and Windows, CUDA is included automatically when `nvcc` is available;
 the resulting application always retains CPU fallback. Use `--without-cuda` to
 deliberately create a CPU-only build. The resulting layout is:

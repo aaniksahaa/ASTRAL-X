@@ -10,11 +10,18 @@ javac -cp "${ROOT}/build" -d "$TEST_CLASSES" "${ROOT}/test/CliPresetsTest.java"
 java -cp "${ROOT}/build:${TEST_CLASSES}" astralx.CliPresetsTest
 
 VERSION_TEXT="$(NO_COLOR=1 java -cp "${ROOT}/build" astralx.Main --version)"
-[[ "$VERSION_TEXT" == "Welcome to ASTRAL-X version 1.0.0!" ]]
+[[ "$VERSION_TEXT" == *"ASTRAL-X  v1.0.0"* ]]
+[[ "$VERSION_TEXT" == *"Welcome to ASTRAL-X version 1.0.0!"* ]]
+[[ "$(NO_COLOR=1 java -cp "${ROOT}/build" astralx.Main -v)" == "$VERSION_TEXT" ]]
 
 VERSION_COLOR="$(env -u NO_COLOR FORCE_COLOR=1 java -cp "${ROOT}/build" astralx.Main --version)"
-EXPECTED_COLOR="$(printf '\033[36mWelcome\033[0m to \033[32mASTRAL-X\033[0m version 1.0.0!')"
-[[ "$VERSION_COLOR" == "$EXPECTED_COLOR" ]]
+WHITE_GREETING="$(printf '\033[97mWelcome to ASTRAL-X version 1.0.0!\033[0m')"
+[[ "$VERSION_COLOR" == *"$WHITE_GREETING"* ]]
+
+HELP_TEXT="$(NO_COLOR=1 java -cp "${ROOT}/build" astralx.Main --help 2>&1)"
+[[ "$HELP_TEXT" == *"ASTRAL-X  v1.0.0"* ]]
+[[ "$HELP_TEXT" == *"Usage:"* ]]
+[[ "$(NO_COLOR=1 java -cp "${ROOT}/build" astralx.Main -h 2>&1)" == "$HELP_TEXT" ]]
 
 run_score() {
   java -cp "${ROOT}/build" astralx.Main --cpu -q \

@@ -463,7 +463,6 @@ public class Main {
                         }
                     }
                 }
-                case "-v"              -> cfg.setVerbosity(Logging.INFO);
                 case "-vv"             -> cfg.setVerbosity(Logging.DEBUG);
                 case "-vvv"            -> cfg.setVerbosity(Logging.TRACE);
                 case "-q","--quiet"    -> cfg.setVerbosity(Logging.QUIET);
@@ -520,7 +519,7 @@ public class Main {
                 case "--gpu-dist-tile-size" -> { if (++i>=args.length) return false; cfg.setGpuDistTileSizeB(Integer.parseInt(args[i])); }
                 case "--gpu-sim-vram-cap-mb" -> { if (++i>=args.length) return false; cfg.setGpuSimilarityVramCapMiB(Integer.parseInt(args[i])); }
                 case "--diagnose"       -> cfg.setDiagnose(true);
-                case "--version"        -> { Banner.printVersion(); System.exit(0); }
+                case "-v", "--version"  -> { Banner.printVersion(); System.exit(0); }
                 case "-h","--help"     -> { printUsage(); System.exit(0); }
                 default -> { System.err.println("Unknown arg: " + args[i]); return false; }
             }
@@ -720,9 +719,8 @@ public class Main {
     }
 
     private static void printUsage() {
+        Banner.printTitle(System.err);
         System.err.print("""
-            ASTRAL-X %s
-
             Usage:
               astralx -i <gene_trees.tre> [-o <species_tree.tre>] [options]
               astralx -i <gene_trees.tre> --score-species-tree <species_tree.tre> [options]
@@ -739,9 +737,10 @@ public class Main {
               --gpu                            Prefer CUDA; warn and fall back to CPU if unavailable
               --gpu-strict                     Require CUDA; fail before reading input if unavailable
               --diagnose                       Print installation/hardware diagnostics and exit
-              --version                        Print version and exit
+              -v, --version                    Print version and exit
               -h, --help                       Show this help and exit
-              -q, --quiet | -v | -vv | -vvv   Quiet, info, debug, or trace logging
+              -q, --quiet                      Quiet logging
+              -vv | -vvv                       Debug or trace logging
 
             Search and scoring:
               --search-space S1..S3            Friendly search-space preset (default: S1)
@@ -790,7 +789,7 @@ public class Main {
             The standalone distribution includes its own Java runtime. CUDA is optional;
             a missing/incompatible NVIDIA driver always has a CPU fallback unless
             --gpu-strict is used.
-            """.formatted(VERSION));
+            """);
     }
 
     private static void runScoreOnly(Config cfg, TaxonRegistry registry,

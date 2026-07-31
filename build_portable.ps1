@@ -190,7 +190,9 @@ when falling back would be undesirable.
             $env:NO_COLOR = $PreviousNoColor
         }
     }
-    if ($VersionExitCode -ne 0 -or $VersionOutput -ne "Welcome to ASTRAL-X version $Version!") {
+    if ($VersionExitCode -ne 0 `
+            -or -not $VersionOutput.Contains("ASTRAL-X  v$Version") `
+            -or -not $VersionOutput.Contains("Welcome to ASTRAL-X version $Version!")) {
         throw "Packaged --version smoke test failed: '$VersionOutput'."
     }
     & $Launcher --cpu --diagnose | Out-Null

@@ -233,7 +233,8 @@ EOF
 
 # Smoke tests use only the packaged launcher/runtime.
 VERSION_OUTPUT="$(NO_COLOR=1 "$PACKAGED_LAUNCHER" --version)"
-[[ "$VERSION_OUTPUT" == "Welcome to ASTRAL-X version ${VERSION}!" ]] || {
+[[ "$VERSION_OUTPUT" == *"ASTRAL-X  v${VERSION}"* \
+   && "$VERSION_OUTPUT" == *"Welcome to ASTRAL-X version ${VERSION}!"* ]] || {
   echo "Error: packaged version mismatch: ${VERSION_OUTPUT}" >&2
   exit 1
 }

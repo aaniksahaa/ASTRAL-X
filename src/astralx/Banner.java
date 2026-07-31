@@ -20,6 +20,7 @@ public class Banner {
     private static final String GRN  = "\033[32m";
     private static final String YLW  = "\033[33m";
     private static final String WHT  = "\033[97m";
+    private static final int TITLE_WIDTH = 63;
 
     private static final boolean USE_COLOR = detectColor(2);
 
@@ -45,28 +46,35 @@ public class Banner {
         return USE_COLOR ? code + text + RST : text;
     }
 
+    private static String c(boolean color, String code, String text) {
+        return color ? code + text + RST : text;
+    }
+
     private static String fmtMiB(long mib) {
         return mib >= 1024 ? String.format("%.1f GB", mib / 1024.0) : mib + " MB";
     }
 
     // ── Public entry point ────────────────────────────────────────────────────
 
-    /** Print the compact, colour-aware version greeting to stdout. */
-    public static void printVersion() {
-        boolean color = detectColor(1);
-        String welcome = color ? CYAN + "Welcome" + RST : "Welcome";
-        String product = color ? GRN + "ASTRAL-X" + RST : "ASTRAL-X";
-        System.out.println(welcome + " to " + product + " version " + Main.VERSION + "!");
+    /** Print the shared title box, using the colour state of the target stream. */
+    public static void printTitle(PrintStream out) {
+        boolean color = out == System.out ? detectColor(1) : USE_COLOR;
+        printTitle(out, color);
     }
 
-    public static void print(Config cfg) {
-        PrintStream out = System.err;
-        // w = number of ═ characters (= total inner + 2 for the space padding each side)
-        final int w = 63;
+    /** Print the title box and compact version greeting to stdout. */
+    public static void printVersion() {
+        boolean color = detectColor(1);
+        printTitle(System.out, color);
+        System.out.println(c(color, WHT,
+            "Welcome to ASTRAL-X version " + Main.VERSION + "!"));
+        System.out.println();
+    }
 
-        // ── Title box ──────────────────────────────────────────────────────
+    private static void printTitle(PrintStream out, boolean color) {
+        // w = number of ═ characters (= total inner + 2 for the space padding each side)
         String title = "ASTRAL-X  v" + Main.VERSION;
-        int inner = w - 2;
+        int inner = TITLE_WIDTH - 2;
         int lpad  = (inner - title.length()) / 2;
         int rpad  = inner - title.length() - lpad;
         String paddedTitle = " ".repeat(Math.max(0, lpad))
@@ -74,14 +82,19 @@ public class Banner {
                            + " ".repeat(Math.max(0, rpad));
 
         out.println();
-        out.println("  " + c(BOLD + CYAN, "╔" + "═".repeat(w) + "╗"));
-        out.println("  " + c(BOLD + CYAN, "║") + " "
-                         + c(BOLD + WHT,  paddedTitle)
-                         + " " + c(BOLD + CYAN, "║"));
-        out.println("  " + c(BOLD + CYAN, "╚" + "═".repeat(w) + "╝"));
+        out.println("  " + c(color, BOLD + CYAN, "╔" + "═".repeat(TITLE_WIDTH) + "╗"));
+        out.println("  " + c(color, BOLD + CYAN, "║") + " "
+                         + c(color, BOLD + WHT, paddedTitle)
+                         + " " + c(color, BOLD + CYAN, "║"));
+        out.println("  " + c(color, BOLD + CYAN, "╚" + "═".repeat(TITLE_WIDTH) + "╝"));
         out.println();
+    }
 
-        String sep = "─".repeat(w - 2);
+    public static void print(Config cfg) {
+        PrintStream out = System.err;
+        printTitle(out, USE_COLOR);
+
+        String sep = "─".repeat(TITLE_WIDTH - 2);
 
         // ── System section ─────────────────────────────────────────────────
         out.println("  " + c(BOLD, "System") + "  " + c(DIM, sep.substring(0, sep.length() - 4)));
@@ -202,7 +215,7 @@ public class Banner {
                 : naTag));
 
         out.println();
-        out.println("  " + c(DIM, "─".repeat(w)));
+        out.println("  " + c(DIM, "─".repeat(TITLE_WIDTH)));
         out.println();
     }
 
