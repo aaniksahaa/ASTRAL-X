@@ -116,8 +116,13 @@ astralx -i data/avian-48/avian-48-gt.tre \
   -o data/avian-48/out-astralx-avian-48.tre \
   --search-space S2 \
   --intersection-method I4 \
+  --log-file data/avian-48/astralx_avian_48.log \
   -vv
 ```
+
+The run remains visible in the terminal. Persistent messages and the final
+summary are also saved to `data/avian-48/astralx_avian_48.log`; animated
+progress-bar repaints remain terminal-only.
 
 ### Angiosperms
 
@@ -144,8 +149,12 @@ astralx -i data/angio/all_gt_angio.tre \
   -o data/angio/out-astralx-angio.tre \
   --search-space S3 \
   --intersection-method I3 \
+  --log-file data/angio/astralx_angio.log \
   -vv
 ```
+
+Persistent messages and the final summary are also saved to
+`data/angio/astralx_angio.log`, while animated progress remains terminal-only.
 
 ## Search-space presets
 

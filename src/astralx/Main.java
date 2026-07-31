@@ -38,11 +38,21 @@ public class Main {
     public static final String VERSION = Version.current();
 
     public static void main(String[] args) {
+        TerminalLog terminalLog;
+        try {
+            terminalLog = TerminalLog.installFromArgs(args);
+        } catch (TerminalLog.SetupException e) {
+            System.err.println("Error: " + e.getMessage());
+            System.exit(2);
+            return;
+        }
         try {
             run(args);
         } catch (Throwable t) {
             FatalReporter.report(t, args);
             System.exit(1);
+        } finally {
+            if (terminalLog != null) terminalLog.close();
         }
     }
 
@@ -399,9 +409,16 @@ public class Main {
 
     private static boolean parseArgs(String[] args, Config cfg) {
         for (int i = 0; i < args.length; i++) {
+            if (args[i].startsWith("--log-file=")) {
+                String path = args[i].substring("--log-file=".length());
+                if (path.isBlank()) return false;
+                cfg.setLogFile(path);
+                continue;
+            }
             switch (args[i]) {
                 case "-i","--input"    -> { if (++i>=args.length) return false; cfg.setInputFile(args[i]); }
                 case "-o","--output"   -> { if (++i>=args.length) return false; cfg.setOutputFile(args[i]); }
+                case "--log-file"      -> { if (++i>=args.length) return false; cfg.setLogFile(args[i]); }
                 case "-c", "--score", "--species-tree", "--score-species-tree" -> {
                     if (++i>=args.length) return false;
                     cfg.setScoreSpeciesTreeFile(args[i]);
@@ -739,6 +756,7 @@ public class Main {
             General:
               -i, --input FILE                 Input gene trees (one Newick tree per line)
               -o, --output FILE                Output species tree (stdout when omitted)
+              --log-file FILE                  Save run messages to FILE (progress remains terminal-only)
               -c, --score-species-tree FILE    Score one supplied species tree and exit
               -t, -T, --threads, --num-threads N
                                                  CPU worker threads (default: available cores)

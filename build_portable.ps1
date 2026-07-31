@@ -138,6 +138,7 @@ Run in PowerShell or Command Prompt:
   .\astralx.exe --help
   .\astralx.exe --diagnose
   .\astralx.exe -i C:\path\to\gene_trees.tre -o C:\path\to\output_species_tree.tre
+  .\astralx.exe -i C:\path\to\gene_trees.tre -o C:\path\to\output_species_tree.tre --log-file C:\path\to\astralx.log
 
 Ready-made 37-taxon example (run from this directory):
   .\astralx.exe -i example\all_gt_37.tre -o example\predicted_st_37.tre --search-space S1 -vv
@@ -199,10 +200,16 @@ when falling back would be undesirable.
     if ($LASTEXITCODE -ne 0) { throw "Packaged --diagnose smoke test failed." }
     $SmokeTree = Join-Path $Work "smoke-species-tree.tre"
     & $Launcher --cpu --search-space S2 -q `
-        -i (Join-Path $ExampleDir "all_gt_37.tre") -o $SmokeTree
+        -i (Join-Path $ExampleDir "all_gt_37.tre") -o $SmokeTree `
+        --log-file (Join-Path $Work "smoke-run.log")
     if ($LASTEXITCODE -ne 0 -or -not (Test-Path $SmokeTree) -or
             (Get-Item $SmokeTree).Length -eq 0) {
         throw "Packaged end-to-end inference smoke test failed."
+    }
+    $SmokeLog = Join-Path $Work "smoke-run.log"
+    if (-not (Test-Path $SmokeLog) -or
+            -not (Select-String -Path $SmokeLog -SimpleMatch "Run Summary" -Quiet)) {
+        throw "Packaged --log-file smoke test did not capture the complete run."
     }
 
     if (Test-Path $FinalImage) { Remove-Item -Recurse -Force $FinalImage }

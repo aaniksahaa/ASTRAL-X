@@ -148,6 +148,10 @@ public class Banner {
         out.println("    " + row("Output file",   outputPath != null
                                                   ? c(WHT, outputPath)
                                                   : c(DIM, "(stdout)")));
+        String logPath = cfg.getLogFile();
+        if (logPath != null) {
+            out.println("    " + row("Terminal log", c(WHT, logPath)));
+        }
         out.println();
 
         // ── Compute ────────────────────────────────────────────────────────

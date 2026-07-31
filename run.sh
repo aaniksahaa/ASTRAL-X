@@ -9,6 +9,7 @@
 # to duplicate it.
 
 set -euo pipefail
+ORIGINAL_ARGS=("$@")
 
 # Preserve coloured Java output when score-only mode pipes through tee for
 # notification parsing. Banner still honours NO_COLOR over FORCE_COLOR.
@@ -28,6 +29,7 @@ NC='\033[0m'
 
 INPUT_FILE=""
 OUTPUT_FILE=""
+LOG_FILE=""
 SCORE_SPECIES_TREE=""
 XMS="${ASTRALX_XMS:-4g}"
 XMX="${ASTRALX_XMX:-128g}"
@@ -47,6 +49,7 @@ Required:
 
 Optional:
   --output, -o       Output species tree file
+  --log-file FILE    Save run messages to FILE (progress remains terminal-only)
   --score-species-tree, --species-tree, --score, -c
                      Score the supplied species tree and exit
   --cpu              Force CPU mode
@@ -128,6 +131,12 @@ while [[ $# -gt 0 ]]; do
       PROGRAM_ARGS+=("-o" "$2")
       shift 2
       ;;
+    --log-file)
+      [[ $# -ge 2 ]] || { echo -e "${RED}Error: --log-file requires a file path.${NC}"; exit 2; }
+      LOG_FILE="$2"
+      PROGRAM_ARGS+=("--log-file" "$2")
+      shift 2
+      ;;
     --auto|--cpu|--gpu|--gpu-strict)
       PROGRAM_ARGS+=("$1")
       COMPUTE_MODE_SET=true
@@ -192,6 +201,46 @@ fi
 if [[ -n "$OUTPUT_FILE" ]]; then
   mkdir -p "$(dirname "$OUTPUT_FILE")"
   OUTPUT_FILE="$(realpath "$OUTPUT_FILE")"
+fi
+
+if [[ -n "$LOG_FILE" ]]; then
+  mkdir -p "$(dirname "$LOG_FILE")"
+  LOG_FILE="$(realpath "$LOG_FILE")"
+  if [[ "$LOG_FILE" == "$INPUT_FILE" || (-n "$OUTPUT_FILE" && "$LOG_FILE" == "$OUTPUT_FILE") ]]; then
+    echo -e "${RED}Error: --log-file must differ from the input and output files: $LOG_FILE${NC}"
+    exit 2
+  fi
+fi
+
+# Re-enter once under tee so the log contains the wrapper diagnostics, build
+# output, Java output, and native CUDA messages (but not progress repaints).
+if [[ -n "$LOG_FILE" && "${ASTRALX_LOG_CAPTURED:-}" != "1" ]]; then
+  filter_terminal_log() {
+    local line
+    while IFS= read -r line || [[ -n "$line" ]]; do
+      [[ "$line" == *$'\r'* ]] && continue
+      printf '%s\n' "$line"
+    done
+  }
+  FILTER_DIR="$(mktemp -d "${TMPDIR:-/tmp}/astralx-log-filter.XXXXXX")"
+  FILTER_PIPE="${FILTER_DIR}/stream"
+  mkfifo "$FILTER_PIPE"
+  cleanup_log_filter() {
+    rm -f "$FILTER_PIPE"
+    rmdir "$FILTER_DIR" 2>/dev/null || true
+  }
+  trap cleanup_log_filter EXIT
+  filter_terminal_log < "$FILTER_PIPE" > "$LOG_FILE" &
+  FILTER_PID=$!
+  set +e
+  ASTRALX_LOG_CAPTURED=1 "${BASH_SOURCE[0]}" "${ORIGINAL_ARGS[@]}" 2>&1 | tee "$FILTER_PIPE"
+  PIPE_STATUS=("${PIPESTATUS[@]}")
+  wait "$FILTER_PID"
+  FILTER_STATUS=$?
+  set -e
+  if ((PIPE_STATUS[0] != 0)); then exit "${PIPE_STATUS[0]}"; fi
+  if ((PIPE_STATUS[1] != 0)); then exit "${PIPE_STATUS[1]}"; fi
+  exit "$FILTER_STATUS"
 fi
 
 if [[ -n "$SCORE_SPECIES_TREE" ]]; then

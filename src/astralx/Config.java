@@ -60,6 +60,7 @@ public class Config {
 
     private String inputFile;
     private String outputFile;
+    private String logFile;
     private String scoreSpeciesTreeFile;
     /** AUTO probes the bundled CUDA backend and falls back safely to CPU. */
     private ComputeMode computeMode = ComputeMode.AUTO;
@@ -217,6 +218,8 @@ public class Config {
     public void setInputFile(String f){ this.inputFile = f; }
     public String getOutputFile()     { return outputFile; }
     public void setOutputFile(String f){ this.outputFile = f; }
+    public String getLogFile()        { return logFile; }
+    public void setLogFile(String f)  { this.logFile = f; }
     public String getScoreSpeciesTreeFile()      { return scoreSpeciesTreeFile; }
     public void setScoreSpeciesTreeFile(String f){ this.scoreSpeciesTreeFile = f; }
     public boolean isScoreOnly()       { return scoreSpeciesTreeFile != null; }

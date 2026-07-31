@@ -164,12 +164,12 @@ if [[ "$PLATFORM_OS" == "macos" ]]; then
   IMAGE="${WORK}/${ARTIFACT}"
   mkdir -p "$IMAGE"
   mv "$RAW_IMAGE" "${IMAGE}/astralx.app"
-  ln -s astralx.app/Contents/MacOS/astralx "${IMAGE}/astralx"
+  install -m 0755 "${ROOT}/packaging/astralx-launcher" "${IMAGE}/astralx"
   PACKAGED_LAUNCHER="${IMAGE}/astralx"
 else
   IMAGE="${JPACKAGE_OUT}/astralx"
-  ln -s bin/astralx "${IMAGE}/astralx"
-  PACKAGED_LAUNCHER="${IMAGE}/bin/astralx"
+  install -m 0755 "${ROOT}/packaging/astralx-launcher" "${IMAGE}/astralx"
+  PACKAGED_LAUNCHER="${IMAGE}/astralx"
 fi
 
 # Linux portability is bounded by the newest glibc symbol used by any bundled
@@ -197,6 +197,7 @@ Run:
   ./astralx --help
   ./astralx --diagnose
   ./astralx -i /path/to/gene_trees.tre -o /path/to/output_species_tree.tre
+  ./astralx -i /path/to/gene_trees.tre -o /path/to/output_species_tree.tre --log-file /path/to/astralx.log
 
 Ready-made 37-taxon example (run from this directory):
   ./astralx -i example/all_gt_37.tre -o example/predicted_st_37.tre --search-space S1 -vv
@@ -241,9 +242,18 @@ VERSION_OUTPUT="$(NO_COLOR=1 "$PACKAGED_LAUNCHER" --version)"
 "$PACKAGED_LAUNCHER" --cpu --diagnose >/dev/null
 "$PACKAGED_LAUNCHER" --cpu --search-space S2 -q \
     -i "${EXAMPLE_DIR}/all_gt_37.tre" \
-    -o "${WORK}/smoke-species-tree.tre"
+    -o "${WORK}/smoke-species-tree.tre" \
+    --log-file "${WORK}/smoke-run.log"
 if [[ ! -s "${WORK}/smoke-species-tree.tre" ]]; then
   echo "Error: packaged end-to-end inference smoke test produced no tree." >&2
+  exit 1
+fi
+if [[ ! -s "${WORK}/smoke-run.log" ]] || ! grep -q "Run Summary" "${WORK}/smoke-run.log"; then
+  echo "Error: packaged --log-file smoke test did not capture the complete run." >&2
+  exit 1
+fi
+if LC_ALL=C grep -q $'\r' "${WORK}/smoke-run.log"; then
+  echo "Error: packaged --log-file retained transient progress-bar repaints." >&2
   exit 1
 fi
 
