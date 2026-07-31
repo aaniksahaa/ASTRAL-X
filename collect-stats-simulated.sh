@@ -12,10 +12,13 @@
 
 set -euo pipefail
 
+SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 # Algorithm configuration - modify this to select which algorithms to collect
 ALGORITHMS=("astralx")
 
-BASE_DIR="${HOME}/phylogeny"
+BASE_DIR="$(dirname "$SCRIPT_ROOT")"
+BASE_DIR_SET=false
 SIMPHY_DIR=""
 OUT_FILE="./perf-combined.csv"
 
@@ -40,7 +43,7 @@ EOF
 # parse args
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --base-dir|-b) BASE_DIR="$2"; shift 2 ;;
+    --base-dir|-b) BASE_DIR="$2"; BASE_DIR_SET=true; shift 2 ;;
     --simphy-dir) SIMPHY_DIR="$2"; shift 2 ;;
     --out|-o) OUT_FILE="$2"; shift 2 ;;
     --help|-h) print_help; exit 0 ;;
@@ -49,7 +52,11 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "$SIMPHY_DIR" ]]; then
-  SIMPHY_DIR="${BASE_DIR%/}/ASTRAL-X/simphy"
+  if [[ "$BASE_DIR_SET" == true ]]; then
+    SIMPHY_DIR="${BASE_DIR%/}/ASTRAL-X/simphy"
+  else
+    SIMPHY_DIR="${SCRIPT_ROOT}/simphy"
+  fi
 fi
 
 SIMPHY_DATA_DIR="${SIMPHY_DIR%/}/data"

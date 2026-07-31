@@ -13,11 +13,21 @@
 
 set -euo pipefail
 
+ASTRALX_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 BASE_DIR=""
 BASE_DIR_PROVIDED=false
 METHOD="astralx"  # default method
 FRESH=false
+NO_NOTIFY=false
+GPU_MONITOR=true
+SIMPHY_DATA_DIR=""
 NUM_REPLICATES=1
+T_LIST=(10)
+G_LIST=(10)
+SB_LIST=(0.000001)
+SPMIN_LIST=(500000)
+SPMAX_LIST=(1500000)
 
 # Method-specific options (passed through)
 ASTER_OPTS=""
@@ -41,16 +51,24 @@ Options:
   --method, -m      Method to use: astralx (default: astralx)
   --base-dir, -b    Base directory (optional, passed to sub-scripts if provided)
   --num-replicates, -n  Number of replicates to run (default: 1)
+  --taxa-list LIST       Comma/space-separated taxon counts (default: 10)
+  --genes-list LIST      Comma/space-separated gene-tree counts (default: 10)
+  --sb-list LIST         Comma/space-separated speciation rates
+  --spmin-list LIST      Comma/space-separated minimum population sizes
+  --spmax-list LIST      Comma/space-separated maximum population sizes
+  --simphy-data-dir DIR  Store/read generated datasets under DIR
   --fresh           Pass --fresh to sim.sh and test scripts (recreate outputs)
+  --no-gpu-monitor  Disable GPU-memory sampling
+  --no-notify, -nn  Disable completion notifications
   --opts, --alg-opts       Extra options for one ASTRAL-X simulated setting
   --opts-list, --alg-opts-list
                          Semicolon-separated list of ASTRAL-X option strings to loop over
   --help, -h        Show this message
 
 Examples:
-  ./run-bulk-simulated.sh -m astralx
-  ./run-bulk-simulated.sh -m astralx --num-replicates 3 --opts "--search-mode full -vv"
-  ./run-bulk-simulated.sh -m astralx --num-replicates 3 --opts-list "--search-mode local -vv;--search-mode full -vv"
+  ./run-bulk-simulated.sh --opts "--search-space S4 -vv"
+  ./run-bulk-simulated.sh --taxa-list "10,20" --genes-list "10,50" --num-replicates 3
+  ./run-bulk-simulated.sh --opts-list "--search-space S1 -vv;--search-space S4 -vv"
 EOF
 }
 
@@ -60,11 +78,19 @@ while [[ $# -gt 0 ]]; do
     --method|-m) METHOD="$2"; shift 2 ;;
     --base-dir|-b) BASE_DIR="$2"; BASE_DIR_PROVIDED=true; shift 2 ;;
     --num-replicates|-n) NUM_REPLICATES="$2"; shift 2 ;;
+    --taxa-list) read -r -a T_LIST <<< "${2//,/ }"; shift 2 ;;
+    --genes-list) read -r -a G_LIST <<< "${2//,/ }"; shift 2 ;;
+    --sb-list) read -r -a SB_LIST <<< "${2//,/ }"; shift 2 ;;
+    --spmin-list) read -r -a SPMIN_LIST <<< "${2//,/ }"; shift 2 ;;
+    --spmax-list) read -r -a SPMAX_LIST <<< "${2//,/ }"; shift 2 ;;
+    --simphy-data-dir) SIMPHY_DATA_DIR="$2"; shift 2 ;;
     --opts|--alg-opts|--astralx-opts) ASTRAL_OPTS="$2"; shift 2 ;;
     --opts=*|--alg-opts=*|--astralx-opts=*) ASTRAL_OPTS="${1#*=}"; shift ;;
     --opts-list|--alg-opts-list|--astralx-opts-list) ASTRALX_OPTS_LIST_RAW="$2"; shift 2 ;;
     --opts-list=*|--alg-opts-list=*|--astralx-opts-list=*) ASTRALX_OPTS_LIST_RAW="${1#*=}"; shift ;;
     --fresh) FRESH=true; shift ;;
+    --no-gpu-monitor) GPU_MONITOR=false; shift ;;
+    --no-notify|-nn) NO_NOTIFY=true; shift ;;
     --help|-h) print_help; exit 0 ;;
     *) echo "Unknown option: $1"; print_help; exit 1 ;;
   esac
@@ -79,112 +105,52 @@ case "$METHOD" in
     ;;
 esac
 
-# -------------------------------
-# parameter lists (EDIT AS NEEDED)
-# -------------------------------
-# T_LIST=(1000 2000 5000 10000 15000 20000 25000 30000)
-# G_LIST=(1000)
-# SB_LIST=(0.000001)
-# SPMIN_LIST=(50000 100000)
-# SPMAX_LIST=(150000 200000 250000 300000)
+# Keep the defaults deliberately small. Larger experiment matrices must be
+# requested explicitly through the list options above.
+for parameter_list in T_LIST G_LIST SB_LIST SPMIN_LIST SPMAX_LIST; do
+  declare -n values="$parameter_list"
+  if [[ ${#values[@]} -eq 0 ]]; then
+    echo "Error: $parameter_list cannot be empty."
+    exit 1
+  fi
+done
+unset -n values
 
-# T_LIST=(1000)
-# G_LIST=(100 200)
-# SB_LIST=(0.000001)
-# SPMIN_LIST=(50000)
-# SPMAX_LIST=(150000)
-
-T_LIST=(100)
-G_LIST=(100 200 1000 2500 5000)
-SB_LIST=(0.000001)
-SPMIN_LIST=(100000)
-SPMAX_LIST=(200000)
-
-T_LIST=(7500)
-G_LIST=(100 200 1000 2500 5000)
-SB_LIST=(0.000001)
-SPMIN_LIST=(100000)
-SPMAX_LIST=(200000)
-
-# T_LIST=(10)
-# G_LIST=(10)
-# SB_LIST=(0.000001)
-# SPMIN_LIST=(100000)
-# SPMAX_LIST=(200000)
-
-T_LIST=(100 200 500)
-G_LIST=(1000)
-SB_LIST=(0.000001)
-SPMIN_LIST=(50000)
-SPMAX_LIST=(1000000)
-
-T_LIST=(10 20)
-G_LIST=(10)
-SB_LIST=(0.000001)
-SPMIN_LIST=(50000)
-SPMAX_LIST=(1000000)
-
-T_LIST=(1000 2500 5000 7500 10000 25000)
-G_LIST=(1000)
-SB_LIST=(0.000001)
-SPMIN_LIST=(100000)
-SPMAX_LIST=(200000)
-
-T_LIST=(5000 10000 20000 30000 40000)
-G_LIST=(1000)
-SB_LIST=(0.000001)
-SPMIN_LIST=(100000)
-SPMAX_LIST=(150000 200000 250000 300000)
-
-T_LIST=(1000)
-G_LIST=(1000 5000 10000 25000 50000)
-SB_LIST=(0.000001)
-SPMIN_LIST=(100000)
-SPMAX_LIST=(150000 200000 250000 300000)
-
-# T_LIST=(1000)
-# G_LIST=(150000)
-# SB_LIST=(0.000001)
-# SPMIN_LIST=(100000)
-# SPMAX_LIST=(200000)
-
-
-# T_LIST=(30000 40000)
-# G_LIST=(1000)
-# SB_LIST=(0.000001)
-# SPMIN_LIST=(100000)
-# SPMAX_LIST=(150000)
-
-# Number of replicates to run
-# NUM_REPLICATES=5  # Now set via --num-replicates flag (default: 1)
-
-# ASTRAL-X setting sweep examples:
-# ASTRAL_OPTS="--search-mode full -vv"
-# ASTRALX_OPTS_LIST_RAW="--search-mode local -vv;--search-mode full -vv"
-# The setting-name encoder ignores verbosity, so these become:
-#   search-mode_local
-#   search-mode_full
+if [[ ! "$NUM_REPLICATES" =~ ^[1-9][0-9]*$ ]]; then
+  echo "Error: --num-replicates must be a positive integer."
+  exit 1
+fi
 
 # -------------------------------
 # execution
 # -------------------------------
 
 # Build base-dir argument if provided
+BASE_DIR_ARGS=()
 if $BASE_DIR_PROVIDED; then
-  BASE_DIR_ARG="--base-dir $BASE_DIR"
+  BASE_DIR_ARGS=(--base-dir "$BASE_DIR")
   echo "Base dir: $BASE_DIR"
 else
-  BASE_DIR_ARG=""
   echo "Base dir: (not specified, scripts will use their defaults)"
 fi
 
 # Build fresh argument if provided
+FRESH_ARGS=()
 if $FRESH; then
-  FRESH_ARG="--fresh"
+  FRESH_ARGS=(--fresh)
   echo "Fresh:    yes"
 else
-  FRESH_ARG=""
   echo "Fresh:    no"
+fi
+SHARED_TEST_ARGS=()
+if [[ -n "$SIMPHY_DATA_DIR" ]]; then
+  SHARED_TEST_ARGS+=(--simphy-data-dir "$SIMPHY_DATA_DIR")
+fi
+if [[ "$GPU_MONITOR" == false ]]; then
+  SHARED_TEST_ARGS+=(--no-gpu-monitor)
+fi
+if [[ "$NO_NOTIFY" == true ]]; then
+  SHARED_TEST_ARGS+=(--no-notify)
 fi
 echo "Method:   $METHOD"
 echo "Replicates: $NUM_REPLICATES"
@@ -218,7 +184,7 @@ for t in "${T_LIST[@]}"; do
             echo "  Running replicate R$i with $METHOD"
             
             for ASTRALX_OPTS_ITEM in "${ASTRALX_OPTS_LIST[@]}"; do
-              TEST_CMD=(./test-astralx-simulated.sh -r "R$i" $BASE_DIR_ARG -t "$t" -g "$g" --sb "$sb" --spmin "$spmin" --spmax "$spmax" $FRESH_ARG)
+              TEST_CMD=("${ASTRALX_ROOT}/test-astralx-simulated.sh" -r "R$i" "${BASE_DIR_ARGS[@]}" "${SHARED_TEST_ARGS[@]}" -t "$t" -g "$g" --sb "$sb" --spmin "$spmin" --spmax "$spmax" "${FRESH_ARGS[@]}")
               if [[ -n "$ASTRALX_OPTS_ITEM" ]]; then
                 TEST_CMD+=(--opts "$ASTRALX_OPTS_ITEM")
               fi

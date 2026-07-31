@@ -27,6 +27,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PYTHON_BIN="${ASTRALX_PYTHON:-${SCRIPT_DIR}/.venv/bin/python}"
+[[ -x "$PYTHON_BIN" ]] || PYTHON_BIN="python3"
 
 # ── Incomplete-specific defaults ──────────────────────────────────────────────
 FRACTION="0.30"
@@ -39,7 +41,8 @@ TAXA_NUM=""
 GENE_TREES=""
 REPLICATE="R1"
 REPLICATES="10"
-BASE_DIR=".."
+BASE_DIR="$(dirname "$SCRIPT_DIR")"
+BASE_DIR_SET=false
 SIMPHY_DIR=""
 SIMPHY_DIR_SET=false
 SIMPHY_DATA_DIR=""
@@ -85,7 +88,7 @@ while [[ $# -gt 0 ]]; do
     --gene_trees|-g)     GENE_TREES="$2"; SIM_ARGS+=("$1" "$2"); shift 2 ;;
     --replicate|-r)      REPLICATE="$2"; SIM_ARGS+=("$1" "$2"); shift 2 ;;
     --replicates|-rs)    REPLICATES="$2"; SIM_ARGS+=("$1" "$2"); shift 2 ;;
-    --base-dir|-b)       BASE_DIR="$2";  SIM_ARGS+=("$1" "$2"); shift 2 ;;
+    --base-dir|-b)       BASE_DIR="$2"; BASE_DIR_SET=true; SIM_ARGS+=("$1" "$2"); shift 2 ;;
     --simphy-dir)        SIMPHY_DIR="$2"; SIMPHY_DIR_SET=true; SIM_ARGS+=("$1" "$2"); shift 2 ;;
     --simphy-data-dir)   SIMPHY_DATA_DIR="$2"; SIMPHY_DATA_DIR_SET=true; SIM_ARGS+=("$1" "$2"); shift 2 ;;
     --sb)                SB="$2";    SIM_ARGS+=("$1" "$2"); shift 2 ;;
@@ -106,8 +109,13 @@ fi
 
 # ── Derive SIMPHY_DIR (same logic as sim.sh) ──────────────────────────────────
 if [[ "$SIMPHY_DIR_SET" == false ]]; then
-  SIMPHY_DIR="./simphy"
+  if [[ "$BASE_DIR_SET" == true ]]; then
+    SIMPHY_DIR="${BASE_DIR%/}/ASTRAL-X/simphy"
+  else
+    SIMPHY_DIR="${SCRIPT_DIR}/simphy"
+  fi
 fi
+SIMPHY_DIR="$(realpath "$SIMPHY_DIR")"
 
 # ── Derive complete output dir (same logic as sim.sh) ────────────────────────
 DATASET_NAME="t_${TAXA_NUM}_g_${GENE_TREES}_sb_${SB}_spmin_${SPMIN}_spmax_${SPMAX}"
@@ -156,7 +164,7 @@ for i in $(seq 1 "${REPLICATES}"); do
 
   mkdir -p "$DST_DIR"
 
-  python3 "$GEN_SCRIPT" \
+  "$PYTHON_BIN" "$GEN_SCRIPT" \
     "$SRC_FILE" "$DST_FILE" \
     --fraction "$FRACTION" \
     --seed "$SEED" \

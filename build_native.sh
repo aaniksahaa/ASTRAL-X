@@ -90,4 +90,4 @@ echo "  OK"
 
 echo "=== Native build complete ==="
 echo "Run with:"
-echo "  java -Djava.library.path=native -cp build astralx.Main -i <input.tre> --gpu --search-mode full -vv"
+echo "  ./run.sh -i <input.tre> -o <output.tre> --gpu --search-space S3 -vv --no-build"

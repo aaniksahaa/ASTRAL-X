@@ -9,31 +9,40 @@ DIST_DIR="${ROOT}/dist"
 CUDA_MODE="auto"          # auto | off | required
 CUDA_ARCH_VALUE="all-major"
 MAKE_ARCHIVE=true
+VERSION=""
+FORCE=false
 
 usage() {
   cat <<'EOF'
 Usage: ./build_portable.sh [options]
 
 Options:
-  --cpu-only              Build without CUDA libraries
-  --with-cuda             Require nvcc and bundle portable CUDA libraries
+  --without-cuda          Build without CUDA libraries
+  --cpu-only              Alias for --without-cuda
+  --with-cuda             Require CUDA instead of using the automatic default
   --cuda-arch VALUE       nvcc architecture (default: all-major)
+  --version VERSION       Release version (default: source version)
   --output-dir DIR        Artifact destination (default: ./dist)
   --no-archive            Keep only the unpacked application image
+  --force                 Replace this platform's existing artifact/version
   -h, --help              Show this help
 
 The produced application is native to the build host's OS and CPU architecture.
+CUDA is bundled automatically on Linux when nvcc is available; every CUDA build
+also contains the complete CPU fallback.
 Run this script on each target platform (normally through the release CI matrix).
 EOF
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --cpu-only) CUDA_MODE="off"; shift ;;
+    --without-cuda|--cpu-only) CUDA_MODE="off"; shift ;;
     --with-cuda) CUDA_MODE="required"; shift ;;
-    --cuda-arch) CUDA_ARCH_VALUE="$2"; shift 2 ;;
-    --output-dir) DIST_DIR="$2"; shift 2 ;;
+    --cuda-arch) [[ $# -ge 2 ]] || { echo "--cuda-arch requires a value" >&2; exit 2; }; CUDA_ARCH_VALUE="$2"; shift 2 ;;
+    --version) [[ $# -ge 2 ]] || { echo "--version requires a value" >&2; exit 2; }; VERSION="$2"; shift 2 ;;
+    --output-dir) [[ $# -ge 2 ]] || { echo "--output-dir requires a value" >&2; exit 2; }; DIST_DIR="$2"; shift 2 ;;
     --no-archive) MAKE_ARCHIVE=false; shift ;;
+    --force) FORCE=true; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -65,10 +74,15 @@ case "$ARCH_RAW" in
   *) PLATFORM_ARCH="$ARCH_RAW" ;;
 esac
 
-VERSION="$(sed -n 's/.*VERSION = "\([^"]*\)".*/\1/p' "${ROOT}/src/astralx/Main.java" | head -1)"
-if [[ -z "$VERSION" ]]; then
-  echo "Error: could not determine ASTRAL-X version from Main.java." >&2
+SOURCE_VERSION="$(sed -n 's/.*DEFAULT = "\([^"]*\)".*/\1/p' "${ROOT}/src/astralx/Version.java" | head -1)"
+if [[ -z "$SOURCE_VERSION" ]]; then
+  echo "Error: could not determine the ASTRAL-X source version." >&2
   exit 1
+fi
+[[ -n "$VERSION" ]] || VERSION="$SOURCE_VERSION"
+if [[ ! "$VERSION" =~ ^[0-9]+([.][0-9]+){0,2}$ ]]; then
+  echo "Error: --version must contain one to three numeric components (for example 1.2.0)." >&2
+  exit 2
 fi
 
 INCLUDE_CUDA=false
@@ -85,7 +99,16 @@ CAPABILITY="cpu"
 # platforms the richer build still contains the complete CPU implementation and
 # automatically falls back, so separate -cpu and -cuda downloads are needless.
 ARTIFACT="astralx-${VERSION}-${PLATFORM_OS}-${PLATFORM_ARCH}"
-mkdir -p "$DIST_DIR"
+VERSION_DIR="${DIST_DIR}/${VERSION}"
+FINAL_IMAGE="${VERSION_DIR}/${ARTIFACT}"
+ARCHIVE="${VERSION_DIR}/${ARTIFACT}.tar.gz"
+MANIFEST="${VERSION_DIR}/${ARTIFACT}.manifest.json"
+if [[ "$FORCE" != true ]] && { [[ -e "$FINAL_IMAGE" ]] || [[ -e "$ARCHIVE" ]] || [[ -e "$MANIFEST" ]]; }; then
+  echo "Error: artifact already exists for ASTRAL-X ${VERSION} on ${PLATFORM_OS}-${PLATFORM_ARCH}." >&2
+  echo "Use --force to replace only this platform artifact, or choose another --version." >&2
+  exit 1
+fi
+mkdir -p "$VERSION_DIR"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/astralx-portable.XXXXXX")"
 cleanup() { rm -rf "$WORK"; }
 trap cleanup EXIT
@@ -103,8 +126,11 @@ RUNTIME="${WORK}/runtime"
 JPACKAGE_OUT="${WORK}/jpackage"
 mkdir -p "$APP_INPUT" "$JPACKAGE_OUT"
 
+JAR_MANIFEST="${WORK}/MANIFEST.MF"
+printf 'Manifest-Version: 1.0\nMain-Class: astralx.Main\nImplementation-Title: ASTRAL-X\nImplementation-Version: %s\n\n' \
+    "$VERSION" > "$JAR_MANIFEST"
 jar --create --file "${APP_INPUT}/astralx.jar" \
-    --main-class astralx.Main -C "${ROOT}/build" .
+    --manifest "$JAR_MANIFEST" -C "${ROOT}/build" .
 
 if [[ "$INCLUDE_CUDA" == true ]]; then
   NATIVE_OUT_DIR="$APP_INPUT" CUDA_ARCH="$CUDA_ARCH_VALUE" "${ROOT}/build_native.sh"
@@ -146,6 +172,19 @@ else
   PACKAGED_LAUNCHER="${IMAGE}/bin/astralx"
 fi
 
+# Linux portability is bounded by the newest glibc symbol used by any bundled
+# ELF object. Record that auditable floor instead of making an unqualified
+# "runs on every Linux" claim. Release runners should build on the oldest
+# supported distribution.
+MINIMUM_GLIBC=""
+if [[ "$PLATFORM_OS" == "linux" ]] && command -v objdump >/dev/null 2>&1; then
+  MINIMUM_GLIBC="$(
+    find "$IMAGE" -type f -exec objdump -T {} + 2>/dev/null \
+      | sed -n 's/.*GLIBC_\([0-9][0-9.]*\).*/\1/p' \
+      | sort -V | tail -1 || true
+  )"
+fi
+
 EXAMPLE_DIR="${IMAGE}/example"
 mkdir -p "$EXAMPLE_DIR"
 cp "${ROOT}/all_gt_bs_rooted_37.tre" "${EXAMPLE_DIR}/all_gt_37.tre"
@@ -160,7 +199,7 @@ Run:
   ./astralx -i gene_trees.tre -o species_tree.tre
 
 Ready-made 37-taxon example (run from this directory):
-  ./astralx -i example/all_gt_37.tre -o example/predicted_st_37.tre --search-mode local -vv
+  ./astralx -i example/all_gt_37.tre -o example/predicted_st_37.tre --search-space S1 -vv
 
 The example directory initially contains:
   all_gt_37.tre   input gene trees
@@ -180,6 +219,7 @@ EOF
   echo "version=${VERSION}"
   echo "platform=${PLATFORM_OS}-${PLATFORM_ARCH}"
   echo "capability=${CAPABILITY}"
+  [[ -z "$MINIMUM_GLIBC" ]] || echo "minimum_glibc=${MINIMUM_GLIBC}"
   echo "built_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   echo "java=$(java -version 2>&1 | head -1)"
   if [[ "$INCLUDE_CUDA" == true ]]; then
@@ -192,9 +232,13 @@ EOF
 } > "${IMAGE}/BUILD-INFO.txt"
 
 # Smoke tests use only the packaged launcher/runtime.
-"$PACKAGED_LAUNCHER" --version
+VERSION_OUTPUT="$("$PACKAGED_LAUNCHER" --version)"
+[[ "$VERSION_OUTPUT" == "ASTRAL-X ${VERSION}" ]] || {
+  echo "Error: packaged version mismatch: ${VERSION_OUTPUT}" >&2
+  exit 1
+}
 "$PACKAGED_LAUNCHER" --cpu --diagnose >/dev/null
-"$PACKAGED_LAUNCHER" --cpu --search-mode full -q \
+"$PACKAGED_LAUNCHER" --cpu --search-space S3 -q \
     -i "${EXAMPLE_DIR}/all_gt_37.tre" \
     -o "${WORK}/smoke-species-tree.tre"
 if [[ ! -s "${WORK}/smoke-species-tree.tre" ]]; then
@@ -202,21 +246,35 @@ if [[ ! -s "${WORK}/smoke-species-tree.tre" ]]; then
   exit 1
 fi
 
-FINAL_IMAGE="${DIST_DIR}/${ARTIFACT}"
-rm -rf "$FINAL_IMAGE"
+if [[ -e "$FINAL_IMAGE" ]]; then rm -rf "$FINAL_IMAGE"; fi
 mv "$IMAGE" "$FINAL_IMAGE"
 
+ARCHIVE_NAME=""
+ARCHIVE_SHA256=""
 if [[ "$MAKE_ARCHIVE" == true ]]; then
-  ARCHIVE="${DIST_DIR}/${ARTIFACT}.tar.gz"
   rm -f "$ARCHIVE" "${ARCHIVE}.sha256"
-  tar -C "$DIST_DIR" -czf "$ARCHIVE" "$ARTIFACT"
+  tar -C "$VERSION_DIR" -czf "$ARCHIVE" "$ARTIFACT"
   if command -v sha256sum >/dev/null 2>&1; then
-    (cd "$DIST_DIR" && sha256sum "$(basename "$ARCHIVE")" > "$(basename "$ARCHIVE").sha256")
+    (cd "$VERSION_DIR" && sha256sum "$(basename "$ARCHIVE")" > "$(basename "$ARCHIVE").sha256")
   else
-    (cd "$DIST_DIR" && shasum -a 256 "$(basename "$ARCHIVE")" > "$(basename "$ARCHIVE").sha256")
+    (cd "$VERSION_DIR" && shasum -a 256 "$(basename "$ARCHIVE")" > "$(basename "$ARCHIVE").sha256")
   fi
+  ARCHIVE_NAME="$(basename "$ARCHIVE")"
+  ARCHIVE_SHA256="$(awk '{print $1}' "${ARCHIVE}.sha256")"
   echo "  Archive      : $ARCHIVE"
   echo "  SHA-256      : ${ARCHIVE}.sha256"
 fi
 
+cat > "$MANIFEST" <<EOF
+{
+  "version": "${VERSION}",
+  "platform": "${PLATFORM_OS}-${PLATFORM_ARCH}",
+  "capability": "${CAPABILITY}",
+  "minimum_glibc": "${MINIMUM_GLIBC}",
+  "archive": "${ARCHIVE_NAME}",
+  "sha256": "${ARCHIVE_SHA256}"
+}
+EOF
+
 echo "Portable application ready: ${FINAL_IMAGE}/astralx"
+echo "Release manifest: $MANIFEST"

@@ -51,6 +51,11 @@ Optional:
                      Score the supplied species tree and exit
   --cpu              Force CPU mode
   --gpu              Force GPU mode
+  --auto             Automatically select CUDA or CPU (default)
+  --gpu-strict       Require CUDA; do not fall back to CPU
+  --search-space     S1 through S8 (recommended)
+  --intersection-method, --im
+                     I1 through I4 (recommended)
   --search-mode      local | full
   --weight-intersection-method  prefix-sum | smaller-side-traversal | bitset | simple-tree-walk  (default: prefix-sum)
   --anchor-outgroup  Anchor the DP root at one outgroup taxon (default: on)
@@ -123,7 +128,7 @@ while [[ $# -gt 0 ]]; do
       PROGRAM_ARGS+=("-o" "$2")
       shift 2
       ;;
-    --cpu|--gpu)
+    --auto|--cpu|--gpu|--gpu-strict)
       PROGRAM_ARGS+=("$1")
       COMPUTE_MODE_SET=true
       shift
@@ -133,11 +138,15 @@ while [[ $# -gt 0 ]]; do
       PROGRAM_ARGS+=("$1" "$2")
       shift 2
       ;;
-    --search-mode|-t|-T|--threads|--num-threads|-m|--seeds|--weight-intersection-method|--anchor-taxon|--gpu-batch-size|--gpu-batches|--gpu-vram-control-factor|--gpu-vram-occupancy-factor|--gpu-treewalk-vram-cap-mb|--gpu-progress-interval|--gpu-dp-state-space-construction-output-cap|--gpu-dist-tile-size|--gpu-sim-vram-cap-mb|--dump-completed-gene-trees|--completion-method)
+    --search-space|--intersection-method|--im|--search-mode|-t|-T|--threads|--num-threads|-m|--seeds|--weight-intersection-method|--large-n-score-type|--large-score-type|--anchor-taxon|--gpu-batch-size|--gpu-batches|--gpu-vram-control-factor|--gpu-vram-occupancy-factor|--gpu-treewalk-vram-cap-mb|--gpu-progress-interval|--gpu-dp-state-space-construction-output-cap|--gpu-dp-state-space-progress-time-interval|--gpu-dp-state-space-progress-max-steps|--gpu-dist-tile-size|--gpu-sim-vram-cap-mb|--dump-clusters|--dump-completed-gene-trees|--completion-method|--stepb-restriction)
       PROGRAM_ARGS+=("$1" "$2")
       shift 2
       ;;
-    --rooted|--unrooted|--anchor-outgroup|--anchor|--no-anchor-outgroup|--no-anchor|--no-prune-search-space|--no-prune-unreachable|--prune-search-space|--prune-unreachable|--no-gpu-batch|--consensus-experimental|--stepb-fast-restriction|--stepb-quadratic-nn-balls|--stepb-random-leftover-resolution|--stepb-process-large-polytomies|--resolve-input-gene-tree-polytomies|--verify-parse|--verify-hash|--verify-clusters|--verify-partitions|--verify-dp|--verify-weights|--verify-distance-matrix|--verify-similarity-matrix|--verify-upgma|--verify-greedy-consensus|--autocomplete-incomplete-gene-trees|-v|-vv|-vvv|-q|--quiet)
+    --stepb-fast-restriction)
+      PROGRAM_ARGS+=("--stepb-restriction" "dlogd")
+      shift
+      ;;
+    --rooted|--unrooted|--anchor-outgroup|--anchor|--no-anchor-outgroup|--no-anchor|--no-prune-search-space|--no-prune-unreachable|--prune-search-space|--prune-unreachable|--no-gpu-batch|--consensus-experimental|--stepb-quadratic-nn-balls|--stepb-random-leftover-resolution|--stepb-process-large-polytomies|--resolve-input-gene-tree-polytomies|--verify-parse|--verify-hash|--verify-clusters|--verify-partitions|--verify-dp|--verify-weights|--verify-distance-matrix|--verify-similarity-matrix|--verify-upgma|--verify-greedy-consensus|--autocomplete-incomplete-gene-trees|-v|-vv|-vvv|-q|--quiet)
       PROGRAM_ARGS+=("$1")
       shift
       ;;
@@ -210,11 +219,7 @@ if [[ -f "${NATIVE_DIR}/libastralx_weight.so" && -f "${NATIVE_DIR}/libastralx_dp
 fi
 
 if [[ "$COMPUTE_MODE_SET" == false ]]; then
-  if [[ "$gpu_available" == true ]]; then
-    PROGRAM_ARGS+=("--gpu")
-  else
-    PROGRAM_ARGS+=("--cpu")
-  fi
+  PROGRAM_ARGS+=("--auto")
 fi
 
 echo "=== ASTRAL-X ==="

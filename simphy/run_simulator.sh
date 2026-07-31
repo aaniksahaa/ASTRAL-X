@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PYTHON_BIN="${ASTRALX_PYTHON:-${SCRIPT_DIR}/../.venv/bin/python}"
+[[ -x "$PYTHON_BIN" ]] || PYTHON_BIN="python3"
+
 # Default values
 sb="0.000001"
 spmin="500000"
@@ -114,7 +118,7 @@ echo ""
 # cs Seed
 
 # Run SimPhy (adjust path to simphy_lnx64 if necessary)
-./simphy_lnx64 \
+"${SCRIPT_DIR}/simphy_lnx64" \
   -sb f:${sb} \
   -ld f:0 \
   -lb f:0 \
@@ -158,7 +162,7 @@ echo "Running concat_gene_trees.py on all replicates..."
 for i in $(seq 1 ${replicates}); do
   if [ -d "${out_dir}/${i}" ]; then
     echo "Processing replicate ${i}..."
-    python concat_gene_trees.py "${out_dir}/${i}"
+    "$PYTHON_BIN" "${SCRIPT_DIR}/concat_gene_trees.py" "${out_dir}/${i}"
   else
     echo "Warning: replicate directory ${out_dir}/${i} not found. Skipping concat_gene_trees.py."
   fi
@@ -166,6 +170,6 @@ done
 
 # Reorganize all trees in dataset (run once after all concat operations)
 echo "Reorganizing all trees in dataset..."
-python reorganize_trees.py "${out_dir}"
+"$PYTHON_BIN" "${SCRIPT_DIR}/reorganize_trees.py" "${out_dir}"
 
 echo "Done. Output in ${out_dir}"

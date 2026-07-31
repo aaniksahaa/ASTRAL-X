@@ -1,16 +1,20 @@
 param(
     [switch]$CpuOnly,
+    [switch]$WithoutCuda,
     [switch]$WithCuda,
     [string]$CudaArch = "all-major",
+    [string]$Version = "",
     [string]$OutputDir = (Join-Path $PSScriptRoot "dist"),
-    [switch]$NoArchive
+    [switch]$NoArchive,
+    [switch]$Force
 )
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
-if ($CpuOnly -and $WithCuda) {
-    throw "Use either -CpuOnly or -WithCuda, not both."
+$DisableCuda = $CpuOnly -or $WithoutCuda
+if ($DisableCuda -and $WithCuda) {
+    throw "Use either -WithoutCuda/-CpuOnly or -WithCuda, not both."
 }
 
 foreach ($Tool in @("javac", "jar", "jlink", "jpackage")) {
@@ -27,11 +31,15 @@ if ([int]$Matches[1] -lt 21) {
     throw "JDK 21 or newer is required; found $JavacVersion."
 }
 
-$MainSource = Get-Content (Join-Path $PSScriptRoot "src/astralx/Main.java") -Raw
-if ($MainSource -notmatch 'VERSION\s*=\s*"([^"]+)"') {
-    throw "Could not determine ASTRAL-X version from Main.java."
+$VersionSource = Get-Content (Join-Path $PSScriptRoot "src/astralx/Version.java") -Raw
+if ($VersionSource -notmatch 'DEFAULT\s*=\s*"([^"]+)"') {
+    throw "Could not determine the ASTRAL-X source version."
 }
-$Version = $Matches[1]
+$SourceVersion = $Matches[1]
+if (-not $Version) { $Version = $SourceVersion }
+if ($Version -notmatch '^\d+(?:\.\d+){0,2}$') {
+    throw "-Version must contain one to three numeric components (for example 1.2.0)."
+}
 $Arch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant()
 $PlatformArch = switch ($Arch) {
     "x64"   { "x86_64" }
@@ -40,7 +48,7 @@ $PlatformArch = switch ($Arch) {
 }
 
 $NvccAvailable = [bool](Get-Command nvcc -ErrorAction SilentlyContinue)
-$IncludeCuda = -not $CpuOnly -and $NvccAvailable
+$IncludeCuda = -not $DisableCuda -and $NvccAvailable
 if ($WithCuda -and -not $NvccAvailable) {
     throw "-WithCuda was requested, but nvcc was not found."
 }
@@ -55,10 +63,19 @@ $Capability = if ($IncludeCuda) { "cuda-with-cpu-fallback" } else { "cpu" }
 # One public artifact per OS/CPU family. The CUDA-enabled image already carries
 # the complete CPU implementation and falls back automatically.
 $Artifact = "astralx-$Version-windows-$PlatformArch"
+$VersionDir = Join-Path $OutputDir $Version
+$FinalImage = Join-Path $VersionDir $Artifact
+$Archive = Join-Path $VersionDir "$Artifact.zip"
+$ManifestPath = Join-Path $VersionDir "$Artifact.manifest.json"
+if (-not $Force -and ((Test-Path $FinalImage) -or (Test-Path $Archive) -or
+        (Test-Path $ManifestPath))) {
+    throw "Artifact already exists for ASTRAL-X $Version on windows-$PlatformArch. " +
+          "Use -Force to replace only this platform artifact, or choose another -Version."
+}
 $Work = Join-Path ([System.IO.Path]::GetTempPath()) ("astralx-portable-" + [guid]::NewGuid())
 
 try {
-    New-Item -ItemType Directory -Force -Path $Work, $OutputDir | Out-Null
+    New-Item -ItemType Directory -Force -Path $Work, $VersionDir | Out-Null
     $Build = Join-Path $Work "classes"
     $InputDir = Join-Path $Work "input"
     $Runtime = Join-Path $Work "runtime"
@@ -77,7 +94,15 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "javac failed (exit $LASTEXITCODE)" }
 
     $JarPath = Join-Path $InputDir "astralx.jar"
-    & jar --create --file $JarPath --main-class astralx.Main -C $Build .
+    $JarManifest = Join-Path $Work "MANIFEST.MF"
+    @(
+        "Manifest-Version: 1.0",
+        "Main-Class: astralx.Main",
+        "Implementation-Title: ASTRAL-X",
+        "Implementation-Version: $Version",
+        ""
+    ) | Set-Content -Path $JarManifest -Encoding ASCII
+    & jar --create --file $JarPath --manifest $JarManifest -C $Build .
     if ($LASTEXITCODE -ne 0) { throw "jar failed (exit $LASTEXITCODE)" }
 
     if ($IncludeCuda) {
@@ -115,7 +140,7 @@ Run in PowerShell or Command Prompt:
   .\astralx.exe -i gene_trees.tre -o species_tree.tre
 
 Ready-made 37-taxon example (run from this directory):
-  .\astralx.exe -i example\all_gt_37.tre -o example\predicted_st_37.tre --search-mode local -vv
+  .\astralx.exe -i example\all_gt_37.tre -o example\predicted_st_37.tre --search-space S1 -vv
 
 The example directory initially contains:
   all_gt_37.tre   input gene trees
@@ -151,33 +176,46 @@ when falling back would be undesirable.
     Set-Content -Path (Join-Path $Image "BUILD-INFO.txt") -Value $BuildInfo -Encoding UTF8
 
     $Launcher = Join-Path $Image "astralx.exe"
-    & $Launcher --version
-    if ($LASTEXITCODE -ne 0) { throw "Packaged --version smoke test failed." }
+    $VersionOutput = (& $Launcher --version | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0 -or $VersionOutput -ne "ASTRAL-X $Version") {
+        throw "Packaged --version smoke test failed: '$VersionOutput'."
+    }
     & $Launcher --cpu --diagnose | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "Packaged --diagnose smoke test failed." }
     $SmokeTree = Join-Path $Work "smoke-species-tree.tre"
-    & $Launcher --cpu --search-mode full -q `
+    & $Launcher --cpu --search-space S3 -q `
         -i (Join-Path $ExampleDir "all_gt_37.tre") -o $SmokeTree
     if ($LASTEXITCODE -ne 0 -or -not (Test-Path $SmokeTree) -or
             (Get-Item $SmokeTree).Length -eq 0) {
         throw "Packaged end-to-end inference smoke test failed."
     }
 
-    $FinalImage = Join-Path $OutputDir $Artifact
     if (Test-Path $FinalImage) { Remove-Item -Recurse -Force $FinalImage }
     Move-Item $Image $FinalImage
 
+    $ArchiveName = ""
+    $ArchiveHash = ""
     if (-not $NoArchive) {
-        $Archive = Join-Path $OutputDir "$Artifact.zip"
         if (Test-Path $Archive) { Remove-Item -Force $Archive }
         Compress-Archive -Path $FinalImage -DestinationPath $Archive -CompressionLevel Optimal
-        $Hash = (Get-FileHash -Algorithm SHA256 $Archive).Hash.ToLowerInvariant()
-        Set-Content -Path "$Archive.sha256" -Value "$Hash  $([IO.Path]::GetFileName($Archive))" -Encoding ASCII
+        $ArchiveHash = (Get-FileHash -Algorithm SHA256 $Archive).Hash.ToLowerInvariant()
+        $ArchiveName = [IO.Path]::GetFileName($Archive)
+        Set-Content -Path "$Archive.sha256" -Value "$ArchiveHash  $ArchiveName" -Encoding ASCII
         Write-Host "  Archive      : $Archive"
         Write-Host "  SHA-256      : $Archive.sha256"
     }
 
+    [ordered]@{
+        version = $Version
+        platform = "windows-$PlatformArch"
+        capability = $Capability
+        minimum_glibc = ""
+        archive = $ArchiveName
+        sha256 = $ArchiveHash
+    } | ConvertTo-Json | Set-Content -Path $ManifestPath -Encoding UTF8
+
     Write-Host "Portable application ready: $FinalImage\astralx.exe"
+    Write-Host "Release manifest: $ManifestPath"
 }
 finally {
     if (Test-Path $Work) { Remove-Item -Recurse -Force $Work }

@@ -5,6 +5,8 @@
 
 set -euo pipefail
 
+SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 # Propagate terminal color preference to Java subprocesses even when stderr is
 # piped through tee further down the call chain.
 [[ -t 1 || -t 2 ]] && export FORCE_COLOR=1
@@ -14,7 +16,8 @@ NTFY_CHANNEL_NAME="${NTFY_CHANNEL_NAME:-anik-phylo-asx}"
 TAXA_NUM=""
 GENE_TREES=""
 REPLICATE="R1"
-BASE_DIR=".."
+BASE_DIR="$(dirname "$SCRIPT_ROOT")"
+BASE_DIR_SET=false
 SIMPHY_DIR=""
 SIMPHY_DIR_SET=false
 SIMPHY_DATA_DIR=""
@@ -25,7 +28,7 @@ SB="0.000001"
 SPMIN="500000"
 SPMAX="1500000"
 USE_LEGACY_LAYOUT=false
-ASTRALX_OPTS="--search-mode full -vv"
+ASTRALX_OPTS="--search-space S3 -vv"
 FRESH=false
 INCOMPLETE=false
 TIME_MONITOR=true
@@ -43,7 +46,7 @@ sanitize_setting_part() {
   printf '%s' "$value"
 }
 
-# Extract the canonical weight-intersection-method from an opts string.
+# Extract the canonical intersection method from an opts string.
 # Returns 'prefix-sum' (the default) when not specified.
 extract_weight_method_from_opts() {
   local raw="$1"
@@ -52,24 +55,35 @@ extract_weight_method_from_opts() {
   read -r -a tokens <<< "$raw"
   i=0
   while (( i < ${#tokens[@]} )); do
-    if [[ "${tokens[$i]}" == "--weight-intersection-method" ]] && (( i + 1 < ${#tokens[@]} )); then
-      wim_val="${tokens[$((i + 1))]}"
-      ((i+=2))
-    else
-      ((i+=1))
-    fi
+    case "${tokens[$i]}" in
+      --weight-intersection-method|--intersection-method|--im)
+        if (( i + 1 < ${#tokens[@]} )); then
+          wim_val="${tokens[$((i + 1))]}"
+          ((i+=2))
+        else
+          ((i+=1))
+        fi
+        ;;
+      --weight-intersection-method=*|--intersection-method=*|--im=*)
+        wim_val="${tokens[$i]#*=}"
+        ((i+=1))
+        ;;
+      *) ((i+=1)) ;;
+    esac
   done
   case "${wim_val,,}" in
-    ""|prefix-sum|prefix_sum|prefixsum|prefix)                                   printf 'prefix-sum' ;;
-    smaller-side-traversal|smaller_side_traversal|smaller-side|smallerside|legacy) printf 'smaller-side-traversal' ;;
-    *)                                                                          printf '%s' "$wim_val" ;;
+    ""|i2|2|prefix-sum|prefix_sum|prefixsum|prefix)                               printf 'prefix-sum' ;;
+    i1|1|smaller-side-traversal|smaller_side_traversal|smaller-side|smallerside|legacy) printf 'smaller-side-traversal' ;;
+    i3|3|simple-tree-walk|simple_tree_walk|tree-walk)                              printf 'simple-tree-walk' ;;
+    i4|4|bitset)                                                                   printf 'bitset' ;;
+    *)                                                                             printf '%s' "$wim_val" ;;
   esac
 }
 
 build_setting_name_from_opts() {
   local raw="$1"
   local -a tokens=()
-  local i search_mode_val="" wim_val=""
+  local i search_mode_val="" search_space_val="" wim_val=""
 
   if [[ -z "${raw// }" ]]; then
     printf 'default'
@@ -79,20 +93,35 @@ build_setting_name_from_opts() {
   read -r -a tokens <<< "$raw"
   i=0
   while (( i < ${#tokens[@]} )); do
-    if [[ "${tokens[$i]}" == "--search-mode" ]] && (( i + 1 < ${#tokens[@]} )); then
-      search_mode_val="${tokens[$((i + 1))]}"
-      ((i+=2))
-    elif [[ "${tokens[$i]}" == "--weight-intersection-method" ]] && (( i + 1 < ${#tokens[@]} )); then
-      wim_val="${tokens[$((i + 1))]}"
-      ((i+=2))
-    else
-      ((i+=1))
-    fi
+    case "${tokens[$i]}" in
+      --search-space)
+        (( i + 1 < ${#tokens[@]} )) && search_space_val="${tokens[$((i + 1))]}"
+        ((i+=2))
+        ;;
+      --search-space=*) search_space_val="${tokens[$i]#*=}"; ((i+=1)) ;;
+      --search-mode)
+        (( i + 1 < ${#tokens[@]} )) && search_mode_val="${tokens[$((i + 1))]}"
+        ((i+=2))
+        ;;
+      --search-mode=*) search_mode_val="${tokens[$i]#*=}"; ((i+=1)) ;;
+      --weight-intersection-method|--intersection-method|--im)
+        (( i + 1 < ${#tokens[@]} )) && wim_val="${tokens[$((i + 1))]}"
+        ((i+=2))
+        ;;
+      --weight-intersection-method=*|--intersection-method=*|--im=*)
+        wim_val="${tokens[$i]#*=}"
+        ((i+=1))
+        ;;
+      *) ((i+=1)) ;;
+    esac
   done
 
-  # Base name from search-mode (unchanged — preserves existing result dirs).
+  # Preserve historical search-mode directory names while giving presets their
+  # own collision-free names.
   local base
-  if [[ -n "$search_mode_val" ]]; then
+  if [[ -n "$search_space_val" ]]; then
+    base="search-space_$(sanitize_setting_part "${search_space_val^^}")"
+  elif [[ -n "$search_mode_val" ]]; then
     base="search-mode_$(sanitize_setting_part "$search_mode_val")"
   else
     base="default"
@@ -102,10 +131,14 @@ build_setting_name_from_opts() {
   # default (prefix-sum), so existing prefix-sum runs keep their original path.
   local wim_canon=""
   case "${wim_val,,}" in
-    ""|prefix-sum|prefix_sum|prefixsum|prefix)
+    ""|i2|2|prefix-sum|prefix_sum|prefixsum|prefix)
       wim_canon="" ;;                                   # default → no tag
-    smaller-side-traversal|smaller_side_traversal|smaller-side|smallerside|legacy)
+    i1|1|smaller-side-traversal|smaller_side_traversal|smaller-side|smallerside|legacy)
       wim_canon="smaller-side-traversal" ;;
+    i3|3|simple-tree-walk|simple_tree_walk|tree-walk)
+      wim_canon="simple-tree-walk" ;;
+    i4|4|bitset)
+      wim_canon="bitset" ;;
     *)
       wim_canon="$(sanitize_setting_part "$wim_val")" ;; # unknown → tag verbatim
   esac
@@ -152,8 +185,8 @@ Optional:
 
 Examples:
   ./test-astralx-simulated.sh -t 100 -g 100 -r R1 --fresh
-  ./test-astralx-simulated.sh -t 100 -g 100 -r R1 --fresh --opts "--search-mode local -vv"
-  ./test-astralx-simulated.sh -t 100 -g 100 -r R1 --fresh --opts "--search-mode full -vv"
+  ./test-astralx-simulated.sh -t 100 -g 100 -r R1 --fresh --opts "--search-space S1 -vv"
+  ./test-astralx-simulated.sh -t 100 -g 100 -r R1 --fresh --opts "--search-space S4 -vv"
   Verbosity is ignored when constructing the setting name.
 EOF
 }
@@ -167,7 +200,7 @@ while [[ $# -gt 0 ]]; do
     --simphy-data-dir) SIMPHY_DATA_DIR="$2"; SIMPHY_DATA_DIR_SET=true; shift 2 ;;
     --astralx-root|--stelar-root) ASTRALX_ROOT="$2"; ASTRALX_ROOT_SET=true; shift 2 ;;
     --opts|--alg-opts|--astralx-opts|--stelar-opts) ASTRALX_OPTS="$2"; shift 2 ;;
-    --base-dir|-b) BASE_DIR="$2"; shift 2 ;;
+    --base-dir|-b) BASE_DIR="$2"; BASE_DIR_SET=true; shift 2 ;;
     --sb) SB="$2"; shift 2 ;;
     --spmin) SPMIN="$2"; shift 2 ;;
     --spmax) SPMAX="$2"; shift 2 ;;
@@ -189,11 +222,19 @@ if [[ -z "$TAXA_NUM" || -z "$GENE_TREES" ]]; then
 fi
 
 if [[ "$SIMPHY_DIR_SET" == false ]]; then
-  SIMPHY_DIR="./simphy"
+  if [[ "$BASE_DIR_SET" == true ]]; then
+    SIMPHY_DIR="${BASE_DIR%/}/ASTRAL-X/simphy"
+  else
+    SIMPHY_DIR="${SCRIPT_ROOT}/simphy"
+  fi
 fi
 if [[ "$ASTRALX_ROOT_SET" == false ]]; then
-  ASTRALX_ROOT="."
+  ASTRALX_ROOT="$SCRIPT_ROOT"
 fi
+SIMPHY_DIR="$(realpath "$SIMPHY_DIR")"
+ASTRALX_ROOT="$(realpath "$ASTRALX_ROOT")"
+PYTHON_BIN="${ASTRALX_PYTHON:-${ASTRALX_ROOT}/.venv/bin/python}"
+[[ -x "$PYTHON_BIN" ]] || PYTHON_BIN="python3"
 
 SETTING_NAME="$(build_setting_name_from_opts "$ASTRALX_OPTS")"
 WEIGHT_METHOD="$(extract_weight_method_from_opts "$ASTRALX_OPTS")"
@@ -254,7 +295,7 @@ if [[ ! -f "$ALL_GT_FILE" ]]; then
       REPLICATE_COUNT="${BASH_REMATCH[1]}"
     fi
 
-    SIM_INC_CMD=(./sim_incomplete.sh -t "$TAXA_NUM" -g "$GENE_TREES" -rs "$REPLICATE_COUNT" --sb "$SB" --spmin "$SPMIN" --spmax "$SPMAX")
+    SIM_INC_CMD=("${ASTRALX_ROOT}/sim_incomplete.sh" -t "$TAXA_NUM" -g "$GENE_TREES" -rs "$REPLICATE_COUNT" --sb "$SB" --spmin "$SPMIN" --spmax "$SPMAX")
     if [[ "$SIMPHY_DIR_SET" == true ]];      then SIM_INC_CMD+=(--simphy-dir      "$SIMPHY_DIR");      fi
     if [[ "$SIMPHY_DATA_DIR_SET" == true ]]; then SIM_INC_CMD+=(--simphy-data-dir "$SIMPHY_DATA_DIR"); fi
     if [[ "$FRESH" == true ]];               then SIM_INC_CMD+=(--fresh-inc);                          fi
@@ -285,7 +326,7 @@ if [[ ! -f "$ALL_GT_FILE" ]]; then
       RUN_LOG="${RESULTS_DIR%/}/.astralx_run.log"
     fi
 
-    SIM_CMD=(./sim.sh -t "$TAXA_NUM" -g "$GENE_TREES" -r "$REPLICATE" -rs "$REPLICATE_COUNT" --sb "$SB" --spmin "$SPMIN" --spmax "$SPMAX")
+    SIM_CMD=("${ASTRALX_ROOT}/sim.sh" -t "$TAXA_NUM" -g "$GENE_TREES" -r "$REPLICATE" -rs "$REPLICATE_COUNT" --sb "$SB" --spmin "$SPMIN" --spmax "$SPMAX")
     if [[ "$SIMPHY_DIR_SET" == true ]];      then SIM_CMD+=(--simphy-dir      "$SIMPHY_DIR");      fi
     if [[ "$SIMPHY_DATA_DIR_SET" == true ]]; then SIM_CMD+=(--simphy-data-dir "$SIMPHY_DATA_DIR"); fi
     if [[ "$FRESH" == true ]];               then SIM_CMD+=(--fresh);                              fi
@@ -314,7 +355,7 @@ echo "  output tree:    $OUT_ASTRALX"
 echo "  stat file:      $STAT_FILE"
 echo
 
-CMD=(./run-astralx-with-monitor.sh -i "$ALL_GT_FILE" -o "$OUT_ASTRALX" --astralx-root "$ASTRALX_ROOT" --no-notify)
+CMD=("${ASTRALX_ROOT}/run-astralx-with-monitor.sh" -i "$ALL_GT_FILE" -o "$OUT_ASTRALX" --astralx-root "$ASTRALX_ROOT" --no-notify)
 if [[ "$TIME_MONITOR" == false ]]; then CMD+=(--no-time-monitor); fi
 if [[ "$GPU_MONITOR" == false ]]; then CMD+=(--no-gpu-monitor); fi
 if [[ "$DEBUG" == 1 ]]; then CMD+=(--debug); fi
@@ -343,7 +384,7 @@ fi
 
 RF_RATE="NA"
 if [[ -f "$OUT_ASTRALX" && -f "$TRUE_SPECIES_TREE" ]]; then
-  rf_output=$(python3 ./rf.py "$OUT_ASTRALX" "$TRUE_SPECIES_TREE" 2>&1) || true
+  rf_output=$("$PYTHON_BIN" "${ASTRALX_ROOT}/rf.py" "$OUT_ASTRALX" "$TRUE_SPECIES_TREE" 2>&1) || true
   rf_line=$(echo "$rf_output" | grep -i "Robinson-Foulds distance" | tail -n1 || true)
   if [[ -n "$rf_line" ]]; then
     RF_RATE=$(echo "$rf_line" | grep -Eo '[0-9]+(\.[0-9]+)?' | tail -n1 || echo "NA")

@@ -13,7 +13,7 @@ START_REP=""
 END_REP=""
 FRESH=false
 ASTRALX_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ASTRALX_OPTS="--search-mode full -vv"
+ASTRALX_OPTS="--search-space S3 -vv"
 ASTRALX_OPTS_LIST_RAW=""
 TIME_MONITOR=true
 GPU_MONITOR=true
@@ -43,10 +43,10 @@ csv_get_field() {
 }
 
 # Example single setting:
-# ASTRALX_OPTS="--search-mode full"
+# ASTRALX_OPTS="--search-space S3"
 #
-# Example sweep over both result-affecting search modes:
-# ASTRALX_OPTS_LIST_RAW="--search-mode local;--search-mode full"
+# Example sweep over search-space presets:
+# ASTRALX_OPTS_LIST_RAW="--search-space S1;--search-space S4"
 #
 # Verbosity flags such as -v/-vv are ignored when constructing the setting name.
 
@@ -146,9 +146,9 @@ Optional:
   --no-notify, -nn     Disable ntfy notifications
 
 Examples:
-  ./run-a10k.sh --data-dir /path/to/10k-astral-dataset --tree-type estimated --opts "--search-mode local -vv"
-  ./run-a10k.sh --data-dir /path/to/10k-astral-dataset --tree-type estimated --opts "--search-mode full -vv"
-  ./run-a10k.sh --data-dir /path/to/10k-astral-dataset --tree-type estimated --opts-list "--search-mode local -vv;--search-mode full -vv"
+  ./run-a10k.sh --data-dir /path/to/10k-astral-dataset --tree-type estimated --opts "--search-space S1 -vv"
+  ./run-a10k.sh --data-dir /path/to/10k-astral-dataset --tree-type estimated --opts "--search-space S4 -vv"
+  ./run-a10k.sh --data-dir /path/to/10k-astral-dataset --tree-type estimated --opts-list "--search-space S1 -vv;--search-space S4 -vv"
   Verbosity is ignored when constructing the setting name.
 EOF
 }
@@ -177,6 +177,9 @@ if [[ -z "$DATA_DIR" ]]; then
   exit 2
 fi
 
+ASTRALX_ROOT="$(realpath "$ASTRALX_ROOT")"
+PYTHON_BIN="${ASTRALX_PYTHON:-${ASTRALX_ROOT}/.venv/bin/python}"
+[[ -x "$PYTHON_BIN" ]] || PYTHON_BIN="python3"
 DATA_DIR="$(realpath "$DATA_DIR")"
 SIMPHY_DIR="${DATA_DIR%/}/10k-simphy"
 if [[ ! -d "$SIMPHY_DIR" ]]; then
@@ -297,7 +300,7 @@ for REPL in "${REPL_LIST[@]}"; do
 
     RF_RATE="NA"
     if [[ -f "$OUT_FILE" && -f "$TRUE_TREE" ]]; then
-      rf_output=$(python3 "${ASTRALX_ROOT}/rf.py" "$OUT_FILE" "$TRUE_TREE" 2>&1) || true
+      rf_output=$("$PYTHON_BIN" "${ASTRALX_ROOT}/rf.py" "$OUT_FILE" "$TRUE_TREE" 2>&1) || true
       rf_line=$(echo "$rf_output" | grep -i "Robinson-Foulds distance" | tail -n1 || true)
       if [[ -n "$rf_line" ]]; then
         RF_RATE=$(echo "$rf_line" | grep -Eo '[0-9]+(\.[0-9]+)?' | tail -n1 || echo "NA")

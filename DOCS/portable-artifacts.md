@@ -36,29 +36,34 @@ own matching runtime.
 Linux release artifact (CUDA bundled, automatic CPU fallback):
 
 ```bash
-./build_portable.sh --with-cuda
+./build_portable.sh
 ```
 
 macOS release artifact (CPU, because CUDA is unavailable):
 
 ```bash
-./build_portable.sh --cpu-only
+./build_portable.sh --without-cuda
 ```
 
 Windows PowerShell release artifact:
 
 ```powershell
-.\build_portable.ps1 -WithCuda
+.\build_portable.ps1
 ```
 
-`--cpu-only` remains available on Linux and Windows for development or for a
-builder without a CUDA toolkit, but it is not a separate public edition. It uses
-the same canonical artifact name and therefore replaces any existing artifact
-for that OS/CPU family in `dist/`.
+`--without-cuda` (`-WithoutCuda` on Windows) creates a CPU-only build. The
+existing `--cpu-only`/`-CpuOnly` spelling is equivalent. A CPU-only build is not
+a separate public edition: it uses the same canonical artifact name, so a
+same-version rebuild requires the explicit force option. Release CI uses
+`--with-cuda` as a strict check so a missing CUDA toolkit fails the release
+instead of silently producing a CPU-only archive.
 
 Building requires JDK 21 or newer. CUDA builds additionally require `nvcc` and a
 supported host C/C++ compiler. These are build-machine requirements only.
-Artifacts and SHA-256 files are written under `dist/`.
+Artifacts, SHA-256 files, and concise JSON manifests are written under
+`dist/<version>/`. Pass `--version 1.2.0` (`-Version 1.2.0` on Windows) to build
+an explicit release version. Existing versions remain side-by-side; rebuilding
+the same version/platform is refused unless `--force` (`-Force`) is supplied.
 
 The default CUDA architecture, `all-major`, embeds native code for every major
 GPU generation supported by the installed toolkit and PTX for forward
@@ -82,7 +87,7 @@ Every artifact includes a ready-made 37-taxon example:
 ```bash
 ./astralx -i example/all_gt_37.tre \
   -o example/predicted_st_37.tre \
-  --search-mode local -vv
+  --search-space S1 -vv
 ```
 
 `example/all_gt_37.tre` contains the gene trees and `example/true_37.tre` is the
@@ -108,7 +113,8 @@ unexecuted CUDA cross-compile "tested."
 
 For a broad Linux compatibility baseline, use the oldest supported release
 runner/container: glibc binaries are backward-incompatible when built on a newer
-distro. `BUILD-INFO.txt` records the build platform/toolchains. Windows and
+distro. The artifact manifest and `BUILD-INFO.txt` record the highest required
+glibc symbol version, along with the build platform/toolchains. Windows and
 macOS may display SmartScreen/Gatekeeper warnings until release signing
 certificates are configured; checksums verify integrity but are not a substitute
 for code signing.

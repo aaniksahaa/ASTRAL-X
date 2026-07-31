@@ -31,31 +31,20 @@ GENERIC_OPTS_SET=false
 GENERIC_OPTS_LIST_RAW=""
 GENERIC_OPTS_LIST_SET=false
 
-# Algorithm configuration
-# Available: stelar, aster, astral, treeqmc, wqfmtree, supertriplets, stp-nni, tmc
-ALGORITHMS=("astralx" "aster" "astral" "treeqmc" "wqfmtree" "supertriplets" "stp-nni" "tmc")
-# ALGORITHMS=("astralx")
-ALGORITHMS=("aster")
-# ALGORITHMS=("astral")
-# ALGORITHMS=("supertriplets")
-# ALGORITHMS=("tmc")
-
-ALGORITHMS=("aster" "supertriplets" "tmc")
-ALGORITHMS=("aster" "supertriplets")
-ALGORITHMS=("tmc")
-
+# Algorithm configuration. Override with --method for a single method or a
+# semicolon-separated sweep. Optional baselines are validated only if selected.
 ALGORITHMS=("astralx")
 
 
 
 # Algorithm-specific options
 # ASTRAL-X examples:
-# GENERIC_OPTS="--search-mode full -vv"
-# GENERIC_OPTS_LIST_RAW="--search-mode local -vv;--search-mode full -vv"
+# GENERIC_OPTS="--search-space S3 -vv"
+# GENERIC_OPTS_LIST_RAW="--search-space S1 -vv;--search-space S4 -vv"
 # The setting-name encoder ignores verbosity, so these become:
 #   search-mode_local
 #   search-mode_full
-STELAR_OPTS="--search-mode full -vv"
+STELAR_OPTS="--search-space S3 -vv"
 STELAR_OPTS_LIST_RAW=""
 STELAR_OPTS_LIST=()
 ASTER_OPTS="-t 16"  # ASTER thread count
@@ -81,32 +70,17 @@ RED='\033[0;31m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
-NTFY_CHANNEL_NAME="anik-phylo"
+NTFY_CHANNEL_NAME="${NTFY_CHANNEL_NAME:-anik-phylo}"
 
 # =============================================================================
-# Dataset configuration (kept exactly as you provided)
+# Dataset configuration
 # =============================================================================
-# folders=("200-taxon")
-folders=("37-taxon" "100-taxon" "200-taxon" "500-taxon" "1000-taxon")
 folders=("37-taxon")
-# folders=("48-taxon")
-# folders=("100-taxon")
-# folders=("200-taxon")
-
-folders=("500-taxon")
-
-# folders=("500-taxon" "1000-taxon")
-
 
 declare -A innerFolderNames
 innerFolderNames["11-taxon"]="estimated_Xgenes_strongILS/estimated_5genes_strongILS estimated_Xgenes_strongILS/estimated_15genes_strongILS estimated_Xgenes_strongILS/estimated_25genes_strongILS estimated_Xgenes_strongILS/estimated_50genes_strongILS estimated_Xgenes_strongILS/estimated_100genes_strongILS"
 innerFolderNames["15-taxon"]="100gene-100bp/estimated-genetrees 100gene-1000bp/estimated-genetrees 100gene-true 1000gene-100bp/estimated-genetrees 1000gene-1000bp/estimated-genetrees 1000gene-true"
 
-
-innerFolderNames["37-taxon"]="estimated-genetrees/0.5X-200-500 estimated-genetrees/1X-200-500 estimated-genetrees/1X-200-1000 estimated-genetrees/1X-400-500 estimated-genetrees/1X-400-1000 estimated-genetrees/1X-800-500 estimated-genetrees/1X-800-1000 estimated-genetrees/2X-200-500"
-# innerFolderNames["37-taxon"]="estimated-genetrees/1X-200-500 estimated-genetrees/1X-200-1000 estimated-genetrees/1X-400-500 estimated-genetrees/1X-400-1000 estimated-genetrees/1X-800-500 estimated-genetrees/1X-800-1000 estimated-genetrees/2X-200-500"
-innerFolderNames["37-taxon"]="estimated-genetrees/0.5X-200-500"
-# innerFolderNames["37-taxon"]="true-genetrees/0.5X-200-true true-genetrees/1X-200-true true-genetrees/1X-400-true true-genetrees/1X-800-true true-genetrees/2X-200-true"
 
 innerFolderNames["37-taxon"]="estimated-genetrees/0.5X-200-500 estimated-genetrees/1X-200-500 estimated-genetrees/1X-200-1000 estimated-genetrees/1X-400-500 estimated-genetrees/1X-400-1000 estimated-genetrees/1X-800-500 estimated-genetrees/1X-800-1000 estimated-genetrees/2X-200-500 true-genetrees/0.5X-200-true true-genetrees/1X-200-true true-genetrees/1X-400-true true-genetrees/1X-800-true true-genetrees/2X-200-true"
 
@@ -116,21 +90,8 @@ innerFolderNames["48-taxon-latest"]="estimated_genetrees/1X-1000-500"
 innerFolderNames["100-taxon"]="inner100"
 innerFolderNames["200-taxon"]="inner200"
 
-# innerFolderNames["500-taxon"]="estimated-genetrees/model.500.2000000.0.000001 true-genetrees/model.500.2000000.0.000001"
-# innerFolderNames["1000-taxon"]="estimated-genetrees/model.1000.2000000.0.000001 true-genetrees/model.1000.2000000.0.000001"
-
-innerFolderNames["500-taxon"]="estimated-genetrees/model.500.2000000.0.000001/50-gt estimated-genetrees/model.500.2000000.0.000001/200-gt estimated-genetrees/model.500.2000000.0.000001/1000-gt true-genetrees/model.500.2000000.0.000001/1000-gt"
-innerFolderNames["1000-taxon"]="estimated-genetrees/model.1000.2000000.0.000001/50-gt estimated-genetrees/model.1000.2000000.0.000001/200-gt estimated-genetrees/model.1000.2000000.0.000001/1000-gt true-genetrees/model.1000.2000000.0.000001/1000-gt"
-
-# innerFolderNames["500-taxon"]="true-genetrees/model.500.2000000.0.000001/1000-gt"
-# innerFolderNames["1000-taxon"]="true-genetrees/model.1000.2000000.0.000001/1000-gt"
-
 innerFolderNames["500-taxon"]="estimated-genetrees/model.500.2000000.0.000001/1000-gt true-genetrees/model.500.2000000.0.000001/1000-gt"
 innerFolderNames["1000-taxon"]="estimated-genetrees/model.1000.2000000.0.000001/1000-gt true-genetrees/model.1000.2000000.0.000001/1000-gt"
-
-
-# innerFolderNames["500-taxon"]="true-genetrees/model.500.2000000.0.000001/1000-gt"
-# innerFolderNames["1000-taxon"]="true-genetrees/model.1000.2000000.0.000001/1000-gt"
 
 
 innerFolderNames["biological"]="nuclear"
@@ -641,9 +602,9 @@ run_algorithm_and_write_stats() {
     local RF_RATE="NA"
     if [[ -f "$OUT_FILE" ]]; then
       # Prefer rf.py inside STELAR_X_ROOT if present
-      if [[ -f "${STELAR_X_ROOT%/}/rf.py" && -x "$(command -v python3)" ]]; then
+      if [[ -f "${STELAR_X_ROOT%/}/rf.py" && -x "$PYTHON_BIN" ]]; then
         echo "      Calculating RF using ${STELAR_X_ROOT%/}/rf.py"
-        rf_output=$(python3 "${STELAR_X_ROOT%/}/rf.py" "$OUT_FILE" "$TRUE_SPECIES_TREE" 2>&1) || rf_output="$rf_output"
+        rf_output=$("$PYTHON_BIN" "${STELAR_X_ROOT%/}/rf.py" "$OUT_FILE" "$TRUE_SPECIES_TREE" 2>&1) || rf_output="$rf_output"
         
         echo "$rf_output"
         
@@ -659,10 +620,10 @@ run_algorithm_and_write_stats() {
         echo "RF rate: ${RF_RATE}"
         echo ""
 
-      elif [[ -f "${BASE_DIR%/}/RF/getFpFn.py" && -x "$(command -v python3)" ]]; then
+      elif [[ -f "${BASE_DIR%/}/RF/getFpFn.py" && -x "$PYTHON_BIN" ]]; then
         echo "      Calculating RF using ${BASE_DIR%/}/RF/getFpFn.py"
         # getFpFn.py returns a tuple; attempt to extract the same metric as earlier script
-        tuple=$(python3 "${BASE_DIR%/}/RF/getFpFn.py" -e "$OUT_FILE" -t "$TRUE_SPECIES_TREE" 2>/dev/null) || tuple=""
+        tuple=$("$PYTHON_BIN" "${BASE_DIR%/}/RF/getFpFn.py" -e "$OUT_FILE" -t "$TRUE_SPECIES_TREE" 2>/dev/null) || tuple=""
         if [[ -n "$tuple" ]]; then
           # try to extract first numeric token
           rf_candidate=$(echo "$tuple" | grep -Eo '[0-9]+(\.[0-9]+)?' | head -n1 || true)
@@ -844,7 +805,7 @@ Multi-algorithm dataset runner supporting ASTRAL-X, ASTER, ASTRAL, TreeQMC, wQFM
 
 Algorithms available: astralx, aster, astral, treeqmc, wqfmtree, supertriplets, stp-nni, tmc
 Example ASTRAL-X setting sweep:
-  --method "astralx" --opts-list "--search-mode local -vv;--search-mode full -vv"
+  --method "astralx" --opts-list "--search-space S1 -vv;--search-space S4 -vv"
 Algorithm root directories:
   STELAR-X:       Auto-detected from script location
   ASTER:          \${STELAR_X_ROOT}/baselines/ASTER
@@ -924,6 +885,15 @@ if [[ -z "${STELAR_X_ROOT}" ]]; then
   STELAR_X_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 fi
 
+PYTHON_BIN="${ASTRALX_PYTHON:-${STELAR_X_ROOT%/}/.venv/bin/python}"
+if [[ ! -x "$PYTHON_BIN" ]]; then
+  PYTHON_BIN="$(command -v python3 || true)"
+fi
+if [[ ! -x "$PYTHON_BIN" ]]; then
+  echo -e "${RED}Error: Python 3 is required for RF calculations.${NC}"
+  exit 1
+fi
+
 # derive DATASET_DIR from BASE_DIR if not set
 if [[ -z "${DATASET_DIR}" ]]; then
   DATASET_DIR="${BASE_DIR%/}/datasets/standard"
@@ -964,7 +934,7 @@ if [[ -z "${RUN_WITH_MONITOR_SCRIPT}" ]]; then
   RUN_WITH_MONITOR_SCRIPT="${STELAR_X_ROOT%/}/run-astralx-with-monitor.sh"
 fi
 if [[ -z "${RUN_BASELINE_WITH_MONITOR_SCRIPT}" ]]; then
-  RUN_BASELINE_WITH_MONITOR_SCRIPT="${STELAR_X_ROOT%/}/run-baseline-with-monitor.sh"
+  RUN_BASELINE_WITH_MONITOR_SCRIPT="${STELAR_X_ROOT%/}/stelar-x-artifacts/run-baseline-with-monitor.sh"
 fi
 
 print_header

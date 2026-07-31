@@ -14,3 +14,5 @@ backups/
 # Self-contained release images and archives produced by build_portable.*
 dist/
 
+# Local Python environment created by setup_dev.sh
+.venv/

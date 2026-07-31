@@ -35,7 +35,7 @@ import java.util.Collections;
 import java.util.List;
 
 public class Main {
-    public static final String VERSION = "0.1.0";
+    public static final String VERSION = Version.current();
 
     public static void main(String[] args) {
         try {
@@ -404,10 +404,25 @@ public class Main {
                 case "--cpu"           -> cfg.setComputeMode(Config.ComputeMode.CPU);
                 case "--gpu"           -> cfg.setComputeMode(Config.ComputeMode.GPU);
                 case "--gpu-strict"    -> { cfg.setComputeMode(Config.ComputeMode.GPU); cfg.setGpuStrict(true); }
+                case "--search-space"  -> {
+                    if (++i >= args.length) return false;
+                    try { CliPresets.applySearchSpace(args[i], cfg); }
+                    catch (IllegalArgumentException e) {
+                        System.err.println(e.getMessage());
+                        return false;
+                    }
+                }
                 case "--search-mode"   -> {
                     if (++i >= args.length) return false;
-                    cfg.setSearchMode(args[i].equalsIgnoreCase("full")
-                        ? Config.SearchMode.FULL : Config.SearchMode.LOCAL);
+                    if (args[i].equalsIgnoreCase("full"))
+                        cfg.setSearchMode(Config.SearchMode.FULL);
+                    else if (args[i].equalsIgnoreCase("local"))
+                        cfg.setSearchMode(Config.SearchMode.LOCAL);
+                    else {
+                        System.err.println("Unknown --search-mode: " + args[i]
+                            + " (expected: local | full)");
+                        return false;
+                    }
                 }
                 case "--anchor-outgroup", "--anchor" ->
                     cfg.setAnchorOutgroup(true);
@@ -425,23 +440,12 @@ public class Main {
                     cfg.setPruneUnreachableSplits(false);
                 case "--prune-search-space", "--prune-unreachable" ->
                     cfg.setPruneUnreachableSplits(true);
-                case "--weight-intersection-method" -> {
+                case "--intersection-method", "--im", "--weight-intersection-method" -> {
                     if (++i >= args.length) return false;
-                    String m = args[i].toLowerCase().replace('_', '-');
-                    switch (m) {
-                        case "prefix-sum", "prefixsum", "prefix" ->
-                            cfg.setWeightIntersectionMethod(Config.WeightIntersectionMethod.PREFIX_SUM);
-                        case "smaller-side-traversal", "smaller-side", "smallerside", "legacy" ->
-                            cfg.setWeightIntersectionMethod(Config.WeightIntersectionMethod.SMALLER_SIDE_TRAVERSAL);
-                        case "bitset", "bitsets", "bit-set" ->
-                            cfg.setWeightIntersectionMethod(Config.WeightIntersectionMethod.BITSET);
-                        case "simple-tree-walk", "tree-walk", "treewalk", "simple" ->
-                            cfg.setWeightIntersectionMethod(Config.WeightIntersectionMethod.SIMPLE_TREE_WALK);
-                        default -> {
-                            System.err.println("Unknown --weight-intersection-method: " + args[i]
-                                + "  (expected: prefix-sum | smaller-side-traversal | bitset | simple-tree-walk)");
-                            return false;
-                        }
+                    try { CliPresets.applyIntersectionMethod(args[i], cfg); }
+                    catch (IllegalArgumentException e) {
+                        System.err.println(e.getMessage());
+                        return false;
                     }
                 }
                 case "--large-n-score-type", "--large-score-type" -> {
@@ -501,8 +505,15 @@ public class Main {
                 case "--autocomplete-incomplete-gene-trees" -> cfg.setAutoCompleteIncompleteTrees(true);
                 case "--completion-method" -> {
                     if (++i >= args.length) return false;
-                    cfg.setCompletionMethod(args[i].equalsIgnoreCase("distance")
-                        ? Config.CompletionMethod.DISTANCE : Config.CompletionMethod.SIMILARITY);
+                    if (args[i].equalsIgnoreCase("distance"))
+                        cfg.setCompletionMethod(Config.CompletionMethod.DISTANCE);
+                    else if (args[i].equalsIgnoreCase("similarity"))
+                        cfg.setCompletionMethod(Config.CompletionMethod.SIMILARITY);
+                    else {
+                        System.err.println("Unknown --completion-method: " + args[i]
+                            + " (expected: similarity | distance)");
+                        return false;
+                    }
                 }
                 case "--dump-clusters"         -> { if (++i>=args.length) return false; cfg.setDumpClustersFile(args[i]); }
                 case "--dump-completed-gene-trees" -> { if (++i>=args.length) return false; cfg.setDumpCompletedTreesFile(args[i]); }
@@ -733,9 +744,11 @@ public class Main {
               -q, --quiet | -v | -vv | -vvv   Quiet, info, debug, or trace logging
 
             Search and scoring:
-              --search-mode local|full         DP search mode (default: local)
-              --weight-intersection-method M   prefix-sum | smaller-side-traversal |
-                                                bitset | simple-tree-walk
+              --search-space S1..S8            Friendly search-space preset (default: S1)
+              --intersection-method I1..I4     Friendly scoring method (default: I2)
+              --im I1..I4                      Short form of --intersection-method
+              --search-mode local|full         Legacy/advanced DP search control
+              --weight-intersection-method M   Legacy alias; named values remain supported
               --large-n-score-type T            int128 (exact) | double
               --anchor-outgroup                 Enable anchored outgroup reduction (default)
               --no-anchor-outgroup              Disable anchored outgroup reduction

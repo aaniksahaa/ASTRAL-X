@@ -43,6 +43,9 @@ Optional:
   --reference-species-tree  Reference species tree for RF rate calculation
   --threads, --num-threads, -t, -T
                          CPU worker threads
+  --search-space S1..S8  Search-space preset
+  --intersection-method I1..I4
+                         Intersection method preset
   --no-time-monitor     Disable time monitoring
   --no-gpu-monitor      Disable GPU monitoring
   --no-notify, -nn      Disable ntfy notifications
@@ -68,11 +71,11 @@ while [[ $# -gt 0 ]]; do
     --no-notify|-nn) NO_NOTIFY=true; shift ;;
     --debug) DEBUG=1; shift ;;
     --help|-h) print_help; exit 0 ;;
-    --cpu|--gpu|--rooted|--unrooted|--no-gpu-batch|--verify-parse|--verify-hash|--verify-clusters|--verify-partitions|--verify-dp|--verify-weights|--verify-distance-matrix|--autocomplete-incomplete-gene-trees|-v|-vv|-vvv|-q|--quiet)
+    --auto|--cpu|--gpu|--gpu-strict|--rooted|--unrooted|--anchor-outgroup|--anchor|--no-anchor-outgroup|--no-anchor|--no-prune-search-space|--no-gpu-batch|--consensus-experimental|--stepb-fast-restriction|--stepb-quadratic-nn-balls|--stepb-random-leftover-resolution|--stepb-process-large-polytomies|--resolve-input-gene-tree-polytomies|--verify-parse|--verify-hash|--verify-clusters|--verify-partitions|--verify-dp|--verify-weights|--verify-distance-matrix|--verify-similarity-matrix|--verify-upgma|--verify-greedy-consensus|--autocomplete-incomplete-gene-trees|-v|-vv|-vvv|-q|--quiet)
       ASTRALX_ARGS+=("$1")
       shift
       ;;
-    --search-mode|-t|-T|--threads|--num-threads|-m|--seeds|--gpu-batch-size|--gpu-batches|--gpu-vram-control-factor|--gpu-vram-occupancy-factor|--gpu-dp-state-space-construction-output-cap|--gpu-dist-tile-size)
+    --search-space|--intersection-method|--im|--weight-intersection-method|--search-mode|-t|-T|--threads|--num-threads|-m|--seeds|--anchor-taxon|--gpu-batch-size|--gpu-batches|--gpu-vram-control-factor|--gpu-vram-occupancy-factor|--gpu-treewalk-vram-cap-mb|--gpu-progress-interval|--gpu-dp-state-space-construction-output-cap|--gpu-dp-state-space-progress-time-interval|--gpu-dp-state-space-progress-max-steps|--gpu-dist-tile-size|--gpu-sim-vram-cap-mb|--completion-method|--stepb-restriction|--large-n-score-type|--large-score-type)
       ASTRALX_ARGS+=("$1" "$2")
       shift 2
       ;;
@@ -114,8 +117,10 @@ YELLOW='\033[1;33m'
 NC='\033[0m'
 
 INPUT_FILE="$(realpath "$INPUT_FILE")"
-OUTPUT_FILE="$(realpath "$OUTPUT_FILE")"
+OUTPUT_FILE="$(realpath -m "$OUTPUT_FILE")"
 ASTRALX_ROOT="$(realpath "$ASTRALX_ROOT")"
+PYTHON_BIN="${ASTRALX_PYTHON:-${ASTRALX_ROOT}/.venv/bin/python}"
+[[ -x "$PYTHON_BIN" ]] || PYTHON_BIN="python3"
 
 if [[ "${DEBUG:-0}" == "1" ]]; then
   set -x
@@ -187,10 +192,12 @@ fi
 # Canonical weight-intersection-method (default prefix-sum) for logs/notifications.
 WEIGHT_METHOD="prefix-sum"
 for ((wi = 0; wi < ${#ASTRALX_ARGS[@]}; wi++)); do
-  if [[ "${ASTRALX_ARGS[$wi]}" == "--weight-intersection-method" ]] && (( wi + 1 < ${#ASTRALX_ARGS[@]} )); then
+  if [[ "${ASTRALX_ARGS[$wi]}" == "--weight-intersection-method" || "${ASTRALX_ARGS[$wi]}" == "--intersection-method" || "${ASTRALX_ARGS[$wi]}" == "--im" ]] && (( wi + 1 < ${#ASTRALX_ARGS[@]} )); then
     case "${ASTRALX_ARGS[$((wi + 1))],,}" in
-      smaller-side-traversal|smaller_side_traversal|smaller-side|smallerside|legacy) WEIGHT_METHOD="smaller-side-traversal" ;;
-      prefix-sum|prefix_sum|prefixsum|prefix)                                        WEIGHT_METHOD="prefix-sum" ;;
+      1|i1|smaller-side-traversal|smaller_side_traversal|smaller-side|smallerside|legacy) WEIGHT_METHOD="smaller-side-traversal" ;;
+      2|i2|prefix-sum|prefix_sum|prefixsum|prefix)                                        WEIGHT_METHOD="prefix-sum" ;;
+      3|i3|simple-tree-walk|tree-walk|treewalk|simple)                                    WEIGHT_METHOD="simple-tree-walk" ;;
+      4|i4|bitset|bitsets|bit-set)                                                        WEIGHT_METHOD="bitset" ;;
       *)                                                                            WEIGHT_METHOD="${ASTRALX_ARGS[$((wi + 1))]}" ;;
     esac
   fi
@@ -225,16 +232,10 @@ else
   ASTRALX_PID=$!
 fi
 
-sleep 0.25
-if ! kill -0 "$ASTRALX_PID" >/dev/null 2>&1; then
-  echo -e "${RED}Error: ASTRAL-X process failed to start or died immediately.${NC}"
-  head -n 200 "$TIME_TMP" 2>/dev/null || true
-  touch "$DONE_FILE"
-  exit 5
-fi
-
+set +e
 wait "$ASTRALX_PID"
 ASTRALX_EXIT_CODE=$?
+set -e
 touch "$DONE_FILE"
 
 END_NS=$(date +%s%N)
@@ -275,7 +276,7 @@ RF_RATE="NA"
 if [[ -n "$REFERENCE_SPECIES_TREE" && -f "$OUTPUT_FILE" ]]; then
   REFERENCE_SPECIES_TREE="$(realpath "$REFERENCE_SPECIES_TREE")"
   if [[ -f "$REFERENCE_SPECIES_TREE" ]]; then
-    rf_output=$(cd "$ASTRALX_ROOT" && python3 rf.py "$OUTPUT_FILE" "$REFERENCE_SPECIES_TREE" 2>&1) || true
+    rf_output=$(cd "$ASTRALX_ROOT" && "$PYTHON_BIN" rf.py "$OUTPUT_FILE" "$REFERENCE_SPECIES_TREE" 2>&1) || true
     rf_line=$(echo "$rf_output" | grep -i "Robinson-Foulds distance" | tail -n1 || true)
     if [[ -n "$rf_line" ]]; then
       RF_RATE=$(echo "$rf_line" | grep -Eo '[0-9]+(\.[0-9]+)?' | tail -n1 || echo "NA")

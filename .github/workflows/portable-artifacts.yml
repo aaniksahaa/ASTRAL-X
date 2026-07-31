@@ -54,17 +54,28 @@ jobs:
       - name: Build CUDA + CPU-fallback artifact
         if: matrix.family == 'unix' && matrix.cuda
         shell: bash
-        run: ./build_portable.sh --with-cuda
+        run: |
+          version_args=()
+          [[ "$GITHUB_REF" == refs/tags/v* ]] && version_args=(--version "${GITHUB_REF_NAME#v}")
+          ./build_portable.sh --with-cuda "${version_args[@]}"
 
       - name: Build CPU-only macOS artifact
         if: matrix.family == 'unix' && !matrix.cuda
         shell: bash
-        run: ./build_portable.sh --cpu-only
+        run: |
+          version_args=()
+          [[ "$GITHUB_REF" == refs/tags/v* ]] && version_args=(--version "${GITHUB_REF_NAME#v}")
+          ./build_portable.sh --cpu-only "${version_args[@]}"
 
       - name: Build CUDA + CPU-fallback artifact
         if: matrix.family == 'windows'
         shell: pwsh
-        run: ./build_portable.ps1 -WithCuda
+        run: |
+          $VersionArgs = @()
+          if ($env:GITHUB_REF -like 'refs/tags/v*') {
+            $VersionArgs = @('-Version', ($env:GITHUB_REF_NAME -replace '^v', ''))
+          }
+          & ./build_portable.ps1 -WithCuda @VersionArgs
 
       - name: Validate real CUDA execution
         if: matrix.cuda && matrix.family == 'unix'
@@ -96,10 +107,11 @@ jobs:
         with:
           name: ${{ matrix.name }}
           path: |
-            dist/*.tar.gz
-            dist/*.tar.gz.sha256
-            dist/*.zip
-            dist/*.zip.sha256
+            dist/*/*.tar.gz
+            dist/*/*.tar.gz.sha256
+            dist/*/*.zip
+            dist/*/*.zip.sha256
+            dist/*/*.manifest.json
           if-no-files-found: error
 
   publish-release:
@@ -121,5 +133,5 @@ jobs:
         run: |
           gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1 || \
             gh release create "${GITHUB_REF_NAME}" --title "ASTRAL-X ${GITHUB_REF_NAME}" --generate-notes
-          gh release upload "${GITHUB_REF_NAME}" release-assets/* --clobber
-
+          mapfile -t assets < <(find release-assets -type f)
+          gh release upload "${GITHUB_REF_NAME}" "${assets[@]}" --clobber
