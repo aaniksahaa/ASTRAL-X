@@ -66,9 +66,9 @@ Options:
   --help, -h        Show this message
 
 Examples:
-  ./run-bulk-simulated.sh --opts "--search-space S4 -vv"
+  ./run-bulk-simulated.sh --opts "--search-space S2 -vv"
   ./run-bulk-simulated.sh --taxa-list "10,20" --genes-list "10,50" --num-replicates 3
-  ./run-bulk-simulated.sh --opts-list "--search-space S1 -vv;--search-space S4 -vv"
+  ./run-bulk-simulated.sh --opts-list "--search-space S1 -vv;--search-space S2 -vv;--search-space S3 -vv"
 EOF
 }
 

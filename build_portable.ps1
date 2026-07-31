@@ -183,7 +183,7 @@ when falling back would be undesirable.
     & $Launcher --cpu --diagnose | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "Packaged --diagnose smoke test failed." }
     $SmokeTree = Join-Path $Work "smoke-species-tree.tre"
-    & $Launcher --cpu --search-space S3 -q `
+    & $Launcher --cpu --search-space S2 -q `
         -i (Join-Path $ExampleDir "all_gt_37.tre") -o $SmokeTree
     if ($LASTEXITCODE -ne 0 -or -not (Test-Path $SmokeTree) -or
             (Get-Item $SmokeTree).Length -eq 0) {

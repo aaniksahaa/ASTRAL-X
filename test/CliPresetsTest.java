@@ -15,17 +15,12 @@ public final class CliPresetsTest {
         Config cfg = Config.getInstance();
         SearchExpected[] expected = {
             new SearchExpected(Config.SearchMode.LOCAL, false, false, false, false, false, false),
-            new SearchExpected(Config.SearchMode.LOCAL, true,  false, false, false, false, false),
-            new SearchExpected(Config.SearchMode.FULL,  false, false, false, false, false, false),
             new SearchExpected(Config.SearchMode.FULL,  true,  false, false, false, false, false),
-            new SearchExpected(Config.SearchMode.FULL,  true,  true,  false, false, false, false),
-            new SearchExpected(Config.SearchMode.FULL,  true,  true,  true,  false, false, false),
-            new SearchExpected(Config.SearchMode.FULL,  true,  true,  true,  true,  false, false),
             new SearchExpected(Config.SearchMode.FULL,  true,  true,  true,  true,  true,  true)
         };
 
         // Descending order proves that every lower preset resets higher-level flags.
-        for (int level = 8; level >= 1; level--) {
+        for (int level = 3; level >= 1; level--) {
             cfg.setCompletionMethod(Config.CompletionMethod.DISTANCE);
             cfg.setStepBFastRestriction(false);
             CliPresets.applySearchSpace("S" + level, cfg);
@@ -60,7 +55,8 @@ public final class CliPresetsTest {
         CliPresets.applyIntersectionMethod("bitset", cfg);
         check(cfg.getWeightIntersectionMethod() == methods[3], "legacy bitset name");
 
-        expectInvalid(() -> CliPresets.applySearchSpace("S9", cfg));
+        expectInvalid(() -> CliPresets.applySearchSpace("S4", cfg));
+        expectInvalid(() -> CliPresets.applySearchSpace("S8", cfg));
         expectInvalid(() -> CliPresets.applyIntersectionMethod("I5", cfg));
         System.out.println("CLI preset mappings: PASS");
     }

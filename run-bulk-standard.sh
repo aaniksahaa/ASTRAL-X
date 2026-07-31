@@ -39,12 +39,12 @@ ALGORITHMS=("astralx")
 
 # Algorithm-specific options
 # ASTRAL-X examples:
-# GENERIC_OPTS="--search-space S3 -vv"
-# GENERIC_OPTS_LIST_RAW="--search-space S1 -vv;--search-space S4 -vv"
+# GENERIC_OPTS="--search-space S2 -vv"
+# GENERIC_OPTS_LIST_RAW="--search-space S1 -vv;--search-space S2 -vv;--search-space S3 -vv"
 # The setting-name encoder ignores verbosity, so these become:
 #   search-mode_local
 #   search-mode_full
-STELAR_OPTS="--search-space S3 -vv"
+STELAR_OPTS="--search-space S2 -vv"
 STELAR_OPTS_LIST_RAW=""
 STELAR_OPTS_LIST=()
 ASTER_OPTS="-t 16"  # ASTER thread count
@@ -805,7 +805,7 @@ Multi-algorithm dataset runner supporting ASTRAL-X, ASTER, ASTRAL, TreeQMC, wQFM
 
 Algorithms available: astralx, aster, astral, treeqmc, wqfmtree, supertriplets, stp-nni, tmc
 Example ASTRAL-X setting sweep:
-  --method "astralx" --opts-list "--search-space S1 -vv;--search-space S4 -vv"
+  --method "astralx" --opts-list "--search-space S1 -vv;--search-space S2 -vv;--search-space S3 -vv"
 Algorithm root directories:
   STELAR-X:       Auto-detected from script location
   ASTER:          \${STELAR_X_ROOT}/baselines/ASTER

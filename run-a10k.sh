@@ -13,7 +13,7 @@ START_REP=""
 END_REP=""
 FRESH=false
 ASTRALX_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ASTRALX_OPTS="--search-space S3 -vv"
+ASTRALX_OPTS="--search-space S2 -vv"
 ASTRALX_OPTS_LIST_RAW=""
 TIME_MONITOR=true
 GPU_MONITOR=true
@@ -43,10 +43,10 @@ csv_get_field() {
 }
 
 # Example single setting:
-# ASTRALX_OPTS="--search-space S3"
+# ASTRALX_OPTS="--search-space S2"
 #
 # Example sweep over search-space presets:
-# ASTRALX_OPTS_LIST_RAW="--search-space S1;--search-space S4"
+# ASTRALX_OPTS_LIST_RAW="--search-space S1;--search-space S2;--search-space S3"
 #
 # Verbosity flags such as -v/-vv are ignored when constructing the setting name.
 
@@ -147,8 +147,8 @@ Optional:
 
 Examples:
   ./run-a10k.sh --data-dir /path/to/10k-astral-dataset --tree-type estimated --opts "--search-space S1 -vv"
-  ./run-a10k.sh --data-dir /path/to/10k-astral-dataset --tree-type estimated --opts "--search-space S4 -vv"
-  ./run-a10k.sh --data-dir /path/to/10k-astral-dataset --tree-type estimated --opts-list "--search-space S1 -vv;--search-space S4 -vv"
+  ./run-a10k.sh --data-dir /path/to/10k-astral-dataset --tree-type estimated --opts "--search-space S2 -vv"
+  ./run-a10k.sh --data-dir /path/to/10k-astral-dataset --tree-type estimated --opts-list "--search-space S1 -vv;--search-space S2 -vv;--search-space S3 -vv"
   Verbosity is ignored when constructing the setting name.
 EOF
 }

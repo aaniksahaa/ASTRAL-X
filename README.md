@@ -1,8 +1,19 @@
 # ASTRAL-X
 
-ASTRAL-X infers a species tree from a collection of gene trees. It supports CPU
-execution and can use an NVIDIA CUDA GPU when a compatible driver and bundled
-CUDA code are available. Portable releases include their own Java runtime.
+## A Fundamental Computational Redesign for Scalable Coalescent-Based Species Tree Inference
+
+ASTRAL-X is a complete algorithmic redesign of the ASTRAL framework for highly
+scalable, statistically consistent species tree inference from collections of
+gene trees. Compact data representations, memory-efficient search-space
+construction, and GPU-accelerated computation preserve ASTRAL's quartet-based
+optimization and statistical guarantees while making analyses with hundreds of
+thousands of taxa practical.
+
+An NVIDIA CUDA GPU is strongly recommended, particularly for large datasets,
+and is the primary high-performance execution path. CPU execution remains
+available as a reliable fallback for compatibility, smaller analyses, and
+development. Portable releases include their own Java runtime and automatically
+use CUDA when it is available.
 
 ## One-time setup
 
@@ -52,7 +63,7 @@ For a broader practical search on incomplete gene trees:
 
 ```bash
 astralx -i gene_trees.tre -o species_tree.tre \
-  --search-space S4 --intersection-method I2
+  --search-space S2 --intersection-method I2
 ```
 
 Use `astralx --help` for the complete option list and `astralx --diagnose` to
@@ -62,26 +73,20 @@ loading a dataset.
 ## Search-space presets
 
 `--search-space` controls how broadly ASTRAL-X explores candidate species-tree
-topologies. Choose `S1` through `S8`; a bare number such as `--search-space 4`
-is also accepted. “Complete” below means that missing taxa are inserted into
-incomplete gene trees while constructing the search space. Quartet weights are
-still calculated from the original gene trees.
+topologies. Choose `S1`, `S2`, or `S3`; bare numbers such as
+`--search-space 2` are also accepted. “Complete” below means that missing taxa
+are inserted into incomplete gene trees while constructing the search space.
+Quartet weights are still calculated from the original gene trees.
 
 | Preset | Search space | What it enables |
 |---|---|---|
 | **S1** | Incomplete, local | Uses topology candidates found directly within each original gene tree. Fastest and the default. |
-| **S2** | Complete, local | S1 plus incomplete-tree completion and a distance-based guide tree. |
-| **S3** | Incomplete, full | Uses the original gene trees and combines compatible candidates across trees. |
-| **S4** | Complete, full | Combines tree completion and the guide tree from S2 with the broader search from S3. |
-| **S5** | Consensus | S4 plus candidates obtained from greedy consensus trees and consensus-polytomy resolution. |
-| **S6** | Consensus + quadratic | S5 plus denser nearest-neighbour candidate groups around eligible polytomies. |
-| **S7** | Fully resolved consensus | S6 plus candidate resolutions for consensus polytomies that remain unresolved. |
-| **S8** | Exhaustive enrichment | S7 plus large-polytomy handling and additional candidates from polytomous input gene trees. Largest and slowest. |
+| **S2** | Complete, full | Completes incomplete gene trees, constructs a distance-based guide tree, and combines compatible candidates across trees. Recommended broader search. |
+| **S3** | Exhaustive | Includes everything in S2, then adds consensus-derived candidates, denser nearest-neighbour groups, remaining consensus-polytomy resolutions, large-polytomy handling, and resolutions derived from polytomous input gene trees. Largest and slowest. |
 
-S1–S4 cover the four combinations of using original or completed gene trees and
-searching within individual trees or across trees. S5–S8 progressively add more
-sources of candidate topologies. A larger preset can increase runtime and memory
-substantially and is not guaranteed to change the inferred tree.
+Moving from S1 to S3 progressively broadens the candidate topology set. A
+larger preset can increase runtime and memory substantially and is not
+guaranteed to change the inferred tree.
 
 Most analyses only need one search-space preset. Individual search controls are
 also available for specialized workflows; `astralx --help` lists them. When
@@ -225,7 +230,7 @@ memory, exit status, and RF distance when a true tree is provided:
 ./run-astralx-with-monitor.sh \
   -i gene_trees.tre \
   -o results/species_tree.tre \
-  --search-space S4 \
+  --search-space S2 \
   --intersection-method I2 \
   --no-notify
 ```
@@ -254,7 +259,7 @@ For a controlled parameter sweep, pass all experiment sizes explicitly:
   --taxa-list "10,20" \
   --genes-list "10,50" \
   --num-replicates 2 \
-  --opts-list "--cpu --search-space S1;--cpu --search-space S4" \
+  --opts-list "--cpu --search-space S1;--cpu --search-space S2;--cpu --search-space S3" \
   --no-gpu-monitor \
   --no-notify
 ```
@@ -275,7 +280,7 @@ Provide the dataset location and select ASTRAL-X explicitly:
   --dataset-dir /path/to/datasets/standard \
   --method astralx \
   --folder "37-taxon" \
-  --opts "--search-space S4 -vv" \
+  --opts "--search-space S2 -vv" \
   --no-notify
 ```
 

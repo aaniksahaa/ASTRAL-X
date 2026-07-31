@@ -17,10 +17,16 @@ run_score() {
 
 [[ "$(run_score --search-space S1 --intersection-method I2)" == \
    "$(run_score --search-mode local --weight-intersection-method prefix-sum)" ]]
-[[ "$(run_score --search-space S3 --im I3)" == \
-   "$(run_score --search-mode full --weight-intersection-method simple-tree-walk)" ]]
+[[ "$(run_score --search-space S2 --im I3)" == \
+   "$(run_score --autocomplete-incomplete-gene-trees --search-mode full \
+      --weight-intersection-method simple-tree-walk)" ]]
+[[ "$(run_score --search-space S3 --intersection-method I2)" == \
+   "$(run_score --autocomplete-incomplete-gene-trees --search-mode full \
+      --consensus-experimental --stepb-quadratic-nn-balls \
+      --stepb-random-leftover-resolution --stepb-process-large-polytomies \
+      --resolve-input-gene-tree-polytomies --weight-intersection-method prefix-sum)" ]]
 
-if java -cp "${ROOT}/build" astralx.Main --cpu --diagnose --search-space S9 \
+if java -cp "${ROOT}/build" astralx.Main --cpu --diagnose --search-space S4 \
     >/dev/null 2>&1; then
   echo "invalid search preset was unexpectedly accepted" >&2
   exit 1

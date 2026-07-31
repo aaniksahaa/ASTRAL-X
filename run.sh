@@ -53,7 +53,7 @@ Optional:
   --gpu              Force GPU mode
   --auto             Automatically select CUDA or CPU (default)
   --gpu-strict       Require CUDA; do not fall back to CPU
-  --search-space     S1 through S8 (recommended)
+  --search-space     S1 through S3 (recommended)
   --intersection-method, --im
                      I1 through I4 (recommended)
   --search-mode      local | full

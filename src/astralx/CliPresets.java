@@ -30,30 +30,9 @@ final class CliPresets {
             case "1", "s1", "incomplete-local" -> {
                 // Baseline: original trees and tree-local candidate splits.
             }
-            case "2", "s2", "complete-local" ->
-                cfg.setAutoCompleteIncompleteTrees(true);
-            case "3", "s3", "incomplete-full" ->
-                cfg.setSearchMode(Config.SearchMode.FULL);
-            case "4", "s4", "complete-full" -> {
-                cfg.setAutoCompleteIncompleteTrees(true);
-                cfg.setSearchMode(Config.SearchMode.FULL);
-            }
-            case "5", "s5", "consensus" -> {
+            case "2", "s2", "complete-full" ->
                 applyCompleteFull(cfg);
-                cfg.setConsensusExperimental(true);
-            }
-            case "6", "s6", "consensus-quadratic" -> {
-                applyCompleteFull(cfg);
-                cfg.setConsensusExperimental(true);
-                cfg.setStepBQuadraticNnBalls(true);
-            }
-            case "7", "s7", "consensus-resolved" -> {
-                applyCompleteFull(cfg);
-                cfg.setConsensusExperimental(true);
-                cfg.setStepBQuadraticNnBalls(true);
-                cfg.setStepBRandomLeftoverResolution(true);
-            }
-            case "8", "s8", "exhaustive" -> {
+            case "3", "s3", "exhaustive" -> {
                 applyCompleteFull(cfg);
                 cfg.setConsensusExperimental(true);
                 cfg.setStepBQuadraticNnBalls(true);
@@ -62,7 +41,7 @@ final class CliPresets {
                 cfg.setResolveInputGeneTreePolytomies(true);
             }
             default -> throw new IllegalArgumentException(
-                "unknown search space '" + value + "' (expected S1-S8 or 1-8)");
+                "unknown search space '" + value + "' (expected S1-S3 or 1-3)");
         }
     }
 

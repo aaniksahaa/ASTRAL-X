@@ -43,7 +43,7 @@ Optional:
   --reference-species-tree  Reference species tree for RF rate calculation
   --threads, --num-threads, -t, -T
                          CPU worker threads
-  --search-space S1..S8  Search-space preset
+  --search-space S1..S3  Search-space preset
   --intersection-method I1..I4
                          Intersection method preset
   --no-time-monitor     Disable time monitoring

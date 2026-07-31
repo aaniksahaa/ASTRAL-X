@@ -28,7 +28,7 @@ SB="0.000001"
 SPMIN="500000"
 SPMAX="1500000"
 USE_LEGACY_LAYOUT=false
-ASTRALX_OPTS="--search-space S3 -vv"
+ASTRALX_OPTS="--search-space S2 -vv"
 FRESH=false
 INCOMPLETE=false
 TIME_MONITOR=true
@@ -186,7 +186,7 @@ Optional:
 Examples:
   ./test-astralx-simulated.sh -t 100 -g 100 -r R1 --fresh
   ./test-astralx-simulated.sh -t 100 -g 100 -r R1 --fresh --opts "--search-space S1 -vv"
-  ./test-astralx-simulated.sh -t 100 -g 100 -r R1 --fresh --opts "--search-space S4 -vv"
+  ./test-astralx-simulated.sh -t 100 -g 100 -r R1 --fresh --opts "--search-space S2 -vv"
   Verbosity is ignored when constructing the setting name.
 EOF
 }

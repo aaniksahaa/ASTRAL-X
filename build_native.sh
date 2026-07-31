@@ -90,4 +90,4 @@ echo "  OK"
 
 echo "=== Native build complete ==="
 echo "Run with:"
-echo "  ./run.sh -i <input.tre> -o <output.tre> --gpu --search-space S3 -vv --no-build"
+echo "  ./run.sh -i <input.tre> -o <output.tre> --gpu --search-space S2 -vv --no-build"

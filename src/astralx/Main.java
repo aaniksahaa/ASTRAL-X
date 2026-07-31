@@ -744,7 +744,7 @@ public class Main {
               -q, --quiet | -v | -vv | -vvv   Quiet, info, debug, or trace logging
 
             Search and scoring:
-              --search-space S1..S8            Friendly search-space preset (default: S1)
+              --search-space S1..S3            Friendly search-space preset (default: S1)
               --intersection-method I1..I4     Friendly scoring method (default: I2)
               --im I1..I4                      Short form of --intersection-method
               --search-mode local|full         Legacy/advanced DP search control

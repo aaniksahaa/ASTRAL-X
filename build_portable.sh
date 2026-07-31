@@ -238,7 +238,7 @@ VERSION_OUTPUT="$("$PACKAGED_LAUNCHER" --version)"
   exit 1
 }
 "$PACKAGED_LAUNCHER" --cpu --diagnose >/dev/null
-"$PACKAGED_LAUNCHER" --cpu --search-space S3 -q \
+"$PACKAGED_LAUNCHER" --cpu --search-space S2 -q \
     -i "${EXAMPLE_DIR}/all_gt_37.tre" \
     -o "${WORK}/smoke-species-tree.tre"
 if [[ ! -s "${WORK}/smoke-species-tree.tre" ]]; then
