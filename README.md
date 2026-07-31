@@ -168,9 +168,11 @@ test -s data/avian-363/63430.gene.trees &&
 Run ASTRAL-X with the tree-local search space (S1) and simple-tree-walk intersections (I3):
 
 ```bash
-astralx -i data/avian-363/63430.gene.trees \
-  -o data/avian-363/out-astralx-avian-363-S1-I3.tre \
+astralx \
+  -i data/avian-363/63430.gene.trees \
+  -o data/avian-363/out-astralx-avian-363-complete-local-S1-I3.tre \
   --search-space S1 \
+  --autocomplete-incomplete-gene-trees \
   --intersection-method I3 \
   -vv
 ```
