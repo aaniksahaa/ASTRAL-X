@@ -92,38 +92,6 @@ loading a dataset.
 
 Run the commands below from the directory where you want the `data/` folder.
 
-### Avian-48
-
-Download, extract, clean up, and verify the 48-taxon avian dataset with:
-
-```bash
-mkdir -p data/avian-48
-wget -c \
-  -O data/avian-48.tar \
-  "https://zenodo.org/records/21722787/files/avian-48.tar?download=1"
-tar -xf data/avian-48.tar \
-  -C data/avian-48 \
-  --strip-components=1 &&
-  rm data/avian-48.tar
-test -s data/avian-48/avian-48-gt.tre &&
-  ls -lh data/avian-48/avian-48-gt.tre
-```
-
-Run ASTRAL-X with the complete, full search space and bitset intersections:
-
-```bash
-astralx -i data/avian-48/avian-48-gt.tre \
-  -o data/avian-48/out-astralx-avian-48.tre \
-  --search-space S2 \
-  --intersection-method I4 \
-  --log-file data/avian-48/astralx_avian_48.log \
-  -vv
-```
-
-The run remains visible in the terminal. Persistent messages and the final
-summary are also saved to `data/avian-48/astralx_avian_48.log`; animated
-progress-bar repaints remain terminal-only.
-
 ### Angiosperms
 
 Download, extract, clean up, and verify the angiosperm dataset with:
@@ -141,20 +109,81 @@ test -s data/angio/all_gt_angio.tre &&
   ls -lh data/angio/all_gt_angio.tre
 ```
 
-Run ASTRAL-X with the exhaustive search space (with consensus) and simple-tree-walk
-intersections:
+Because this dataset has relatively few gene trees compared with its number of
+taxa and includes incomplete gene trees, we use ASTRAL-X's exhaustive,
+consensus-enriched search space (S3) with simple-tree-walk intersections (I3):
 
 ```bash
 astralx -i data/angio/all_gt_angio.tre \
-  -o data/angio/out-astralx-angio.tre \
+  -o data/angio/out-astralx-angio-S3-I3.tre \
   --search-space S3 \
   --intersection-method I3 \
-  --log-file data/angio/astralx_angio.log \
   -vv
 ```
 
-Persistent messages and the final summary are also saved to
-`data/angio/astralx_angio.log`, while animated progress remains terminal-only.
+### Avian-48
+
+Download, extract, clean up, and verify the 48-taxon avian dataset with:
+
+```bash
+mkdir -p data/avian-48
+wget -c \
+  -O data/avian-48.tar \
+  "https://zenodo.org/records/21722787/files/avian-48.tar?download=1"
+tar -xf data/avian-48.tar \
+  -C data/avian-48 \
+  --strip-components=1 &&
+  rm data/avian-48.tar
+test -s data/avian-48/avian-48-gt.tre &&
+  ls -lh data/avian-48/avian-48-gt.tre
+```
+
+Run ASTRAL-X with the S2 search space and bitset intersections (I4):
+
+```bash
+astralx -i data/avian-48/avian-48-gt.tre \
+  -o data/avian-48/out-astralx-avian-48-S2-I4.tre \
+  --search-space S2 \
+  --intersection-method I4 \
+  -vv
+```
+
+### Avian-363
+
+Download, extract, clean up, and verify the 363-taxon avian dataset with:
+
+```bash
+mkdir -p data/avian-363
+wget -c \
+  -O data/avian-363.tar \
+  "https://zenodo.org/records/21722787/files/avian-363.tar?download=1"
+tar -xf data/avian-363.tar \
+  -C data/avian-363 \
+  --strip-components=1 &&
+  rm data/avian-363.tar
+test -s data/avian-363/63430.gene.trees &&
+  ls -lh data/avian-363/63430.gene.trees
+```
+
+Run ASTRAL-X with the tree-local search space (S1) and simple-tree-walk intersections (I3):
+
+```bash
+astralx -i data/avian-363/63430.gene.trees \
+  -o data/avian-363/out-astralx-avian-363-S1-I3.tre \
+  --search-space S1 \
+  --intersection-method I3 \
+  -vv
+```
+
+For the broader search space with cross-tree transitions (S2) with the same I3 intersection method:
+
+```bash
+astralx -i data/avian-363/63430.gene.trees \
+  -o data/avian-363/out-astralx-avian-363-S2-I3.tre \
+  --search-space S2 \
+  --intersection-method I3 \
+  -vv
+```
 
 ## Search-space presets
 
