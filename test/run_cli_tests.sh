@@ -5,6 +5,15 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TEST_CLASSES="$(mktemp -d "${TMPDIR:-/tmp}/astralx-cli-tests.XXXXXX")"
 trap 'rm -rf "$TEST_CLASSES"' EXIT
 
+source "${ROOT}/experiment-setting-name.sh"
+[[ "$(build_setting_name_from_opts '--search-space S1 --intersection-method I2 -vv')" == \
+   "search-space_S1__intersection-method_I2" ]]
+[[ "$(build_setting_name_from_opts '--search-space complete-full --weight-intersection-method prefix-sum --cpu')" == \
+   "search-space_S2__intersection-method_I2__cpu_true" ]]
+[[ "$(build_setting_name_from_opts '--search-mode local --im I1 --threads 8 -q')" == \
+   "search-mode_local__intersection-method_I1__threads_8" ]]
+[[ "$(build_setting_name_from_opts '-vv --quiet')" == "default" ]]
+
 "${ROOT}/build.sh" >/dev/null
 javac -cp "${ROOT}/build" -d "$TEST_CLASSES" "${ROOT}/test/CliPresetsTest.java"
 java -cp "${ROOT}/build:${TEST_CLASSES}" astralx.CliPresetsTest

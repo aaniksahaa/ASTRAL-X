@@ -39,11 +39,10 @@ ALGORITHMS=("astralx")
 
 # Algorithm-specific options
 # ASTRAL-X examples:
-# GENERIC_OPTS="--search-space S2 -vv"
+# GENERIC_OPTS="--search-space S2 --intersection-method I2 -vv"
 # GENERIC_OPTS_LIST_RAW="--search-space S1 -vv;--search-space S2 -vv;--search-space S3 -vv"
-# The setting-name encoder ignores verbosity, so these become:
-#   search-mode_local
-#   search-mode_full
+# The setting-name encoder ignores verbosity. The single setting above becomes:
+#   search-space_S2__intersection-method_I2
 STELAR_OPTS="--search-space S2 -vv"
 STELAR_OPTS_LIST_RAW=""
 STELAR_OPTS_LIST=()
@@ -71,6 +70,9 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
 NTFY_CHANNEL_NAME="${NTFY_CHANNEL_NAME:-anik-phylo}"
+
+RUNNER_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${RUNNER_ROOT}/experiment-setting-name.sh"
 
 # =============================================================================
 # Dataset configuration
@@ -248,81 +250,6 @@ strip_trivial_opts_for_csv() {
     done
 
     printf '%s' "${kept[*]}"
-}
-
-sanitize_setting_part() {
-    local value="$1"
-    value="${value// /-}"
-    value="${value//\//-}"
-    value="${value//:/-}"
-    value="${value//=/-}"
-    value="${value//,/.-}"
-    printf '%s' "$value"
-}
-
-build_setting_name_from_opts() {
-    local raw="$1"
-    local -a tokens=()
-    local -a parts=()
-    local i=0
-    local key
-    local value
-
-    if [[ -z "${raw// }" ]]; then
-      printf 'default'
-      return
-    fi
-
-    read -r -a tokens <<< "$raw"
-    while (( i < ${#tokens[@]} )); do
-      key="${tokens[$i]}"
-      case "$key" in
-        -v|-vv|-vvv|-q|--quiet)
-          ((i+=1))
-          continue
-          ;;
-        --*)
-          key="${key#--}"
-          if (( i + 1 < ${#tokens[@]} )) && [[ ! "${tokens[$((i + 1))]}" =~ ^- ]]; then
-            value="${tokens[$((i + 1))]}"
-            parts+=("$(sanitize_setting_part "$key")_$(sanitize_setting_part "$value")")
-            ((i+=2))
-          else
-            parts+=("$(sanitize_setting_part "$key")_true")
-            ((i+=1))
-          fi
-          ;;
-        -t)
-          if (( i + 1 < ${#tokens[@]} )); then
-            parts+=("threads_$(sanitize_setting_part "${tokens[$((i + 1))]}")")
-            ((i+=2))
-          else
-            ((i+=1))
-          fi
-          ;;
-        -m)
-          if (( i + 1 < ${#tokens[@]} )); then
-            parts+=("seeds_$(sanitize_setting_part "${tokens[$((i + 1))]}")")
-            ((i+=2))
-          else
-            ((i+=1))
-          fi
-          ;;
-        *)
-          ((i+=1))
-          ;;
-      esac
-    done
-
-    if [[ ${#parts[@]} -eq 0 ]]; then
-      printf 'default'
-    else
-      local result=""
-      for part in "${parts[@]}"; do
-        if [[ -z "$result" ]]; then result="$part"; else result="${result}___${part}"; fi
-      done
-      printf '%s' "$result"
-    fi
 }
 
 method_opts_for_algorithm() {

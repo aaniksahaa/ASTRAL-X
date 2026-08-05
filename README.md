@@ -402,6 +402,13 @@ The bulk script intentionally defaults to one small 10-taxon, 10-gene run. Use
 simulation location can be supplied to the individual scripts with
 `--simphy-data-dir`.
 
+Experiment output directories and CSV rows derive their `setting` name from the
+meaningful algorithm options. For example,
+`--search-space S1 --intersection-method I2 -vv` becomes
+`search-space_S1__intersection-method_I2`; verbosity flags are omitted, while
+additional options are appended using the same `option_value` format. Legacy
+intersection-method names are normalized to their compact `I1`-`I4` names.
+
 ## Standard-dataset experiments
 
 `run-bulk-standard.sh` works with the repository's configured benchmark layout.
@@ -413,7 +420,7 @@ Provide the dataset location and select ASTRAL-X explicitly:
   --dataset-dir /path/to/datasets/standard \
   --method astralx \
   --folder "37-taxon" \
-  --opts "--search-space S2 -vv" \
+  --opts "--search-space S2 --intersection-method I2 -vv" \
   --no-notify
 ```
 

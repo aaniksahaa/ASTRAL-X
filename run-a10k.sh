@@ -19,6 +19,8 @@ TIME_MONITOR=true
 GPU_MONITOR=true
 NO_NOTIFY=false
 
+source "${ASTRALX_ROOT}/experiment-setting-name.sh"
+
 csv_get_field() {
   local file="$1"
   shift
@@ -43,86 +45,13 @@ csv_get_field() {
 }
 
 # Example single setting:
-# ASTRALX_OPTS="--search-space S2"
+# ASTRALX_OPTS="--search-space S2 --intersection-method I2"
 #
 # Example sweep over search-space presets:
 # ASTRALX_OPTS_LIST_RAW="--search-space S1;--search-space S2;--search-space S3"
 #
-# Verbosity flags such as -v/-vv are ignored when constructing the setting name.
-
-sanitize_setting_part() {
-  local value="$1"
-  value="${value// /-}"
-  value="${value//\//-}"
-  value="${value//:/-}"
-  value="${value//=/-}"
-  value="${value//,/.-}"
-  printf '%s' "$value"
-}
-
-build_setting_name_from_opts() {
-  local raw="$1"
-  local -a tokens=()
-  local -a parts=()
-  local i key value
-
-  if [[ -z "${raw// }" ]]; then
-    printf 'default'
-    return
-  fi
-
-  read -r -a tokens <<< "$raw"
-  i=0
-  while (( i < ${#tokens[@]} )); do
-    key="${tokens[$i]}"
-    case "$key" in
-      -v|-vv|-vvv|-q|--quiet)
-        ((i+=1))
-        continue
-        ;;
-      --*)
-        key="${key#--}"
-        if (( i + 1 < ${#tokens[@]} )) && [[ ! "${tokens[$((i + 1))]}" =~ ^- ]]; then
-          value="${tokens[$((i + 1))]}"
-          parts+=("$(sanitize_setting_part "$key")_$(sanitize_setting_part "$value")")
-          ((i+=2))
-        else
-          parts+=("$(sanitize_setting_part "$key")_true")
-          ((i+=1))
-        fi
-        ;;
-      -t)
-        if (( i + 1 < ${#tokens[@]} )); then
-          parts+=("threads_$(sanitize_setting_part "${tokens[$((i + 1))]}")")
-          ((i+=2))
-        else
-          ((i+=1))
-        fi
-        ;;
-      -m)
-        if (( i + 1 < ${#tokens[@]} )); then
-          parts+=("seeds_$(sanitize_setting_part "${tokens[$((i + 1))]}")")
-          ((i+=2))
-        else
-          ((i+=1))
-        fi
-        ;;
-      *)
-        ((i+=1))
-        ;;
-    esac
-  done
-
-  if [[ ${#parts[@]} -eq 0 ]]; then
-    printf 'default'
-  else
-    local result=""
-    for part in "${parts[@]}"; do
-      if [[ -z "$result" ]]; then result="$part"; else result="${result}___${part}"; fi
-    done
-    printf '%s' "$result"
-  fi
-}
+# This becomes search-space_S2__intersection-method_I2. Verbosity flags such as
+# -v/-vv are ignored when constructing the setting name.
 
 print_help() {
   cat <<EOF
@@ -146,10 +75,11 @@ Optional:
   --no-notify, -nn     Disable ntfy notifications
 
 Examples:
-  ./run-a10k.sh --data-dir /path/to/10k-astral-dataset --tree-type estimated --opts "--search-space S1 -vv"
-  ./run-a10k.sh --data-dir /path/to/10k-astral-dataset --tree-type estimated --opts "--search-space S2 -vv"
+  ./run-a10k.sh --data-dir /path/to/10k-astral-dataset --tree-type estimated --opts "--search-space S1 --intersection-method I2 -vv"
+  ./run-a10k.sh --data-dir /path/to/10k-astral-dataset --tree-type estimated --opts "--search-space S2 --intersection-method I2 -vv"
   ./run-a10k.sh --data-dir /path/to/10k-astral-dataset --tree-type estimated --opts-list "--search-space S1 -vv;--search-space S2 -vv;--search-space S3 -vv"
-  Verbosity is ignored when constructing the setting name.
+  The first example setting is search-space_S1__intersection-method_I2.
+  Verbosity is ignored; other meaningful options are appended to the name.
 EOF
 }
 

@@ -36,15 +36,7 @@ GPU_MONITOR=true
 NO_NOTIFY=false
 DEBUG=0
 
-sanitize_setting_part() {
-  local value="$1"
-  value="${value// /-}"
-  value="${value//\//-}"
-  value="${value//:/-}"
-  value="${value//=/-}"
-  value="${value//,/.-}"
-  printf '%s' "$value"
-}
+source "${SCRIPT_ROOT}/experiment-setting-name.sh"
 
 # Extract the canonical intersection method from an opts string.
 # Returns 'prefix-sum' (the default) when not specified.
@@ -78,76 +70,6 @@ extract_weight_method_from_opts() {
     i4|4|bitset)                                                                   printf 'bitset' ;;
     *)                                                                             printf '%s' "$wim_val" ;;
   esac
-}
-
-build_setting_name_from_opts() {
-  local raw="$1"
-  local -a tokens=()
-  local i search_mode_val="" search_space_val="" wim_val=""
-
-  if [[ -z "${raw// }" ]]; then
-    printf 'default'
-    return
-  fi
-
-  read -r -a tokens <<< "$raw"
-  i=0
-  while (( i < ${#tokens[@]} )); do
-    case "${tokens[$i]}" in
-      --search-space)
-        (( i + 1 < ${#tokens[@]} )) && search_space_val="${tokens[$((i + 1))]}"
-        ((i+=2))
-        ;;
-      --search-space=*) search_space_val="${tokens[$i]#*=}"; ((i+=1)) ;;
-      --search-mode)
-        (( i + 1 < ${#tokens[@]} )) && search_mode_val="${tokens[$((i + 1))]}"
-        ((i+=2))
-        ;;
-      --search-mode=*) search_mode_val="${tokens[$i]#*=}"; ((i+=1)) ;;
-      --weight-intersection-method|--intersection-method|--im)
-        (( i + 1 < ${#tokens[@]} )) && wim_val="${tokens[$((i + 1))]}"
-        ((i+=2))
-        ;;
-      --weight-intersection-method=*|--intersection-method=*|--im=*)
-        wim_val="${tokens[$i]#*=}"
-        ((i+=1))
-        ;;
-      *) ((i+=1)) ;;
-    esac
-  done
-
-  # Preserve historical search-mode directory names while giving presets their
-  # own collision-free names.
-  local base
-  if [[ -n "$search_space_val" ]]; then
-    base="search-space_$(sanitize_setting_part "${search_space_val^^}")"
-  elif [[ -n "$search_mode_val" ]]; then
-    base="search-mode_$(sanitize_setting_part "$search_mode_val")"
-  else
-    base="default"
-  fi
-
-  # Append a weight-intersection-method tag ONLY when it differs from the
-  # default (prefix-sum), so existing prefix-sum runs keep their original path.
-  local wim_canon=""
-  case "${wim_val,,}" in
-    ""|i2|2|prefix-sum|prefix_sum|prefixsum|prefix)
-      wim_canon="" ;;                                   # default → no tag
-    i1|1|smaller-side-traversal|smaller_side_traversal|smaller-side|smallerside|legacy)
-      wim_canon="smaller-side-traversal" ;;
-    i3|3|simple-tree-walk|simple_tree_walk|tree-walk)
-      wim_canon="simple-tree-walk" ;;
-    i4|4|bitset)
-      wim_canon="bitset" ;;
-    *)
-      wim_canon="$(sanitize_setting_part "$wim_val")" ;; # unknown → tag verbatim
-  esac
-
-  if [[ -n "$wim_canon" ]]; then
-    printf '%s__wim_%s' "$base" "$wim_canon"
-  else
-    printf '%s' "$base"
-  fi
 }
 
 print_help() {
@@ -185,9 +107,9 @@ Optional:
 
 Examples:
   ./test-astralx-simulated.sh -t 100 -g 100 -r R1 --fresh
-  ./test-astralx-simulated.sh -t 100 -g 100 -r R1 --fresh --opts "--search-space S1 -vv"
-  ./test-astralx-simulated.sh -t 100 -g 100 -r R1 --fresh --opts "--search-space S2 -vv"
-  Verbosity is ignored when constructing the setting name.
+  ./test-astralx-simulated.sh -t 100 -g 100 -r R1 --fresh --opts "--search-space S1 --intersection-method I2 -vv"
+  The example setting is named search-space_S1__intersection-method_I2.
+  Verbosity is ignored; other meaningful options are appended to the name.
 EOF
 }
 
