@@ -6,7 +6,7 @@ set -euo pipefail
 
 NTFY_CHANNEL_NAME="${NTFY_CHANNEL_NAME:-anik-phylo}"
 
-TREE_TYPE="estimated"
+TREE_TYPES_RAW="estimated"
 DATA_DIR=""
 REPLICATES_SPEC=""
 START_REP=""
@@ -61,7 +61,8 @@ Required:
   --data-dir           Path to A10K dataset root containing 10k-simphy/
 
 Optional:
-  --tree-type          estimated | true (default: estimated)
+  --tree-type          estimated | true, or a semicolon-separated list
+                       such as "true;estimated" (default: estimated)
   --replicates         Replicates to run, e.g. "1-20" or "R1,R2"
   --start-rep, -sr     Start replicate number
   --end-rep, -er       End replicate number
@@ -76,6 +77,7 @@ Optional:
 
 Examples:
   ./run-a10k.sh --data-dir /path/to/10k-astral-dataset --tree-type estimated --opts "--search-space S1 --intersection-method I2 -vv"
+  ./run-a10k.sh --data-dir /path/to/10k-astral-dataset --tree-type "true;estimated" --opts "--search-space S1 --intersection-method I2 -vv"
   ./run-a10k.sh --data-dir /path/to/10k-astral-dataset --tree-type estimated --opts "--search-space S2 --intersection-method I2 -vv"
   ./run-a10k.sh --data-dir /path/to/10k-astral-dataset --tree-type estimated --opts-list "--search-space S1 -vv;--search-space S2 -vv;--search-space S3 -vv"
   The first example setting is search-space_S1__intersection-method_I2.
@@ -86,7 +88,8 @@ EOF
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --data-dir) DATA_DIR="$2"; shift 2 ;;
-    --tree-type) TREE_TYPE="$2"; shift 2 ;;
+    --tree-type) TREE_TYPES_RAW="$2"; shift 2 ;;
+    --tree-type=*) TREE_TYPES_RAW="${1#*=}"; shift ;;
     --replicates) REPLICATES_SPEC="$2"; shift 2 ;;
     --start-rep|-sr) START_REP="$2"; shift 2 ;;
     --end-rep|-er) END_REP="$2"; shift 2 ;;
@@ -117,6 +120,34 @@ if [[ ! -d "$SIMPHY_DIR" ]]; then
   exit 3
 fi
 
+TREE_TYPES=()
+IFS=';' read -r -a raw_tree_types <<< "$TREE_TYPES_RAW"
+for tree_type in "${raw_tree_types[@]}"; do
+  tree_type="${tree_type//[[:space:]]/}"
+  tree_type="${tree_type,,}"
+  [[ -n "$tree_type" ]] || continue
+  case "$tree_type" in
+    true|estimated) ;;
+    *)
+      echo "Error: invalid --tree-type value '$tree_type' (expected true, estimated, or a semicolon-separated list)."
+      exit 2
+      ;;
+  esac
+
+  duplicate=false
+  for existing_tree_type in "${TREE_TYPES[@]}"; do
+    if [[ "$existing_tree_type" == "$tree_type" ]]; then
+      duplicate=true
+      break
+    fi
+  done
+  [[ "$duplicate" == false ]] && TREE_TYPES+=("$tree_type")
+done
+if [[ ${#TREE_TYPES[@]} -eq 0 ]]; then
+  echo "Error: --tree-type must contain at least one of: true, estimated."
+  exit 2
+fi
+
 ASTRALX_OPTS_LIST=()
 if [[ -n "$ASTRALX_OPTS_LIST_RAW" ]]; then
   IFS=';' read -r -a raw_opts_list <<< "$ASTRALX_OPTS_LIST_RAW"
@@ -129,6 +160,7 @@ if [[ ${#ASTRALX_OPTS_LIST[@]} -eq 0 ]]; then
   ASTRALX_OPTS_LIST+=("${ASTRALX_OPTS}")
 fi
 echo "[DEBUG] opts list (${#ASTRALX_OPTS_LIST[@]} items): ${ASTRALX_OPTS_LIST[*]}"
+echo "[DEBUG] tree types (${#TREE_TYPES[@]} items): ${TREE_TYPES[*]}"
 echo "[DEBUG] replicates spec: '${REPLICATES_SPEC}' | fresh: ${FRESH}"
 
 REPL_LIST=()
@@ -155,7 +187,9 @@ fi
 
 echo "[DEBUG] replicate list (${#REPL_LIST[@]} items): ${REPL_LIST[*]}"
 
-for REPL in "${REPL_LIST[@]}"; do
+for TREE_TYPE in "${TREE_TYPES[@]}"; do
+  echo "==> Processing A10K tree type: ${TREE_TYPE}"
+  for REPL in "${REPL_LIST[@]}"; do
   REPL_DIR="${SIMPHY_DIR%/}/${REPL}"
   if [[ ! -d "$REPL_DIR" ]]; then
     echo "[DEBUG] SKIP ${REPL}: directory not found: ${REPL_DIR}"
@@ -270,5 +304,6 @@ Exit: ${EXIT_CODE}
 Tree: $(basename "$OUT_FILE")
 Stats: $(basename "$STAT_FILE")" "https://ntfy.sh/${NTFY_CHANNEL_NAME}" >/dev/null 2>&1 || true
     fi
+    done
   done
 done

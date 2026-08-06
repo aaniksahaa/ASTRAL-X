@@ -716,7 +716,19 @@ done
 "--search-mode full -vv --autocomplete-incomplete-gene-trees --consensus-experimental --stepb-quadratic-nn-balls --stepb-random-leftover-resolution --stepb-process-large-polytomies"
 
 
+./clear-a10k.sh \
+  --data-dir data/10k-astral-dataset \
+  --yes
+
 --weight-intersection-method smaller-side-traversal
+
+
+
+./run-a10k.sh \
+  --data-dir data/10k-astral-dataset \
+  --tree-type "true;estimated" \
+  --opts-list "--search-space S1 --intersection-method I1;--search-space S2 --intersection-method I1;--search-space S3 --intersection-method I1"
+
 
 ./run-a10k.sh \
   --data-dir data/10k-astral-dataset \

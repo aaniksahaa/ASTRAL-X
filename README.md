@@ -451,6 +451,28 @@ remove the selected method's complete output directories. Historical
 `stelar_outputs` can be selected with `--method stelar`; use `--method all` to
 clean statistics for every supported method.
 
+The A10K runner accepts one tree type or a quoted semicolon-separated list. For
+example, this runs every selected replicate and setting once with true gene
+trees and once with estimated gene trees:
+
+```bash
+./run-a10k.sh \
+  --data-dir /path/to/10k-astral-dataset \
+  --tree-type "true;estimated" \
+  --opts "--search-space S1 --intersection-method I1"
+```
+
+To clear every result produced by the A10K runner, including all settings and
+both tree types across every replicate, preview the exact targets first:
+
+```bash
+./clear-a10k.sh --data-dir /path/to/10k-astral-dataset --dry-run
+./clear-a10k.sh --data-dir /path/to/10k-astral-dataset --yes
+```
+
+This removes only `10k-simphy/R*/astralx_outputs` and the A10K merged scores
+CSV; gene trees, rooted gene trees, and species trees are preserved.
+
 ## Tests
 
 Run the CLI contract tests and the complete CPU regression suite with:
