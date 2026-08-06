@@ -447,7 +447,9 @@ preview and then confirm the cleanup:
 ```
 
 The cleaner preserves output trees and logs by default. Add `--all-results` to
-remove the selected method's complete output directories.
+remove the selected method's complete output directories. Historical
+`stelar_outputs` can be selected with `--method stelar`; use `--method all` to
+clean statistics for every supported method.
 
 ## Tests
 

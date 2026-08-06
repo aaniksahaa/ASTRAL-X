@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Remove one method's generated standard-dataset statistics without touching
-# source data or results belonging to other methods.
+# Remove generated standard-dataset statistics without touching source data or
+# results outside the selected method(s).
 
 set -euo pipefail
 
@@ -10,19 +10,21 @@ METHOD=""
 DRY_RUN=false
 ASSUME_YES=false
 ALL_RESULTS=false
+SUPPORTED_METHODS=(astralx stelar aster astral treeqmc wqfmtree supertriplets stp-nni tmc)
 
 show_usage() {
   cat <<'EOF'
 Usage: ./clear-bulk-standard.sh --method METHOD [options]
 
-Remove generated files for one method from the bulk-standard dataset tree.
+Remove generated files for one method, or all methods, from the bulk-standard
+dataset tree.
 By default, only method-specific statistics CSVs and lock markers are removed;
 output trees and logs are preserved. This is enough to exclude the method from
 the next collect-stats-standard.sh run and allow run-bulk-standard.sh to rerun it.
 
 Required:
-  --method, -m METHOD   astralx | aster | astral | treeqmc | wqfmtree |
-                        supertriplets | stp-nni | tmc
+  --method, -m METHOD   astralx | stelar | aster | astral | treeqmc |
+                        wqfmtree | supertriplets | stp-nni | tmc | all
 
 Paths:
   --base-dir, -b DIR    Base directory (default: $HOME/phylogeny)
@@ -32,12 +34,14 @@ Paths:
 Modes:
   --dry-run             List matching targets without deleting anything
   --yes, -y             Delete without an interactive confirmation
-  --all-results         Remove the selected method's complete *_outputs
+  --all-results         Remove the selected method(s)' complete *_outputs
                         directories, including trees, CSVs, logs, and locks
   --help, -h            Show this help
 
 Examples:
   ./clear-bulk-standard.sh --method astralx --dry-run
+  ./clear-bulk-standard.sh --method stelar --yes
+  ./clear-bulk-standard.sh --method all --dry-run
   ./clear-bulk-standard.sh --method astralx
   ./clear-bulk-standard.sh --method astralx --yes
 EOF
@@ -45,16 +49,26 @@ EOF
 
 normalize_method() {
   case "${1,,}" in
-    astralx|astral-x|stelar|stelar-x) printf 'astralx' ;;
-    aster)                            printf 'aster' ;;
-    astral)                           printf 'astral' ;;
-    treeqmc|tree-qmc)                 printf 'treeqmc' ;;
-    wqfm|wqfmtree|wqfm-tree)          printf 'wqfmtree' ;;
-    supertriplets|super-triplets)     printf 'supertriplets' ;;
-    stp-nni|stpnni)                   printf 'stp-nni' ;;
-    tmc)                              printf 'tmc' ;;
+    astralx|astral-x)             printf 'astralx' ;;
+    stelar|stelar-x)              printf 'stelar' ;;
+    aster)                        printf 'aster' ;;
+    astral)                       printf 'astral' ;;
+    treeqmc|tree-qmc)             printf 'treeqmc' ;;
+    wqfm|wqfmtree|wqfm-tree)      printf 'wqfmtree' ;;
+    supertriplets|super-triplets) printf 'supertriplets' ;;
+    stp-nni|stpnni)               printf 'stp-nni' ;;
+    tmc)                          printf 'tmc' ;;
+    all)                          printf 'all' ;;
     *) return 1 ;;
   esac
+}
+
+is_supported_output_dir_name() {
+  local name="$1" method
+  for method in "${SUPPORTED_METHODS[@]}"; do
+    [[ "$name" == "${method}_outputs" ]] && return 0
+  done
+  return 1
 }
 
 while [[ $# -gt 0 ]]; do
@@ -91,8 +105,9 @@ if [[ -z "$METHOD" ]]; then
   exit 2
 fi
 
-if ! METHOD="$(normalize_method "$METHOD")"; then
-  echo "Error: unsupported method '$METHOD'." >&2
+METHOD_INPUT="$METHOD"
+if ! METHOD="$(normalize_method "$METHOD_INPUT")"; then
+  echo "Error: unsupported method '$METHOD_INPUT'." >&2
   exit 2
 fi
 
@@ -113,25 +128,38 @@ case "$DATASET_DIR" in
     ;;
 esac
 
-OUTPUT_DIR_NAME="${METHOD}_outputs"
+declare -a METHODS=()
+if [[ "$METHOD" == "all" ]]; then
+  METHODS=("${SUPPORTED_METHODS[@]}")
+else
+  METHODS=("$METHOD")
+fi
+
 declare -a OUTPUT_DIRS=()
 declare -a TARGETS=()
-mapfile -d '' OUTPUT_DIRS < <(
-  find "$DATASET_DIR" -type d -name "$OUTPUT_DIR_NAME" -print0 2>/dev/null
-)
+for selected_method in "${METHODS[@]}"; do
+  mapfile -d '' -O "${#OUTPUT_DIRS[@]}" OUTPUT_DIRS < <(
+    find "$DATASET_DIR" -type d -name "${selected_method}_outputs" -print0 2>/dev/null
+  )
 
-if [[ "$ALL_RESULTS" == true ]]; then
-  TARGETS=("${OUTPUT_DIRS[@]}")
-else
+  if [[ "$ALL_RESULTS" == true ]]; then
+    continue
+  fi
+
   for output_dir in "${OUTPUT_DIRS[@]}"; do
+    [[ "$(basename "$output_dir")" == "${selected_method}_outputs" ]] || continue
     mapfile -d '' -O "${#TARGETS[@]}" TARGETS < <(
       find "$output_dir" -type f \
-        \( -name "stat-${METHOD}.csv" \
-           -o -name "*-${METHOD}_stats.csv" \
-           -o -name ".${METHOD}.lock" \) \
+        \( -name "stat-${selected_method}.csv" \
+           -o -name "*-${selected_method}_stats.csv" \
+           -o -name ".${selected_method}.lock" \) \
         -print0 2>/dev/null
     )
   done
+done
+
+if [[ "$ALL_RESULTS" == true ]]; then
+  TARGETS=("${OUTPUT_DIRS[@]}")
 fi
 
 echo "Dataset: $DATASET_DIR"
@@ -144,7 +172,11 @@ fi
 echo
 
 if [[ ${#TARGETS[@]} -eq 0 ]]; then
-  echo "No matching $METHOD results found. Nothing to remove."
+  if [[ "$METHOD" == "all" ]]; then
+    echo "No matching results for any supported method. Nothing to remove."
+  else
+    echo "No matching $METHOD results found. Nothing to remove."
+  fi
   exit 0
 fi
 
@@ -177,7 +209,7 @@ fi
 
 if [[ "$ALL_RESULTS" == true ]]; then
   for target in "${TARGETS[@]}"; do
-    [[ "$(basename "$target")" == "$OUTPUT_DIR_NAME" ]] || {
+    is_supported_output_dir_name "$(basename "$target")" || {
       echo "Error: refusing unexpected directory target: $target" >&2
       exit 3
     }
@@ -189,5 +221,10 @@ else
   done
 fi
 
-echo "Removed ${#TARGETS[@]} $METHOD target(s)."
-echo "Run collect-stats-standard.sh again to rebuild the merged CSV without $METHOD rows."
+if [[ "$METHOD" == "all" ]]; then
+  echo "Removed ${#TARGETS[@]} target(s) across all supported methods."
+  echo "Run collect-stats-standard.sh again to rebuild the merged CSV without the cleared rows."
+else
+  echo "Removed ${#TARGETS[@]} $METHOD target(s)."
+  echo "Run collect-stats-standard.sh again to rebuild the merged CSV without $METHOD rows."
+fi

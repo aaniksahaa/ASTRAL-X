@@ -693,6 +693,11 @@ done
   --all-results \
   --yes
 
+./clear-bulk-standard.sh \
+  --method all \
+  --all-results \
+  --yes
+
 
 ###############################################################################
 # Standard dataset stats collection
