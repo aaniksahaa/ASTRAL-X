@@ -626,6 +626,12 @@ done
   --opts-list "--search-mode local --weight-intersection-method smaller-side-traversal"
 
 
+./run-bulk-simulated.sh \
+  --method astralx \
+  --num-replicates 5 \
+  --opts-list "--search-space S1 --intersection-method I1;--search-space S2 --intersection-method I1;--search-space S3 --intersection-method I1"
+
+
 ./run-bulk-simulated.sh --method astralx --num-replicates 5 --opts-list "--search-mode local --weight-intersection-method smaller-side-traversal;--search-mode full --weight-intersection-method smaller-side-traversal"
 
 
