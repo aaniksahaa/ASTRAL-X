@@ -660,7 +660,7 @@ done
 # for local 
 ./run-bulk-standard.sh \
   --method astralx \
-  --dataset-dir /home/aaniksahaa/research/phylogeny/datasets/phylo-standard-datasets \
+  --dataset-dir ~/research/phylogeny/datasets/phylo-standard-datasets \
   --opts-list "--search-space S1 --intersection-method I1;--search-space S2 --intersection-method I1;--search-space S3 --intersection-method I1"
 
 
@@ -698,7 +698,10 @@ done
 # Standard dataset stats collection
 ###############################################################################
 
-./collect-stats-standard.sh --dataset-dir /home/aaniksahaa/research/phylogeny/datasets/phylo-standard-datasets --output /tmp/astralx-standard-stats.csv
+./collect-stats-standard.sh
+
+# for local 
+./collect-stats-standard.sh --dataset-dir ~/research/phylogeny/datasets/phylo-standard-datasets --output /tmp/astralx-standard-stats.csv
 
 
 ###############################################################################
