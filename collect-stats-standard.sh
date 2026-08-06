@@ -3,7 +3,7 @@
 # Collects all stat-*.csv files from dataset directories and merges them
 # Usage: ./collect-stats-standard.sh [--base-dir /path/to/base] [--dataset-dir /path/to/datasets]
 #   --base-dir, -b    Optional base directory (defaults to value below)
-#   --dataset-dir, -d Optional dataset directory (defaults to BASE_DIR/phylo-datasets)
+#   --dataset-dir, -d Optional dataset directory (defaults to BASE_DIR/datasets/standard)
 
 set -euo pipefail
 
@@ -15,7 +15,7 @@ set -euo pipefail
 
 BASE_DIR="${HOME}/phylogeny"
 
-DATASET_DIR=""                        # dataset directory; will be set to BASE_DIR/phylo-datasets if not specified
+DATASET_DIR=""                        # dataset directory; defaults to BASE_DIR/datasets/standard
 OUTPUT_FILE="stat-standard.csv"       # output merged CSV file
 
 # Colors
@@ -47,7 +47,7 @@ Usage: $0 [--base-dir /path/to/base] [--dataset-dir /path/to/datasets] [--output
 Collects all stat-*.csv files from dataset directories and merges them.
 
 --base-dir, -b     Base directory (overrides default)
---dataset-dir, -d  Dataset directory (overrides default BASE_DIR/phylo-datasets)
+--dataset-dir, -d  Dataset directory (overrides default BASE_DIR/datasets/standard)
 --output, -o       Output CSV file (default: stat-standard.csv)
 --help, -h         Show this help
 
@@ -90,7 +90,7 @@ done
 
 # derive DATASET_DIR from BASE_DIR if not set
 if [[ -z "${DATASET_DIR}" ]]; then
-  DATASET_DIR="${BASE_DIR%/}/phylo-datasets"
+  DATASET_DIR="${BASE_DIR%/}/datasets/standard"
 fi
 
 print_header

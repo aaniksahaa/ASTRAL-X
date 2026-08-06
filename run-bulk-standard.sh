@@ -12,7 +12,7 @@ set -uo pipefail
 # DEFAULTS (edit these if you want different defaults)
 # =============================================================================
 BASE_DIR="$HOME/phylogeny"  # default; can be overridden with --base-dir or -b
-DATASET_DIR=""                        # dataset directory; will be set to BASE_DIR/datasets if not specified
+DATASET_DIR=""                        # dataset directory; defaults to BASE_DIR/datasets/standard
 STELAR_X_ROOT=""                      # STELAR-X root (this project); derived from script location
 ASTER_ROOT=""                         # ASTER root; derived from STELAR_X_ROOT if not set
 ASTRAL_ROOT=""                        # derived from BASE_DIR if not set explicitly
