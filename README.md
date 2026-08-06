@@ -437,6 +437,18 @@ Combine generated statistics with:
 ./collect-stats-standard.sh --help
 ```
 
+To remove one method's bulk-standard statistics before collecting again, first
+preview and then confirm the cleanup:
+
+```bash
+./clear-bulk-standard.sh --method astralx --dry-run
+./clear-bulk-standard.sh --method astralx --yes
+./collect-stats-standard.sh
+```
+
+The cleaner preserves output trees and logs by default. Add `--all-results` to
+remove the selected method's complete output directories.
+
 ## Tests
 
 Run the CLI contract tests and the complete CPU regression suite with:

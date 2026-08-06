@@ -1,0 +1,5 @@
+alg,setting,opts,folder,inner_folder,replicate,rf-rate,running-time-s,max-cpu-mb,max-gpu-mb,exit-code
+astralx,search-space_S1__intersection-method_I1,"--search-space S1 --intersection-method I1",37-taxon,estimated-genetrees/0.5X-200-500,R2,0.0294,2.212,298.105,110.592,0
+astralx,search-space_S3__intersection-method_I1,"--search-space S3 --intersection-method I1",37-taxon,estimated-genetrees/0.5X-200-500,R1,0.0588,2.353,364.414,110.592,0
+astralx,search-space_S2__intersection-method_I1,"--search-space S2 --intersection-method I1",37-taxon,estimated-genetrees/0.5X-200-500,R1,0.0588,2.353,301.719,110.592,0
+astralx,search-space_S1__intersection-method_I1,"--search-space S1 --intersection-method I1",37-taxon,estimated-genetrees/0.5X-200-500,R1,0.0588,2.185,299.750,108.544,0
