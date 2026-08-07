@@ -15,8 +15,17 @@ source "${ROOT}/experiment-setting-name.sh"
 [[ "$(build_setting_name_from_opts '-vv --quiet')" == "default" ]]
 
 "${ROOT}/build.sh" >/dev/null
-javac -cp "${ROOT}/build" -d "$TEST_CLASSES" "${ROOT}/test/CliPresetsTest.java"
+javac -cp "${ROOT}/build" -d "$TEST_CLASSES" \
+  "${ROOT}/test/CliPresetsTest.java" \
+  "${ROOT}/test/SimilarityArgminTest.java" \
+  "${ROOT}/test/ThreadingFailureTest.java" \
+  "${ROOT}/test/WideSimilarityBoundaryTest.java"
 java -cp "${ROOT}/build:${TEST_CLASSES}" astralx.CliPresetsTest
+java -cp "${ROOT}/build:${TEST_CLASSES}" ThreadingFailureTest
+java -Xmx4g -cp "${ROOT}/build:${TEST_CLASSES}" WideSimilarityBoundaryTest
+java -cp "${ROOT}/build:${TEST_CLASSES}" SimilarityArgminTest \
+  "${ROOT}/test/input/tc10_unrooted_8taxa.tre" \
+  "${ROOT}/test/input/tc14_polytomy_6taxa.tre"
 
 VERSION_TEXT="$(NO_COLOR=1 java -cp "${ROOT}/build" astralx.Main --version)"
 [[ "$VERSION_TEXT" == *"ASTRAL-X  v1.0.0"* ]]

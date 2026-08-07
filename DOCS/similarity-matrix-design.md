@@ -131,6 +131,24 @@ RMQ chooses the exact Euler position, the kernel fetches them from the base
 Euler arrays. This preserves the selected position exactly while reducing a
 sparse cell from 22 bytes to 2 bytes.
 
+### 5.4 Wide-tour blocked RMQ
+
+The compact table is used unchanged while every Euler position fits in an
+unsigned 16-bit value (tour length at most 65,536) and the flattened Java arrays
+fit safely. Larger inputs are dispatched to a separate exact blocked RMQ:
+
+- Euler positions are divided into blocks of 256.
+- Nine in-block sparse levels store unsigned-byte offsets within each block.
+- A small 32-bit sparse table stores argmin positions over whole blocks.
+- A query combines the left partial block, zero or more whole middle blocks, and
+  the right partial block. Depth ties always keep the earlier position, so the
+  result is the same left-biased argmin as the compact table.
+- Euler depths and child-subtree sizes are 32-bit on this path, avoiding a
+  second signed-16-bit limit above 32,767 taxa.
+
+The wide arrays use the exact maximum tour length rather than power-of-two
+padding. The normal compact kernel and its memory layout are not changed.
+
 ---
 
 ## 6. GPU Kernel Logic
@@ -191,6 +209,12 @@ position and the compact sparse table occupies 2 bytes per cell:
 ```
 per-tree bytes = E_max × (30 + 2·LOG) + 4n + 4
 ```
+
+The wide path replaces `sparseArgmin` with a byte micro table plus a small int
+macro table and widens the three `short` Euler/child-size arrays to `int`.
+For a 25,000-leaf binary tree, the exact Euler length is 74,998; with 1,000
+trees, wide tree data is roughly 3–4 GiB instead of the roughly 12.8 GiB that a
+power-of-two-padded full 32-bit sparse table would require.
 
 ---
 

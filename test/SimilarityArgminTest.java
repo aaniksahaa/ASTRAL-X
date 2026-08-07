@@ -34,8 +34,29 @@ public final class SimilarityArgminTest {
 
     private static long verifyTree(Tree tree, int n) {
         EulerTourBuilder.FullTourData td = EulerTourBuilder.buildFull(tree, n);
+        EulerTourBuilder.WideTourData wide = EulerTourBuilder.buildWide(tree, n);
         int len = td.tourLen;
         long checks = 0;
+
+        if (wide.tourLen != len) {
+            throw new AssertionError("wide tour length mismatch: compact=" + len
+                + " wide=" + wide.tourLen);
+        }
+        for (int p = 0; p < len; p++) {
+            if (wide.depths[p] != td.depths[p]
+                    || wide.eulerF[p] != td.eulerF[p]
+                    || wide.eulerLeftChildS[p] != td.eulerLeftChildS[p]
+                    || wide.eulerLeftChildF[p] != td.eulerLeftChildF[p]
+                    || wide.eulerRightChildS[p] != td.eulerRightChildS[p]
+                    || wide.eulerRightChildF[p] != td.eulerRightChildF[p]) {
+                throw new AssertionError("wide payload mismatch at Euler position " + p);
+            }
+        }
+        for (int a = 0; a < n; a++) {
+            if (wide.firstOcc[a] != td.firstOcc[a]) {
+                throw new AssertionError("wide first-occurrence mismatch for taxon " + a);
+            }
+        }
 
         // Verify every materialized sparse-table cell independently.
         for (int lvl = 0; lvl < td.log; lvl++) {
@@ -67,6 +88,12 @@ public final class SimilarityArgminTest {
                     throw new AssertionError("query mismatch: tree=" + tree.treeIndex
                         + " interval=[" + lo + "," + hi + "] expected=" + expected
                         + " actual=" + actual);
+                }
+                int wideActual = EulerTourBuilder.queryWideArgmin(wide, lo, hi);
+                if (wideActual != expected) {
+                    throw new AssertionError("wide query mismatch: tree=" + tree.treeIndex
+                        + " interval=[" + lo + "," + hi + "] expected=" + expected
+                        + " actual=" + wideActual);
                 }
                 checks++;
             }

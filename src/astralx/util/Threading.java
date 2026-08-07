@@ -30,16 +30,16 @@ public class Threading {
         if (items.isEmpty()) return;
         int chunk = Math.max(1, (items.size() + numThreads - 1) / numThreads);
         int actual = Math.min(numThreads, (items.size() + chunk - 1) / chunk);
-        CountDownLatch latch = new CountDownLatch(actual);
+        CompletionService<Void> completed = new ExecutorCompletionService<>(executor);
+        List<Future<Void>> futures = new java.util.ArrayList<>(actual);
         for (int t = 0; t < actual; t++) {
             int lo = t * chunk, hi = Math.min(lo + chunk, items.size());
-            executor.submit(() -> {
-                try { for (int i = lo; i < hi; i++) action.accept(items.get(i)); }
-                finally { latch.countDown(); }
-            });
+            futures.add(completed.submit(() -> {
+                for (int i = lo; i < hi; i++) action.accept(items.get(i));
+                return null;
+            }));
         }
-        try { latch.await(); }
-        catch (InterruptedException e) { Thread.currentThread().interrupt(); throw new RuntimeException(e); }
+        awaitWorkers(completed, futures, actual);
     }
 
     /** Divide range [0,count) across threads in parallel, wait for all. */
@@ -47,15 +47,38 @@ public class Threading {
         if (count == 0) return;
         int chunk = Math.max(1, (count + numThreads - 1) / numThreads);
         int actual = Math.min(numThreads, (count + chunk - 1) / chunk);
-        CountDownLatch latch = new CountDownLatch(actual);
+        CompletionService<Void> completed = new ExecutorCompletionService<>(executor);
+        List<Future<Void>> futures = new java.util.ArrayList<>(actual);
         for (int t = 0; t < actual; t++) {
             int lo = t * chunk, hi = Math.min(lo + chunk, count);
-            executor.submit(() -> {
-                try { for (int i = lo; i < hi; i++) action.accept(i); }
-                finally { latch.countDown(); }
-            });
+            futures.add(completed.submit(() -> {
+                for (int i = lo; i < hi; i++) action.accept(i);
+                return null;
+            }));
         }
-        try { latch.await(); }
-        catch (InterruptedException e) { Thread.currentThread().interrupt(); throw new RuntimeException(e); }
+        awaitWorkers(completed, futures, actual);
+    }
+
+    /** Wait for worker completion and surface the original worker failure. */
+    private static void awaitWorkers(CompletionService<Void> completed,
+                                     List<Future<Void>> futures,
+                                     int taskCount) {
+        Throwable firstFailure = null;
+        try {
+            for (int i = 0; i < taskCount; i++) {
+                try {
+                    completed.take().get();
+                } catch (ExecutionException e) {
+                    if (firstFailure == null) firstFailure = e.getCause();
+                }
+            }
+        } catch (InterruptedException e) {
+            for (Future<Void> future : futures) future.cancel(true);
+            Thread.currentThread().interrupt();
+            throw new RuntimeException("Interrupted while waiting for parallel workers", e);
+        }
+        if (firstFailure instanceof RuntimeException runtime) throw runtime;
+        if (firstFailure instanceof Error error) throw error;
+        if (firstFailure != null) throw new RuntimeException("Parallel worker failed", firstFailure);
     }
 }

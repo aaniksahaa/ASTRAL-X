@@ -110,8 +110,13 @@ static void sim_print_progress(int work_done, int total_work, double elapsed,
     do { \
         cudaError_t _e = (call); \
         if (_e != cudaSuccess) { \
-            fprintf(stderr, "[ASTRAL-X sim] CUDA error %s at %s:%d: %s\n", \
-                    #call, __FILE__, __LINE__, cudaGetErrorString(_e)); \
+            char _msg[768]; \
+            snprintf(_msg, sizeof(_msg), \
+                     "ASTRAL-X similarity CUDA error in %s at %s:%d: %s", \
+                     #call, __FILE__, __LINE__, cudaGetErrorString(_e)); \
+            fprintf(stderr, "[ASTRAL-X sim] %s\n", _msg); \
+            jclass _ex = env->FindClass("java/lang/RuntimeException"); \
+            if (_ex != nullptr) env->ThrowNew(_ex, _msg); \
             return; \
         } \
     } while(0)
@@ -217,6 +222,140 @@ __global__ void sim_tile_kernel(
 
         double ss = (double)cc - twoQD * 0.5;     // same-side count
         local_num += ss;
+        local_den += (double)cc;
+    }
+
+    long tidx = (long)da * bB + db;
+    tile_num[tidx] += local_num;
+    tile_den[tidx] += local_den;
+}
+
+// ── Wide blocked-RMQ GPU kernel ──────────────────────────────────────────────
+
+__device__ __forceinline__ int sim_wide_micro_argmin(
+    const int* __restrict__ depths,
+    const unsigned char* __restrict__ micro,
+    long long ed_off, long long micro_off,
+    int E_max, int block_size,
+    int lo, int hi
+) {
+    int width = hi - lo + 1;
+    int lvl = 31 - __clz(width);
+    int second = hi - (1 << lvl) + 1;
+    int block_start = (lo / block_size) * block_size;
+    long long row = micro_off + (long long)lvl * E_max;
+    int pos_l = block_start + (int)micro[row + lo];
+    int pos_r = block_start + (int)micro[row + second];
+    return (depths[ed_off + pos_l] <= depths[ed_off + pos_r]) ? pos_l : pos_r;
+}
+
+__device__ __forceinline__ int sim_wide_argmin(
+    const int* __restrict__ depths,
+    const unsigned char* __restrict__ micro,
+    const int* __restrict__ macro,
+    int tree, int E_max, int micro_log,
+    int block_size, int block_max, int macro_log,
+    int lo, int hi
+) {
+    long long ed_off = (long long)tree * E_max;
+    long long micro_off = (long long)tree * micro_log * E_max;
+    int left_block = lo / block_size;
+    int right_block = hi / block_size;
+    if (left_block == right_block) {
+        return sim_wide_micro_argmin(depths, micro, ed_off, micro_off,
+            E_max, block_size, lo, hi);
+    }
+
+    int best = sim_wide_micro_argmin(depths, micro, ed_off, micro_off,
+        E_max, block_size, lo, (left_block + 1) * block_size - 1);
+
+    int first_whole = left_block + 1;
+    int last_whole = right_block - 1;
+    if (first_whole <= last_whole) {
+        int count = last_whole - first_whole + 1;
+        int lvl = 31 - __clz(count);
+        int second = last_whole - (1 << lvl) + 1;
+        long long macro_off = (long long)tree * macro_log * block_max
+                            + (long long)lvl * block_max;
+        int pos_l = macro[macro_off + first_whole];
+        int pos_r = macro[macro_off + second];
+        int middle = (depths[ed_off + pos_l] <= depths[ed_off + pos_r])
+                   ? pos_l : pos_r;
+        if (depths[ed_off + middle] < depths[ed_off + best]) best = middle;
+    }
+
+    int right = sim_wide_micro_argmin(depths, micro, ed_off, micro_off,
+        E_max, block_size, right_block * block_size, hi);
+    if (depths[ed_off + right] < depths[ed_off + best]) best = right;
+    return best;
+}
+
+__global__ void sim_tile_kernel_wide(
+    const int*    __restrict__ euler_depths,
+    const double* __restrict__ euler_F,
+    const int*    __restrict__ euler_left_child_s,
+    const double* __restrict__ euler_left_child_f,
+    const int*    __restrict__ euler_right_child_s,
+    const double* __restrict__ euler_right_child_f,
+    const unsigned char* __restrict__ micro_argmin,
+    const int*    __restrict__ macro_argmin,
+    const int*    __restrict__ first_occ,
+    const int*    __restrict__ leaf_count,
+    int delta, int n, int E_max, int micro_log,
+    int block_size, int block_max, int macro_log,
+    int a0, int b0, int bA, int bB,
+    double* __restrict__ tile_num,
+    double* __restrict__ tile_den
+) {
+    int da = blockIdx.x * blockDim.x + threadIdx.x;
+    int db = blockIdx.y * blockDim.y + threadIdx.y;
+    if (da >= bA || db >= bB) return;
+
+    int a = a0 + da;
+    int b = b0 + db;
+    if (a >= n || b >= n || a >= b) return;
+
+    double local_num = 0.0;
+    double local_den = 0.0;
+    for (int t = 0; t < delta; t++) {
+        long long focc_off = (long long)t * n;
+        int fa = first_occ[focc_off + a];
+        int fb = first_occ[focc_off + b];
+        if (fa < 0 || fb < 0) continue;
+
+        int kt = leaf_count[t];
+        long long cc = (long long)(kt - 2) * (kt - 3) / 2;
+        if (cc <= 0) continue;
+
+        int lo = (fa < fb) ? fa : fb;
+        int hi = (fa < fb) ? fb : fa;
+        int pick_pos = sim_wide_argmin(euler_depths, micro_argmin, macro_argmin,
+            t, E_max, micro_log, block_size, block_max, macro_log, lo, hi);
+        long long ed_off = (long long)t * E_max;
+        long long pick_idx = ed_off + pick_pos;
+
+        int leftS = euler_left_child_s[pick_idx];
+        double leftF = euler_left_child_f[pick_idx];
+        int rightS = euler_right_child_s[pick_idx];
+        double rightF = euler_right_child_f[pick_idx];
+
+        int aS, bS;
+        double aF, bF;
+        if (fa <= fb) {
+            aS = leftS; aF = leftF;
+            bS = rightS; bF = rightF;
+        } else {
+            aS = rightS; aF = rightF;
+            bS = leftS; bF = leftF;
+        }
+
+        double Fa = euler_F[ed_off + fa];
+        double Fb = euler_F[ed_off + fb];
+        long long Z = (long long)(kt - aS - bS);
+        double twoQD = (Fa - aF) + (Fb - bF)
+                     + (double)((long long)(aS - 1) * Z)
+                     + (double)((long long)(bS - 1) * Z);
+        local_num += (double)cc - twoQD * 0.5;
         local_den += (double)cc;
     }
 
@@ -462,6 +601,244 @@ Java_astralx_gpu_GPUSimilarityMatrix_computeSimilarityGPU(
     env->ReleaseShortArrayElements (j_euler_right_child_s, h_eRcS,   JNI_ABORT);
     env->ReleaseDoubleArrayElements(j_euler_right_child_f, h_eRcF,   JNI_ABORT);
     env->ReleaseCharArrayElements  (j_sparse_argmin,       h_argmin, JNI_ABORT);
+    env->ReleaseIntArrayElements   (j_first_occ,           h_focc,   JNI_ABORT);
+    env->ReleaseIntArrayElements   (j_euler_len,           h_elen,   JNI_ABORT);
+    env->ReleaseIntArrayElements   (j_leaf_count,          h_lcount, JNI_ABORT);
+    env->ReleaseDoubleArrayElements(j_num_sum_out, h_num, 0);
+    env->ReleaseDoubleArrayElements(j_den_sum_out, h_den, 0);
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_astralx_gpu_GPUSimilarityMatrix_computeSimilarityGPUWide(
+    JNIEnv* env,
+    jclass cls,
+    jintArray    j_euler_depths,
+    jdoubleArray j_euler_F,
+    jintArray    j_euler_left_child_s,
+    jdoubleArray j_euler_left_child_f,
+    jintArray    j_euler_right_child_s,
+    jdoubleArray j_euler_right_child_f,
+    jbyteArray   j_micro_argmin,
+    jintArray    j_macro_argmin,
+    jintArray    j_first_occ,
+    jintArray    j_euler_len,
+    jintArray    j_leaf_count,
+    jint numTrees,
+    jint n,
+    jint E_max,
+    jint microLog,
+    jint blockSize,
+    jint blockMax,
+    jint macroLog,
+    jint tileSizeB,
+    jint treeVramCapMiB,
+    jdouble progressInterval,
+    jint progressMaxSteps,
+    jdoubleArray j_num_sum_out,
+    jdoubleArray j_den_sum_out
+) {
+    (void)cls;
+    jboolean isCopy;
+    jint*    h_euler  = env->GetIntArrayElements   (j_euler_depths,         &isCopy);
+    jdouble* h_eulerF = env->GetDoubleArrayElements(j_euler_F,              &isCopy);
+    jint*    h_eLcS   = env->GetIntArrayElements   (j_euler_left_child_s,   &isCopy);
+    jdouble* h_eLcF   = env->GetDoubleArrayElements(j_euler_left_child_f,   &isCopy);
+    jint*    h_eRcS   = env->GetIntArrayElements   (j_euler_right_child_s,  &isCopy);
+    jdouble* h_eRcF   = env->GetDoubleArrayElements(j_euler_right_child_f,  &isCopy);
+    jbyte*   h_micro  = env->GetByteArrayElements  (j_micro_argmin,         &isCopy);
+    jint*    h_macro  = env->GetIntArrayElements   (j_macro_argmin,         &isCopy);
+    jint*    h_focc   = env->GetIntArrayElements   (j_first_occ,            &isCopy);
+    jint*    h_elen   = env->GetIntArrayElements   (j_euler_len,            &isCopy);
+    jint*    h_lcount = env->GetIntArrayElements   (j_leaf_count,           &isCopy);
+    jdouble* h_num    = env->GetDoubleArrayElements(j_num_sum_out,          &isCopy);
+    jdouble* h_den    = env->GetDoubleArrayElements(j_den_sum_out,          &isCopy);
+
+    size_t free_vram = 0, total_vram = 0;
+    SIM_CUDA_CHECK(cudaMemGetInfo(&free_vram, &total_vram));
+
+    int B = tileSizeB;
+    if (B <= 0) {
+        B = (int)ceil(sqrt((double)n * numTrees));
+        if (B > n) B = n;
+    }
+    while (B > 1 && 2LL * B * B * (long long)sizeof(double)
+            > (long long)(free_vram * 0.40)) B /= 2;
+    if (B < 1) B = 1;
+
+    size_t tile_vram = 2ULL * B * B * sizeof(double);
+    size_t headroom = 64ULL * 1024 * 1024;
+    size_t available = (free_vram > tile_vram + headroom)
+                     ? free_vram - tile_vram - headroom
+                     : 16ULL * 1024 * 1024;
+    size_t requested = (size_t)treeVramCapMiB * 1024 * 1024;
+    size_t remaining = (requested < available) ? requested : available;
+
+    size_t per_tree = (size_t)E_max * 36
+                    + (size_t)microLog * E_max * sizeof(unsigned char)
+                    + (size_t)macroLog * blockMax * sizeof(int)
+                    + (size_t)n * sizeof(int)
+                    + sizeof(int);
+    int delta = (per_tree > 0) ? (int)(remaining / per_tree) : numTrees;
+    if (delta < 1) delta = 1;
+    if (delta > numTrees) delta = numTrees;
+
+    int num_batches = (numTrees + delta - 1) / delta;
+    int num_tiles_side = (n + B - 1) / B;
+    int num_tiles = num_tiles_side * (num_tiles_side + 1) / 2;
+    fprintf(stderr,
+        "\n[ASTRAL-X sim] GPU similarity matrix (wide blocked RMQ): n=%d  k=%d  "
+        "tile B=%d  tree-batch Δ=%d  (%d batches × %d tiles)\n",
+        n, numTrees, B, delta, num_batches, num_tiles);
+    fprintf(stderr,
+        "[ASTRAL-X sim] GPU VRAM: tile %.1f MB  tree-data %.1f MB  "
+        "(cap %d MiB; free %.0f MB / total %.0f MB)\n",
+        tile_vram / 1e6, (double)delta * per_tree / 1e6,
+        treeVramCapMiB, free_vram / 1e6, total_vram / 1e6);
+
+    int* d_euler = nullptr;
+    double* d_eulerF = nullptr;
+    int* d_eLcS = nullptr;
+    double* d_eLcF = nullptr;
+    int* d_eRcS = nullptr;
+    double* d_eRcF = nullptr;
+    unsigned char* d_micro = nullptr;
+    int* d_macro = nullptr;
+    int* d_focc = nullptr;
+    int* d_lcount = nullptr;
+
+    long long sz_int_e = (long long)delta * E_max * sizeof(int);
+    long long sz_double_e = (long long)delta * E_max * sizeof(double);
+    long long sz_micro = (long long)delta * microLog * E_max;
+    long long sz_macro = (long long)delta * macroLog * blockMax * sizeof(int);
+    SIM_CUDA_CHECK(cudaMalloc(&d_euler, sz_int_e));
+    SIM_CUDA_CHECK(cudaMalloc(&d_eulerF, sz_double_e));
+    SIM_CUDA_CHECK(cudaMalloc(&d_eLcS, sz_int_e));
+    SIM_CUDA_CHECK(cudaMalloc(&d_eLcF, sz_double_e));
+    SIM_CUDA_CHECK(cudaMalloc(&d_eRcS, sz_int_e));
+    SIM_CUDA_CHECK(cudaMalloc(&d_eRcF, sz_double_e));
+    SIM_CUDA_CHECK(cudaMalloc(&d_micro, sz_micro));
+    SIM_CUDA_CHECK(cudaMalloc(&d_macro, sz_macro));
+    SIM_CUDA_CHECK(cudaMalloc(&d_focc, (long long)delta * n * sizeof(int)));
+    SIM_CUDA_CHECK(cudaMalloc(&d_lcount, delta * sizeof(int)));
+
+    double* d_tile_num = nullptr;
+    double* d_tile_den = nullptr;
+    SIM_CUDA_CHECK(cudaMalloc(&d_tile_num, (long long)B * B * sizeof(double)));
+    SIM_CUDA_CHECK(cudaMalloc(&d_tile_den, (long long)B * B * sizeof(double)));
+    double* h_tile_num = nullptr;
+    double* h_tile_den = nullptr;
+    SIM_CUDA_CHECK(cudaMallocHost(&h_tile_num, (long long)B * B * sizeof(double)));
+    SIM_CUDA_CHECK(cudaMallocHost(&h_tile_den, (long long)B * B * sizeof(double)));
+
+    int total_work = num_batches * num_tiles;
+    int work_done = 0;
+    double t_start = sim_now_sec();
+    double t_last_print = t_start - progressInterval;
+    double last_pct_printed = -1.0;
+    const bool step_mode = (progressMaxSteps > 0);
+    int use_color = sim_use_color();
+
+    for (int t0 = 0; t0 < numTrees; t0 += delta) {
+        int dt = (t0 + delta > numTrees) ? numTrees - t0 : delta;
+        long long off_e = (long long)t0 * E_max;
+        long long bytes_int_e = (long long)dt * E_max * sizeof(int);
+        long long bytes_double_e = (long long)dt * E_max * sizeof(double);
+        long long off_micro = (long long)t0 * microLog * E_max;
+        long long bytes_micro = (long long)dt * microLog * E_max;
+        long long off_macro = (long long)t0 * macroLog * blockMax;
+        long long bytes_macro = (long long)dt * macroLog * blockMax * sizeof(int);
+
+        SIM_CUDA_CHECK(cudaMemcpy(d_euler, h_euler + off_e,
+            bytes_int_e, cudaMemcpyHostToDevice));
+        SIM_CUDA_CHECK(cudaMemcpy(d_eulerF, h_eulerF + off_e,
+            bytes_double_e, cudaMemcpyHostToDevice));
+        SIM_CUDA_CHECK(cudaMemcpy(d_eLcS, h_eLcS + off_e,
+            bytes_int_e, cudaMemcpyHostToDevice));
+        SIM_CUDA_CHECK(cudaMemcpy(d_eLcF, h_eLcF + off_e,
+            bytes_double_e, cudaMemcpyHostToDevice));
+        SIM_CUDA_CHECK(cudaMemcpy(d_eRcS, h_eRcS + off_e,
+            bytes_int_e, cudaMemcpyHostToDevice));
+        SIM_CUDA_CHECK(cudaMemcpy(d_eRcF, h_eRcF + off_e,
+            bytes_double_e, cudaMemcpyHostToDevice));
+        SIM_CUDA_CHECK(cudaMemcpy(d_micro,
+            reinterpret_cast<unsigned char*>(h_micro) + off_micro,
+            bytes_micro, cudaMemcpyHostToDevice));
+        SIM_CUDA_CHECK(cudaMemcpy(d_macro, h_macro + off_macro,
+            bytes_macro, cudaMemcpyHostToDevice));
+        SIM_CUDA_CHECK(cudaMemcpy(d_focc, h_focc + (long long)t0 * n,
+            (long long)dt * n * sizeof(int), cudaMemcpyHostToDevice));
+        SIM_CUDA_CHECK(cudaMemcpy(d_lcount, h_lcount + t0,
+            dt * sizeof(int), cudaMemcpyHostToDevice));
+
+        for (int a0 = 0; a0 < n; a0 += B) {
+            int bA = (a0 + B > n) ? n - a0 : B;
+            for (int b0 = a0; b0 < n; b0 += B) {
+                int bB_tile = (b0 + B > n) ? n - b0 : B;
+                SIM_CUDA_CHECK(cudaMemset(d_tile_num, 0,
+                    (long long)bA * bB_tile * sizeof(double)));
+                SIM_CUDA_CHECK(cudaMemset(d_tile_den, 0,
+                    (long long)bA * bB_tile * sizeof(double)));
+
+                dim3 block(32, 32);
+                dim3 grid((bA + 31) / 32, (bB_tile + 31) / 32);
+                sim_tile_kernel_wide<<<grid, block>>>(
+                    d_euler, d_eulerF,
+                    d_eLcS, d_eLcF, d_eRcS, d_eRcF,
+                    d_micro, d_macro, d_focc, d_lcount,
+                    dt, n, E_max, microLog, blockSize, blockMax, macroLog,
+                    a0, b0, bA, bB_tile, d_tile_num, d_tile_den);
+                SIM_CUDA_CHECK(cudaDeviceSynchronize());
+                SIM_CUDA_CHECK(cudaMemcpy(h_tile_num, d_tile_num,
+                    (long long)bA * bB_tile * sizeof(double), cudaMemcpyDeviceToHost));
+                SIM_CUDA_CHECK(cudaMemcpy(h_tile_den, d_tile_den,
+                    (long long)bA * bB_tile * sizeof(double), cudaMemcpyDeviceToHost));
+
+                for (int da = 0; da < bA; da++) {
+                    int a = a0 + da;
+                    for (int db = 0; db < bB_tile; db++) {
+                        int b = b0 + db;
+                        if (a >= b) continue;
+                        long tidx = (long)da * bB_tile + db;
+                        double nv = h_tile_num[tidx];
+                        double dv = h_tile_den[tidx];
+                        if (dv == 0.0) continue;
+                        h_num[a * n + b] += nv; h_num[b * n + a] += nv;
+                        h_den[a * n + b] += dv; h_den[b * n + a] += dv;
+                    }
+                }
+
+                work_done++;
+                double now = sim_now_sec();
+                double pct = (total_work > 0) ? 100.0 * work_done / total_work : 100.0;
+                bool is_last = (work_done == total_work);
+                bool should_print = step_mode
+                    ? (is_last || pct - last_pct_printed >= 100.0 / progressMaxSteps)
+                    : (is_last || now - t_last_print >= progressInterval);
+                if (should_print) {
+                    sim_print_progress(work_done, total_work, now - t_start, use_color, is_last);
+                    t_last_print = now;
+                    last_pct_printed = pct;
+                }
+            }
+        }
+    }
+
+    cudaFree(d_euler); cudaFree(d_eulerF);
+    cudaFree(d_eLcS); cudaFree(d_eLcF);
+    cudaFree(d_eRcS); cudaFree(d_eRcF);
+    cudaFree(d_micro); cudaFree(d_macro);
+    cudaFree(d_focc); cudaFree(d_lcount);
+    cudaFree(d_tile_num); cudaFree(d_tile_den);
+    cudaFreeHost(h_tile_num); cudaFreeHost(h_tile_den);
+
+    env->ReleaseIntArrayElements   (j_euler_depths,        h_euler,  JNI_ABORT);
+    env->ReleaseDoubleArrayElements(j_euler_F,             h_eulerF, JNI_ABORT);
+    env->ReleaseIntArrayElements   (j_euler_left_child_s,  h_eLcS,   JNI_ABORT);
+    env->ReleaseDoubleArrayElements(j_euler_left_child_f,  h_eLcF,   JNI_ABORT);
+    env->ReleaseIntArrayElements   (j_euler_right_child_s, h_eRcS,   JNI_ABORT);
+    env->ReleaseDoubleArrayElements(j_euler_right_child_f, h_eRcF,   JNI_ABORT);
+    env->ReleaseByteArrayElements  (j_micro_argmin,        h_micro,  JNI_ABORT);
+    env->ReleaseIntArrayElements   (j_macro_argmin,        h_macro,  JNI_ABORT);
     env->ReleaseIntArrayElements   (j_first_occ,           h_focc,   JNI_ABORT);
     env->ReleaseIntArrayElements   (j_euler_len,           h_elen,   JNI_ABORT);
     env->ReleaseIntArrayElements   (j_leaf_count,          h_lcount, JNI_ABORT);

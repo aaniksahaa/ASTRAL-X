@@ -103,4 +103,36 @@ public class GPUSimilarityMatrix {
         double[] numSumOut,
         double[] denSumOut
     );
+
+    /**
+     * Exact large-tour variant. It uses a two-level blocked RMQ, 32-bit Euler
+     * depths/child sizes, unsigned-byte in-block argmins, and 32-bit block
+     * argmins. The compact method above remains the default for ordinary tours.
+     */
+    public static native void computeSimilarityGPUWide(
+        int[]    eulerDepths,
+        double[] eulerF,
+        int[]    eulerLeftChildS,
+        double[] eulerLeftChildF,
+        int[]    eulerRightChildS,
+        double[] eulerRightChildF,
+        byte[]   microArgmin,
+        int[]    macroArgmin,
+        int[]    firstOcc,
+        int[]    eulerLen,
+        int[]    leafCount,
+        int      numTrees,
+        int      n,
+        int      E_max,
+        int      microLog,
+        int      blockSize,
+        int      blockMax,
+        int      macroLog,
+        int      tileSizeB,
+        int      treeVramCapMiB,
+        double   progressInterval,
+        int      progressMaxSteps,
+        double[] numSumOut,
+        double[] denSumOut
+    );
 }

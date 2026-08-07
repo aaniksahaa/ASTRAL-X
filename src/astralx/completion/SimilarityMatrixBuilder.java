@@ -44,10 +44,14 @@ import java.util.concurrent.atomic.AtomicInteger;
  * with an O(1) closed form for QD_gt via Euler tour + sparse-table RMQ
  * carrying (s, F) child-of-LCA payloads. See
  *   DOCS/similarity-matrix-design.md
- * for the derivation. For now the GPU path still uses the legacy LCA-only
- * formula; this file's CPU path is the byte-for-byte-correct reference.
+ * for the derivation. Ordinary tours use the compact unsigned-16 RMQ; larger
+ * tours use an exact blocked RMQ with wide positions and child sizes. The CPU
+ * path remains the byte-for-byte-correct reference.
  */
 public class SimilarityMatrixBuilder {
+
+    private static final int COMPACT_MAX_TOUR = Character.MAX_VALUE + 1;
+    private static final int MAX_JAVA_ARRAY_LENGTH = Integer.MAX_VALUE - 8;
 
     // ── Public entry points ───────────────────────────────────────────────────
 
@@ -68,6 +72,43 @@ public class SimilarityMatrixBuilder {
 
     public static SimilarityMatrix buildGPU(List<Tree> trees, int n) {
         int k = trees.size();
+        int eMaxRaw = 0;
+        int logMax = 1;
+        for (int i = 0; i < k; i++) {
+            int len;
+            try {
+                len = EulerTourBuilder.tourLength(trees.get(i));
+            } catch (RuntimeException e) {
+                throw treeBuildFailure(i, trees.get(i), e);
+            }
+            eMaxRaw = Math.max(eMaxRaw, len);
+            logMax = Math.max(logMax, sparseLog(len));
+        }
+
+        int ePadded = nextPowerOfTwo(eMaxRaw);
+        boolean compactTourOverflow = eMaxRaw > COMPACT_MAX_TOUR;
+        boolean compactLayoutOverflow = !fitsJavaArray((long)k * ePadded)
+            || !fitsJavaArray((long)k * logMax * ePadded)
+            || !fitsJavaArray((long)k * n);
+        boolean forceWide = Boolean.getBoolean("astralx.similarity.forceWide");
+
+        if (forceWide || compactTourOverflow || compactLayoutOverflow) {
+            String reason = forceWide
+                ? "forced by -Dastralx.similarity.forceWide=true"
+                : compactTourOverflow
+                    ? "maximum Euler tour " + eMaxRaw + " exceeds compact limit "
+                        + COMPACT_MAX_TOUR
+                    : "compact flat layout exceeds the Java single-array limit";
+            Logging.info("GPU similarity RMQ: wide blocked mode (%s)", reason);
+            return buildGPUWide(trees, n, eMaxRaw);
+        }
+
+        Logging.debug("GPU similarity RMQ: compact unsigned-16 mode (maximum tour %d)", eMaxRaw);
+        return buildGPUCompact(trees, n);
+    }
+
+    private static SimilarityMatrix buildGPUCompact(List<Tree> trees, int n) {
+        int k = trees.size();
         Logging.info("Building FullTourData for %d trees (parallel CPU)", k);
 
         // ── Step 1: Build per-tree full tour data in parallel ─────────────────
@@ -76,8 +117,12 @@ public class SimilarityMatrixBuilder {
         AtomicInteger eulerDone = new AtomicInteger(0);
 
         Threading.processRangeParallel(k, i -> {
-            tours[i] = EulerTourBuilder.buildFull(trees.get(i), n);
-            eulerBar.update(eulerDone.incrementAndGet());
+            try {
+                tours[i] = EulerTourBuilder.buildFull(trees.get(i), n);
+                eulerBar.update(eulerDone.incrementAndGet());
+            } catch (RuntimeException e) {
+                throw treeBuildFailure(i, trees.get(i), e);
+            }
         });
         eulerBar.done();
 
@@ -188,6 +233,124 @@ public class SimilarityMatrixBuilder {
 
         sm.normalize();
         return sm;
+    }
+
+    private static SimilarityMatrix buildGPUWide(List<Tree> trees, int n, int eMaxRaw) {
+        int k = trees.size();
+        int E_max = Math.max(1, eMaxRaw); // deliberately not power-of-two padded
+        int blockSize = EulerTourBuilder.WIDE_BLOCK_SIZE;
+        int microLog = EulerTourBuilder.WIDE_MICRO_LOG;
+        int blockMax = (E_max + blockSize - 1) / blockSize;
+        int macroLog = sparseLog(blockMax);
+
+        int edSize = checkedLength((long)k * E_max, "wide Euler arrays");
+        int microSize = checkedLength((long)k * microLog * E_max,
+            "wide micro-RMQ array");
+        int macroSize = checkedLength((long)k * macroLog * blockMax,
+            "wide macro-RMQ array");
+        int leafSize = checkedLength((long)k * n, "wide first-occurrence array");
+
+        double baseGiB = (double)edSize * (Integer.BYTES * 3L + Double.BYTES * 3L)
+            / (1L << 30);
+        double rmqGiB = ((double)microSize + (double)macroSize * Integer.BYTES)
+            / (1L << 30);
+        Logging.info("Building wide FullTourData for %d trees (parallel CPU)", k);
+        Logging.info("  E_max=%d  blocks=%d  microLOG=%d  macroLOG=%d  "
+                + "Euler/payload %.2f GiB  RMQ %.2f GiB",
+            E_max, blockMax, microLog, macroLog, baseGiB, rmqGiB);
+
+        int[] eulerDepths = new int[edSize];
+        double[] eulerF = new double[edSize];
+        int[] eulerLeftChildS = new int[edSize];
+        double[] eulerLeftChildF = new double[edSize];
+        int[] eulerRightChildS = new int[edSize];
+        double[] eulerRightChildF = new double[edSize];
+        byte[] microArgmin = new byte[microSize];
+        int[] macroArgmin = new int[macroSize];
+        int[] firstOcc = new int[leafSize];
+        int[] eulerLen = new int[k];
+        int[] leafCount = new int[k];
+        Arrays.fill(firstOcc, -1);
+
+        ProgressBar bar = new ProgressBar("Wide FullTour + blocked RMQ build", k);
+        AtomicInteger done = new AtomicInteger(0);
+        Threading.processRangeParallel(k, i -> {
+            Tree tree = trees.get(i);
+            try {
+                EulerTourBuilder.WideTourData td = EulerTourBuilder.buildWide(tree, n);
+                int edOff = i * E_max;
+                System.arraycopy(td.depths, 0, eulerDepths, edOff, td.tourLen);
+                System.arraycopy(td.eulerF, 0, eulerF, edOff, td.tourLen);
+                System.arraycopy(td.eulerLeftChildS, 0, eulerLeftChildS, edOff, td.tourLen);
+                System.arraycopy(td.eulerLeftChildF, 0, eulerLeftChildF, edOff, td.tourLen);
+                System.arraycopy(td.eulerRightChildS, 0, eulerRightChildS, edOff, td.tourLen);
+                System.arraycopy(td.eulerRightChildF, 0, eulerRightChildF, edOff, td.tourLen);
+
+                int microTreeOff = i * microLog * E_max;
+                for (int lvl = 0; lvl < microLog; lvl++) {
+                    System.arraycopy(td.microArgmin[lvl], 0, microArgmin,
+                        microTreeOff + lvl * E_max, td.tourLen);
+                }
+                int macroTreeOff = i * macroLog * blockMax;
+                for (int lvl = 0; lvl < td.macroLog; lvl++) {
+                    int rowLen = Math.max(0, td.blockCount - (1 << lvl) + 1);
+                    System.arraycopy(td.macroArgmin[lvl], 0, macroArgmin,
+                        macroTreeOff + lvl * blockMax, rowLen);
+                }
+                System.arraycopy(td.firstOcc, 0, firstOcc, i * n, n);
+                eulerLen[i] = td.tourLen;
+                leafCount[i] = td.leafCount;
+                bar.update(done.incrementAndGet());
+            } catch (RuntimeException e) {
+                throw treeBuildFailure(i, tree, e);
+            }
+        });
+        bar.done();
+
+        Config cfg = Config.getInstance();
+        SimilarityMatrix sm = new SimilarityMatrix(n);
+        GPUSimilarityMatrix.computeSimilarityGPUWide(
+            eulerDepths, eulerF,
+            eulerLeftChildS, eulerLeftChildF,
+            eulerRightChildS, eulerRightChildF,
+            microArgmin, macroArgmin,
+            firstOcc, eulerLen, leafCount,
+            k, n, E_max, microLog, blockSize, blockMax, macroLog,
+            cfg.getGpuDistTileSizeB(), cfg.getGpuSimilarityVramCapMiB(),
+            cfg.getGpuDpProgressInterval(), cfg.getGpuDpProgressMaxSteps(),
+            sm.numSum, sm.denSum);
+        sm.normalize();
+        return sm;
+    }
+
+    private static IllegalStateException treeBuildFailure(int index, Tree tree,
+                                                           RuntimeException cause) {
+        return new IllegalStateException("Similarity preprocessing failed for tree " + index
+            + " (leaves=" + tree.leafCount + ", complete=" + tree.isComplete + ")", cause);
+    }
+
+    private static int sparseLog(int length) {
+        if (length <= 1) return 1;
+        return 32 - Integer.numberOfLeadingZeros(length);
+    }
+
+    private static int nextPowerOfTwo(int value) {
+        if (value <= 1) return 1;
+        if (value > (1 << 30)) return Integer.MAX_VALUE;
+        return 1 << (32 - Integer.numberOfLeadingZeros(value - 1));
+    }
+
+    private static boolean fitsJavaArray(long length) {
+        return length >= 0 && length <= MAX_JAVA_ARRAY_LENGTH;
+    }
+
+    private static int checkedLength(long length, String label) {
+        if (!fitsJavaArray(length)) {
+            throw new IllegalArgumentException(label + " requires " + length
+                + " elements; Java arrays support at most " + MAX_JAVA_ARRAY_LENGTH
+                + ". Reduce the number of trees per run or use a future streamed layout.");
+        }
+        return (int)length;
     }
 
     // ── CPU accumulation (per-tree, scatter mirroring ASTRAL-MP) ─────────────

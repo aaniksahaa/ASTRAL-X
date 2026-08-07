@@ -61,6 +61,10 @@ import astralx.tree.TreeNode;
  */
 public class EulerTourBuilder {
 
+    /** Wide-tour RMQ block size. Local positions fit exactly in one unsigned byte. */
+    public static final int WIDE_BLOCK_SIZE = 256;
+    public static final int WIDE_MICRO_LOG  = 9; // levels 0..8, widths 1..256
+
     /** Result of building Euler tour + sparse table for one tree. */
     public static class TourData {
         public final short[]   depths;
@@ -113,6 +117,50 @@ public class EulerTourBuilder {
             this.eulerRightChildF   = eulerRightChildF;
             this.sparseArgmin       = sparseArgmin;
             this.leafCount          = leafCount;
+        }
+    }
+
+    /**
+     * Exact blocked-RMQ representation for tours whose positions do not fit in
+     * the compact unsigned-16 sparse table. In-block argmins are unsigned-byte
+     * offsets; the much smaller block-level sparse table stores global int
+     * positions. Depths and child sizes are also widened to avoid introducing
+     * a second silent 16-bit limit on large trees.
+     */
+    public static final class WideTourData {
+        public final int[]      depths;
+        public final int[]      firstOcc;
+        public final double[]   eulerF;
+        public final int[]      eulerLeftChildS;
+        public final double[]   eulerLeftChildF;
+        public final int[]      eulerRightChildS;
+        public final double[]   eulerRightChildF;
+        public final byte[][]   microArgmin;
+        public final int[][]    macroArgmin;
+        public final int        tourLen;
+        public final int        blockCount;
+        public final int        macroLog;
+        public final int        leafCount;
+
+        WideTourData(int[] depths, int[] firstOcc,
+                     double[] eulerF,
+                     int[] eulerLeftChildS, double[] eulerLeftChildF,
+                     int[] eulerRightChildS, double[] eulerRightChildF,
+                     byte[][] microArgmin, int[][] macroArgmin,
+                     int tourLen, int blockCount, int macroLog, int leafCount) {
+            this.depths = depths;
+            this.firstOcc = firstOcc;
+            this.eulerF = eulerF;
+            this.eulerLeftChildS = eulerLeftChildS;
+            this.eulerLeftChildF = eulerLeftChildF;
+            this.eulerRightChildS = eulerRightChildS;
+            this.eulerRightChildF = eulerRightChildF;
+            this.microArgmin = microArgmin;
+            this.macroArgmin = macroArgmin;
+            this.tourLen = tourLen;
+            this.blockCount = blockCount;
+            this.macroLog = macroLog;
+            this.leafCount = leafCount;
         }
     }
 
@@ -231,6 +279,132 @@ public class EulerTourBuilder {
             kt);
     }
 
+    // ── Wide blocked-RMQ build (large similarity tours) ─────────────────────
+
+    /** Return the exact Euler-tour length without allocating tour arrays. */
+    public static int tourLength(Tree tree) {
+        return countEulerPositions(tree.root);
+    }
+
+    /** Build the exact two-level RMQ representation used by the wide GPU path. */
+    public static WideTourData buildWide(Tree tree, int n) {
+        int len = countEulerPositions(tree.root);
+        int[] depths = new int[len];
+        int[] firstOcc = new int[n];
+        java.util.Arrays.fill(firstOcc, -1);
+
+        int[] cursor = {0};
+        buildDFSWide(tree.root, 0, depths, firstOcc, cursor);
+        if (cursor[0] != len) {
+            throw new IllegalStateException("Wide Euler-tour length mismatch: expected "
+                + len + " but emitted " + cursor[0]);
+        }
+
+        java.util.IdentityHashMap<TreeNode, double[]> sf = new java.util.IdentityHashMap<>();
+        computeS(tree.root, sf);
+        computeF(tree.root, tree.leafCount, -1, 0.0, sf);
+
+        double[] eulerF = new double[len];
+        int[] eulerLeftChildS = new int[len];
+        double[] eulerLeftChildF = new double[len];
+        int[] eulerRightChildS = new int[len];
+        double[] eulerRightChildF = new double[len];
+        cursor[0] = 0;
+        emitPayloadsWide(tree.root, sf, eulerF,
+            eulerLeftChildS, eulerLeftChildF,
+            eulerRightChildS, eulerRightChildF, cursor);
+
+        byte[][] microArgmin = new byte[WIDE_MICRO_LOG][len];
+        for (int p = 0; p < len; p++) microArgmin[0][p] = (byte)(p & 0xff);
+        for (int lvl = 1; lvl < WIDE_MICRO_LOG; lvl++) {
+            int width = 1 << lvl;
+            int half = width >>> 1;
+            for (int blockStart = 0; blockStart < len; blockStart += WIDE_BLOCK_SIZE) {
+                int blockEnd = Math.min(blockStart + WIDE_BLOCK_SIZE, len);
+                int lastStart = blockEnd - width;
+                for (int p = blockStart; p <= lastStart; p++) {
+                    int leftPos = blockStart
+                        + Byte.toUnsignedInt(microArgmin[lvl - 1][p]);
+                    int rightPos = blockStart
+                        + Byte.toUnsignedInt(microArgmin[lvl - 1][p + half]);
+                    microArgmin[lvl][p] = (byte)((depths[leftPos] <= depths[rightPos]
+                        ? leftPos : rightPos) - blockStart);
+                }
+            }
+        }
+
+        int blockCount = (len + WIDE_BLOCK_SIZE - 1) / WIDE_BLOCK_SIZE;
+        int macroLog = 1;
+        while ((1 << macroLog) <= blockCount) macroLog++;
+        int[][] macroArgmin = new int[macroLog][blockCount];
+        for (int block = 0; block < blockCount; block++) {
+            int lo = block * WIDE_BLOCK_SIZE;
+            int hi = Math.min(lo + WIDE_BLOCK_SIZE, len);
+            int best = lo;
+            for (int p = lo + 1; p < hi; p++) {
+                if (depths[p] < depths[best]) best = p;
+            }
+            macroArgmin[0][block] = best;
+        }
+        for (int lvl = 1; lvl < macroLog; lvl++) {
+            int half = 1 << (lvl - 1);
+            int end = blockCount - (1 << lvl) + 1;
+            for (int block = 0; block < end; block++) {
+                int leftPos = macroArgmin[lvl - 1][block];
+                int rightPos = macroArgmin[lvl - 1][block + half];
+                macroArgmin[lvl][block] = depths[leftPos] <= depths[rightPos]
+                    ? leftPos : rightPos;
+            }
+        }
+
+        return new WideTourData(depths, firstOcc, eulerF,
+            eulerLeftChildS, eulerLeftChildF,
+            eulerRightChildS, eulerRightChildF,
+            microArgmin, macroArgmin,
+            len, blockCount, macroLog, tree.leafCount);
+    }
+
+    /** Exact left-biased query, also used by regression tests as the CUDA oracle. */
+    public static int queryWideArgmin(WideTourData td, int lo, int hi) {
+        if (lo < 0 || hi < lo || hi >= td.tourLen) {
+            throw new IndexOutOfBoundsException("Invalid wide RMQ interval [" + lo + "," + hi
+                + "] for tour length " + td.tourLen);
+        }
+        int leftBlock = lo / WIDE_BLOCK_SIZE;
+        int rightBlock = hi / WIDE_BLOCK_SIZE;
+        if (leftBlock == rightBlock) return queryWideMicro(td, lo, hi);
+
+        int leftHi = (leftBlock + 1) * WIDE_BLOCK_SIZE - 1;
+        int best = queryWideMicro(td, lo, leftHi);
+
+        int firstWholeBlock = leftBlock + 1;
+        int lastWholeBlock = rightBlock - 1;
+        if (firstWholeBlock <= lastWholeBlock) {
+            int count = lastWholeBlock - firstWholeBlock + 1;
+            int lvl = 31 - Integer.numberOfLeadingZeros(count);
+            int second = lastWholeBlock - (1 << lvl) + 1;
+            int posL = td.macroArgmin[lvl][firstWholeBlock];
+            int posR = td.macroArgmin[lvl][second];
+            int middle = td.depths[posL] <= td.depths[posR] ? posL : posR;
+            if (td.depths[middle] < td.depths[best]) best = middle;
+        }
+
+        int rightLo = rightBlock * WIDE_BLOCK_SIZE;
+        int right = queryWideMicro(td, rightLo, hi);
+        if (td.depths[right] < td.depths[best]) best = right;
+        return best;
+    }
+
+    private static int queryWideMicro(WideTourData td, int lo, int hi) {
+        int width = hi - lo + 1;
+        int lvl = 31 - Integer.numberOfLeadingZeros(width);
+        int second = hi - (1 << lvl) + 1;
+        int blockStart = (lo / WIDE_BLOCK_SIZE) * WIDE_BLOCK_SIZE;
+        int posL = blockStart + Byte.toUnsignedInt(td.microArgmin[lvl][lo]);
+        int posR = blockStart + Byte.toUnsignedInt(td.microArgmin[lvl][second]);
+        return td.depths[posL] <= td.depths[posR] ? posL : posR;
+    }
+
     // ── DFS helpers ──────────────────────────────────────────────────────────
 
     /** Exact number of positions emitted by {@link #buildDFS}. */
@@ -273,6 +447,26 @@ public class EulerTourBuilder {
             int retPos = cursor[0]++;
             depths[retPos] = (short) depth;
             buildDFS(node.right, depth + 1, depths, firstOcc, cursor);
+        }
+    }
+
+    private static void buildDFSWide(TreeNode node, int depth,
+                                     int[] depths, int[] firstOcc, int[] cursor) {
+        int pos = cursor[0]++;
+        depths[pos] = depth;
+        if (node.isLeaf()) {
+            firstOcc[node.taxonId] = pos;
+        } else if (node.isPolytomous()) {
+            TreeNode[] ch = node.children;
+            buildDFSWide(ch[0], depth + 1, depths, firstOcc, cursor);
+            for (int i = 1; i < ch.length; i++) {
+                depths[cursor[0]++] = depth;
+                buildDFSWide(ch[i], depth + 1, depths, firstOcc, cursor);
+            }
+        } else {
+            buildDFSWide(node.left, depth + 1, depths, firstOcc, cursor);
+            depths[cursor[0]++] = depth;
+            buildDFSWide(node.right, depth + 1, depths, firstOcc, cursor);
         }
     }
 
@@ -397,5 +591,53 @@ public class EulerTourBuilder {
         emitPayloads(node.right, sf, eulerF,
                      eulerLeftChildS, eulerLeftChildF,
                      eulerRightChildS, eulerRightChildF, cursor);
+    }
+
+    private static void emitPayloadsWide(TreeNode node,
+                                          java.util.IdentityHashMap<TreeNode, double[]> sf,
+                                          double[] eulerF,
+                                          int[] eulerLeftChildS, double[] eulerLeftChildF,
+                                          int[] eulerRightChildS, double[] eulerRightChildF,
+                                          int[] cursor) {
+        int pos = cursor[0]++;
+        double[] entry = sf.get(node);
+        eulerF[pos] = entry[1];
+        if (node.isLeaf()) return;
+
+        if (node.isPolytomous()) {
+            TreeNode[] ch = node.children;
+            emitPayloadsWide(ch[0], sf, eulerF,
+                eulerLeftChildS, eulerLeftChildF,
+                eulerRightChildS, eulerRightChildF, cursor);
+            for (int i = 1; i < ch.length; i++) {
+                int retPos = cursor[0]++;
+                eulerF[retPos] = entry[1];
+                double[] left = sf.get(ch[i - 1]);
+                double[] right = sf.get(ch[i]);
+                eulerLeftChildS[retPos] = (int)left[0];
+                eulerLeftChildF[retPos] = left[1];
+                eulerRightChildS[retPos] = (int)right[0];
+                eulerRightChildF[retPos] = right[1];
+                emitPayloadsWide(ch[i], sf, eulerF,
+                    eulerLeftChildS, eulerLeftChildF,
+                    eulerRightChildS, eulerRightChildF, cursor);
+            }
+            return;
+        }
+
+        emitPayloadsWide(node.left, sf, eulerF,
+            eulerLeftChildS, eulerLeftChildF,
+            eulerRightChildS, eulerRightChildF, cursor);
+        int retPos = cursor[0]++;
+        eulerF[retPos] = entry[1];
+        double[] left = sf.get(node.left);
+        double[] right = sf.get(node.right);
+        eulerLeftChildS[retPos] = (int)left[0];
+        eulerLeftChildF[retPos] = left[1];
+        eulerRightChildS[retPos] = (int)right[0];
+        eulerRightChildF[retPos] = right[1];
+        emitPayloadsWide(node.right, sf, eulerF,
+            eulerLeftChildS, eulerLeftChildF,
+            eulerRightChildS, eulerRightChildF, cursor);
     }
 }

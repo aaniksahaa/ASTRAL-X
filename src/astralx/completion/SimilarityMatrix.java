@@ -38,11 +38,18 @@ public class SimilarityMatrix {
     public final double[] dist;
 
     public SimilarityMatrix(int n) {
+        long cellsLong = (long)n * n;
+        if (cellsLong > Integer.MAX_VALUE - 8) {
+            throw new IllegalArgumentException("Similarity matrix for " + n + " taxa requires "
+                + cellsLong + " cells per array; Java arrays support at most "
+                + (Integer.MAX_VALUE - 8));
+        }
+        int cells = (int)cellsLong;
         this.n      = n;
-        this.numSum = new double[n * n];
-        this.denSum = new double[n * n];
-        this.sim    = new double[n * n];
-        this.dist   = new double[n * n];
+        this.numSum = new double[cells];
+        this.denSum = new double[cells];
+        this.sim    = new double[cells];
+        this.dist   = new double[cells];
     }
 
     /**
@@ -51,7 +58,7 @@ public class SimilarityMatrix {
      * Diagonal is set to sim = 1, dist = 0.
      */
     public void normalize() {
-        for (int i = 0; i < n * n; i++) {
+        for (int i = 0; i < sim.length; i++) {
             sim [i] = (denSum[i] > 0.0) ? numSum[i] / denSum[i] : 0.0;
             dist[i] = 1.0 - sim[i];
         }
