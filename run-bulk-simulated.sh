@@ -241,14 +241,14 @@ echo "All runs finished."
 
 #           echo ">>> Running: t=$t g=$g sb=$sb spmin=$spmin spmax=$spmax (method=$METHOD)"
           
-#           ./sim.sh -rs $NUM_REPLICATES $BASE_DIR_ARG -t "$t" -g "$g" --sb "$sb" --spmin "$spmin" --spmax "$spmax" --fresh
+#           ./sim.sh -rs "$NUM_REPLICATES" "${BASE_DIR_ARGS[@]}" -t "$t" -g "$g" --sb "$sb" --spmin "$spmin" --spmax "$spmax" "${FRESH_ARGS[@]}"
           
 #           # Run replicates
 #           for ((i=1; i<=NUM_REPLICATES; i++)); do
 #             echo "  Running replicate R$i with $METHOD"
             
 #             for ASTRALX_OPTS_ITEM in "${ASTRALX_OPTS_LIST[@]}"; do
-#               TEST_CMD=(./test-astralx-simulated.sh -r "R$i" $BASE_DIR_ARG -t "$t" -g "$g" --sb "$sb" --spmin "$spmin" --spmax "$spmax" $FRESH_ARG)
+#               TEST_CMD=("${ASTRALX_ROOT}/test-astralx-simulated.sh" -r "R$i" "${BASE_DIR_ARGS[@]}" "${SHARED_TEST_ARGS[@]}" -t "$t" -g "$g" --sb "$sb" --spmin "$spmin" --spmax "$spmax" "${FRESH_ARGS[@]}")
 #               if [[ -n "$ASTRALX_OPTS_ITEM" ]]; then
 #                 TEST_CMD+=(--opts "$ASTRALX_OPTS_ITEM")
 #               fi
