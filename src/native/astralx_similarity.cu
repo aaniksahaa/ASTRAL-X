@@ -37,7 +37,102 @@
 #include <string.h>
 #include <math.h>
 #include <time.h>
+#include <vector>
 #include "astralx_platform.h"
+
+// ── Exact host output layout ─────────────────────────────────────────────────
+
+struct SimHostOutput {
+    JNIEnv* env = nullptr;
+    bool packed = false;
+    int segment_shift = 0;
+    long long segment_mask = 0;
+    jdoubleArray dense_num_ref = nullptr;
+    jdoubleArray dense_den_ref = nullptr;
+    jdouble* dense_num = nullptr;
+    jdouble* dense_den = nullptr;
+    std::vector<jdoubleArray> num_refs;
+    std::vector<jdoubleArray> den_refs;
+    std::vector<jdouble*> num_segments;
+    std::vector<jdouble*> den_segments;
+
+    ~SimHostOutput() { release(); }
+
+    bool acquire(JNIEnv* e, jdoubleArray j_dense_num, jdoubleArray j_dense_den,
+                 jobjectArray j_packed_num, jobjectArray j_packed_den, int shift) {
+        env = e;
+        packed = j_packed_num != nullptr;
+        if (!packed) {
+            dense_num_ref = j_dense_num;
+            dense_den_ref = j_dense_den;
+            jboolean is_copy;
+            dense_num = env->GetDoubleArrayElements(j_dense_num, &is_copy);
+            dense_den = env->GetDoubleArrayElements(j_dense_den, &is_copy);
+            return dense_num != nullptr && dense_den != nullptr;
+        }
+
+        if (j_packed_den == nullptr || shift <= 0 || shift >= 62) {
+            jclass ex = env->FindClass("java/lang/IllegalArgumentException");
+            if (ex != nullptr) env->ThrowNew(ex, "invalid packed similarity output layout");
+            return false;
+        }
+        segment_shift = shift;
+        segment_mask = (1LL << shift) - 1LL;
+        jsize count = env->GetArrayLength(j_packed_num);
+        if (env->GetArrayLength(j_packed_den) != count) {
+            jclass ex = env->FindClass("java/lang/IllegalArgumentException");
+            if (ex != nullptr) env->ThrowNew(ex, "packed similarity segment counts differ");
+            return false;
+        }
+        num_refs.reserve(count); den_refs.reserve(count);
+        num_segments.reserve(count); den_segments.reserve(count);
+        for (jsize s = 0; s < count; s++) {
+            jdoubleArray nr = (jdoubleArray)env->GetObjectArrayElement(j_packed_num, s);
+            jdoubleArray dr = (jdoubleArray)env->GetObjectArrayElement(j_packed_den, s);
+            jboolean is_copy;
+            jdouble* np = env->GetDoubleArrayElements(nr, &is_copy);
+            jdouble* dp = env->GetDoubleArrayElements(dr, &is_copy);
+            if (np == nullptr || dp == nullptr) {
+                if (np != nullptr) env->ReleaseDoubleArrayElements(nr, np, 0);
+                if (dp != nullptr) env->ReleaseDoubleArrayElements(dr, dp, 0);
+                if (nr != nullptr) env->DeleteLocalRef(nr);
+                if (dr != nullptr) env->DeleteLocalRef(dr);
+                return false;
+            }
+            num_refs.push_back(nr); den_refs.push_back(dr);
+            num_segments.push_back(np); den_segments.push_back(dp);
+        }
+        return true;
+    }
+
+    __host__ inline void addPacked(int a, int b, int n, double nv, double dv) {
+        int i = a, j = b;
+        if (i > j) { int t = i; i = j; j = t; }
+        long long index = (long long)i * n - (long long)i * (i + 1LL) / 2LL + j;
+        int segment = (int)(index >> segment_shift);
+        long long offset = index & segment_mask;
+        num_segments[segment][offset] += nv;
+        den_segments[segment][offset] += dv;
+    }
+
+    void release() {
+        if (!env) return;
+        if (!packed) {
+            if (dense_num) env->ReleaseDoubleArrayElements(dense_num_ref, dense_num, 0);
+            if (dense_den) env->ReleaseDoubleArrayElements(dense_den_ref, dense_den, 0);
+            dense_num = dense_den = nullptr;
+            return;
+        }
+        for (size_t s = 0; s < num_segments.size(); s++) {
+            env->ReleaseDoubleArrayElements(num_refs[s], num_segments[s], 0);
+            env->ReleaseDoubleArrayElements(den_refs[s], den_segments[s], 0);
+            env->DeleteLocalRef(num_refs[s]);
+            env->DeleteLocalRef(den_refs[s]);
+        }
+        num_segments.clear(); den_segments.clear();
+        num_refs.clear(); den_refs.clear();
+    }
+};
 
 // ── Utility: timing ──────────────────────────────────────────────────────────
 
@@ -389,7 +484,10 @@ Java_astralx_gpu_GPUSimilarityMatrix_computeSimilarityGPU(
     jdouble  progressInterval,
     jint     progressMaxSteps,
     jdoubleArray j_num_sum_out,
-    jdoubleArray j_den_sum_out
+    jdoubleArray j_den_sum_out,
+    jobjectArray j_packed_num_out,
+    jobjectArray j_packed_den_out,
+    jint packed_segment_shift
 ) {
     jboolean isCopy;
     jshort*  h_euler   = env->GetShortArrayElements (j_euler_depths,         &isCopy);
@@ -402,8 +500,9 @@ Java_astralx_gpu_GPUSimilarityMatrix_computeSimilarityGPU(
     jint*    h_focc    = env->GetIntArrayElements   (j_first_occ,            &isCopy);
     jint*    h_elen    = env->GetIntArrayElements   (j_euler_len,            &isCopy);
     jint*    h_lcount  = env->GetIntArrayElements   (j_leaf_count,           &isCopy);
-    jdouble* h_num     = env->GetDoubleArrayElements(j_num_sum_out,          &isCopy);
-    jdouble* h_den     = env->GetDoubleArrayElements(j_den_sum_out,          &isCopy);
+    SimHostOutput output;
+    if (!output.acquire(env, j_num_sum_out, j_den_sum_out,
+                        j_packed_num_out, j_packed_den_out, packed_segment_shift)) return;
 
     size_t free_vram = 0, total_vram = 0;
     cudaMemGetInfo(&free_vram, &total_vram);
@@ -556,17 +655,34 @@ Java_astralx_gpu_GPUSimilarityMatrix_computeSimilarityGPU(
                 SIM_CUDA_CHECK(cudaMemcpy(h_tile_den, d_tile_den,
                     (long long)bA * bB_tile * sizeof(double), cudaMemcpyDeviceToHost));
 
-                for (int da = 0; da < bA; da++) {
-                    int a = a0 + da;
-                    for (int db = 0; db < bB_tile; db++) {
-                        int b = b0 + db;
-                        if (a >= b) continue;
-                        long tidx = (long)da * bB_tile + db;
-                        double nv = h_tile_num[tidx];
-                        double dv = h_tile_den[tidx];
-                        if (dv == 0.0) continue;
-                        h_num[a * n + b] += nv;  h_num[b * n + a] += nv;
-                        h_den[a * n + b] += dv;  h_den[b * n + a] += dv;
+                if (!output.packed) {
+                    for (int da = 0; da < bA; da++) {
+                        int a = a0 + da;
+                        for (int db = 0; db < bB_tile; db++) {
+                            int b = b0 + db;
+                            if (a >= b) continue;
+                            long tidx = (long)da * bB_tile + db;
+                            double nv = h_tile_num[tidx];
+                            double dv = h_tile_den[tidx];
+                            if (dv == 0.0) continue;
+                            output.dense_num[a * n + b] += nv;
+                            output.dense_num[b * n + a] += nv;
+                            output.dense_den[a * n + b] += dv;
+                            output.dense_den[b * n + a] += dv;
+                        }
+                    }
+                } else {
+                    for (int da = 0; da < bA; da++) {
+                        int a = a0 + da;
+                        for (int db = 0; db < bB_tile; db++) {
+                            int b = b0 + db;
+                            if (a >= b) continue;
+                            long tidx = (long)da * bB_tile + db;
+                            double nv = h_tile_num[tidx];
+                            double dv = h_tile_den[tidx];
+                            if (dv == 0.0) continue;
+                            output.addPacked(a, b, n, nv, dv);
+                        }
                     }
                 }
 
@@ -604,8 +720,7 @@ Java_astralx_gpu_GPUSimilarityMatrix_computeSimilarityGPU(
     env->ReleaseIntArrayElements   (j_first_occ,           h_focc,   JNI_ABORT);
     env->ReleaseIntArrayElements   (j_euler_len,           h_elen,   JNI_ABORT);
     env->ReleaseIntArrayElements   (j_leaf_count,          h_lcount, JNI_ABORT);
-    env->ReleaseDoubleArrayElements(j_num_sum_out, h_num, 0);
-    env->ReleaseDoubleArrayElements(j_den_sum_out, h_den, 0);
+    output.release();
 }
 
 extern "C" JNIEXPORT void JNICALL
@@ -635,7 +750,10 @@ Java_astralx_gpu_GPUSimilarityMatrix_computeSimilarityGPUWide(
     jdouble progressInterval,
     jint progressMaxSteps,
     jdoubleArray j_num_sum_out,
-    jdoubleArray j_den_sum_out
+    jdoubleArray j_den_sum_out,
+    jobjectArray j_packed_num_out,
+    jobjectArray j_packed_den_out,
+    jint packed_segment_shift
 ) {
     (void)cls;
     jboolean isCopy;
@@ -650,8 +768,9 @@ Java_astralx_gpu_GPUSimilarityMatrix_computeSimilarityGPUWide(
     jint*    h_focc   = env->GetIntArrayElements   (j_first_occ,            &isCopy);
     jint*    h_elen   = env->GetIntArrayElements   (j_euler_len,            &isCopy);
     jint*    h_lcount = env->GetIntArrayElements   (j_leaf_count,           &isCopy);
-    jdouble* h_num    = env->GetDoubleArrayElements(j_num_sum_out,          &isCopy);
-    jdouble* h_den    = env->GetDoubleArrayElements(j_den_sum_out,          &isCopy);
+    SimHostOutput output;
+    if (!output.acquire(env, j_num_sum_out, j_den_sum_out,
+                        j_packed_num_out, j_packed_den_out, packed_segment_shift)) return;
 
     size_t free_vram = 0, total_vram = 0;
     SIM_CUDA_CHECK(cudaMemGetInfo(&free_vram, &total_vram));
@@ -793,17 +912,34 @@ Java_astralx_gpu_GPUSimilarityMatrix_computeSimilarityGPUWide(
                 SIM_CUDA_CHECK(cudaMemcpy(h_tile_den, d_tile_den,
                     (long long)bA * bB_tile * sizeof(double), cudaMemcpyDeviceToHost));
 
-                for (int da = 0; da < bA; da++) {
-                    int a = a0 + da;
-                    for (int db = 0; db < bB_tile; db++) {
-                        int b = b0 + db;
-                        if (a >= b) continue;
-                        long tidx = (long)da * bB_tile + db;
-                        double nv = h_tile_num[tidx];
-                        double dv = h_tile_den[tidx];
-                        if (dv == 0.0) continue;
-                        h_num[a * n + b] += nv; h_num[b * n + a] += nv;
-                        h_den[a * n + b] += dv; h_den[b * n + a] += dv;
+                if (!output.packed) {
+                    for (int da = 0; da < bA; da++) {
+                        int a = a0 + da;
+                        for (int db = 0; db < bB_tile; db++) {
+                            int b = b0 + db;
+                            if (a >= b) continue;
+                            long tidx = (long)da * bB_tile + db;
+                            double nv = h_tile_num[tidx];
+                            double dv = h_tile_den[tidx];
+                            if (dv == 0.0) continue;
+                            output.dense_num[a * n + b] += nv;
+                            output.dense_num[b * n + a] += nv;
+                            output.dense_den[a * n + b] += dv;
+                            output.dense_den[b * n + a] += dv;
+                        }
+                    }
+                } else {
+                    for (int da = 0; da < bA; da++) {
+                        int a = a0 + da;
+                        for (int db = 0; db < bB_tile; db++) {
+                            int b = b0 + db;
+                            if (a >= b) continue;
+                            long tidx = (long)da * bB_tile + db;
+                            double nv = h_tile_num[tidx];
+                            double dv = h_tile_den[tidx];
+                            if (dv == 0.0) continue;
+                            output.addPacked(a, b, n, nv, dv);
+                        }
                     }
                 }
 
@@ -842,6 +978,5 @@ Java_astralx_gpu_GPUSimilarityMatrix_computeSimilarityGPUWide(
     env->ReleaseIntArrayElements   (j_first_occ,           h_focc,   JNI_ABORT);
     env->ReleaseIntArrayElements   (j_euler_len,           h_elen,   JNI_ABORT);
     env->ReleaseIntArrayElements   (j_leaf_count,          h_lcount, JNI_ABORT);
-    env->ReleaseDoubleArrayElements(j_num_sum_out, h_num, 0);
-    env->ReleaseDoubleArrayElements(j_den_sum_out, h_den, 0);
+    output.release();
 }

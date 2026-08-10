@@ -80,6 +80,8 @@ public class GPUSimilarityMatrix {
      * @param progressMaxSteps  max progress prints (0 = time-interval mode)
      * @param numSumOut         pre-zeroed [n × n] — native fills numerator sums
      * @param denSumOut         pre-zeroed [n × n] — native fills denominator sums
+     * @param packedNumOut      segmented packed upper triangle, or null for dense mode
+     * @param packedDenOut      segmented packed upper triangle, or null for dense mode
      */
     public static native void computeSimilarityGPU(
         short[]  eulerDepths,
@@ -101,7 +103,10 @@ public class GPUSimilarityMatrix {
         double   progressInterval,
         int      progressMaxSteps,
         double[] numSumOut,
-        double[] denSumOut
+        double[] denSumOut,
+        double[][] packedNumOut,
+        double[][] packedDenOut,
+        int packedSegmentShift
     );
 
     /**
@@ -133,6 +138,9 @@ public class GPUSimilarityMatrix {
         double   progressInterval,
         int      progressMaxSteps,
         double[] numSumOut,
-        double[] denSumOut
+        double[] denSumOut,
+        double[][] packedNumOut,
+        double[][] packedDenOut,
+        int packedSegmentShift
     );
 }

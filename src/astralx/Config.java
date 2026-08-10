@@ -345,11 +345,19 @@ public class Config {
      * The output tile is separate and tiny for the usual completion datasets.
      * A bounded default avoids consuming a fixed fraction of a large GPU merely
      * to reduce the number of otherwise equivalent tree batches.
-     * Configured via --gpu-sim-vram-cap-mb. Default: 512 MiB.
+     * Configured via --gpu-sim-vram-cap-mb. Default: 512 MiB for the established
+     * dense path. The automatic large-N packed path may raise its batching
+     * ceiling when the user did not explicitly set this option; native code
+     * still clamps it to currently free VRAM.
      */
     private int gpuSimilarityVramCapMiB = 512;
+    private boolean gpuSimilarityVramCapExplicit = false;
     public int  getGpuSimilarityVramCapMiB()          { return gpuSimilarityVramCapMiB; }
-    public void setGpuSimilarityVramCapMiB(int cap)   { this.gpuSimilarityVramCapMiB = Math.max(1, cap); }
+    public void setGpuSimilarityVramCapMiB(int cap)   {
+        this.gpuSimilarityVramCapMiB = Math.max(1, cap);
+        this.gpuSimilarityVramCapExplicit = true;
+    }
+    public boolean isGpuSimilarityVramCapExplicit()  { return gpuSimilarityVramCapExplicit; }
 
     // Standalone deployment self-check. Does not require an input dataset.
     private boolean diagnose = false;

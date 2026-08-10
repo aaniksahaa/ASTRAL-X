@@ -80,7 +80,11 @@ Same architecture as the distance matrix kernel:
 - **B×B output tile**: B = min(n, ceil(sqrt(n·k))). Tile VRAM = O(B²).
 - **Δ-tree batching**: Δ chosen so that Δ·(per-tree GPU bytes) fits the configured
   tree-data cap (`--gpu-sim-vram-cap-mb`, default 512 MiB) and currently free VRAM.
-- **Upper-triangle tiling**: only tiles with a0 ≤ b0 are processed; results mirrored.
+  If the option was not set explicitly, the large-N packed path may raise this
+  ceiling to 8 GiB (still clamped to free VRAM) to avoid repeating every taxon
+  pair across many small tree batches; the established dense path is unchanged.
+- **Upper-triangle tiling**: only tiles with a0 ≤ b0 are processed; dense results
+  are mirrored, while large-N results are written once to packed symmetric storage.
 
 For each tile:
 1. Zero `numTile[B×B]` and `denTile[B×B]` on GPU
@@ -233,7 +237,14 @@ Total GPU VRAM = **O(n·k + Δ·n·log n)** — no O(n²) term.
 
 ### CPU RAM
 
-Full n×n similarity matrix: O(n²) — unavoidable (it is the output).  
+The established path retains flat n×n arrays while one Java array can address
+all cells (through 46,340 taxa). Above that boundary, the exact large-N path
+stores only the symmetric upper triangle in 512-MiB Java segments and uses
+64-bit logical indices. For 50,000 taxa this is 1,250,025,000 doubles, or
+9.31 GiB per accumulator, rather than 2,500,000,000 cells per dense array.
+Precision remains `double`; no pair is sampled or omitted.
+
+Both representations remain O(n²) — unavoidable for this output.
 All preprocessed trees: O(k·n·log n).
 
 ---
@@ -249,16 +260,23 @@ sim[b*n+a] = sim[a*n+b];  // symmetry
 dist[a*n+b] = 1.0 - sim[a*n+b];  // for TreeCompleter
 ```
 
+The large-N path performs the same normalization in place on its packed
+numerator, releases the packed denominator, and evaluates distance on demand as
+the identical expression `1.0 - sim(a,b)`. CUDA already computes only the upper
+triangle, so large-N host output writes each symmetric pair once. The dense path
+and its write order are unchanged.
+
 ---
 
 ## 10. Integration with Tree Completion
 
-`TreeCompleter.completeAll(trees, double[] dist, int n)` takes the `dist[]` array from
-`SimilarityMatrix.dist` (or `DistanceMatrix.dist` for the CPU-only fallback).
+`TreeCompleter` dispatches to the original flat-array implementation or an exact
+segmented-row implementation. The latter preserves the same distance comparator,
+descending-taxon-ID tie break, insertion order, and four-point arithmetic.
 
 In `Main.java`, when `--autocomplete-incomplete-gene-trees` is active:
 1. Build `SimilarityMatrix` from the **original** (pre-completion) gene trees.
-2. Call `TreeCompleter.completeAll(trees, sm.dist, n)`.
+2. Call `TreeCompleter.completeAll(trees, sm, n)`.
 3. Continue with completed trees for cluster extraction.
 
 This matches ASTRAL-MP's default behavior (similarity-guided completion).

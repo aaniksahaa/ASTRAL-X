@@ -101,6 +101,7 @@ public class Main {
             // reflect actual gene-tree signal, not the artificially inserted taxa.
             List<Tree> originalTrees = trees; // always points to pre-completion trees
             SimilarityMatrix similarityMatrix = null; // visible to Phase 3.5 (Step A)
+            Tree upgmaGuideTree = null; // retained for S3 gene-tree-polytomy enrichment
             if (cfg.isAutoCompleteIncompleteTrees() || cfg.isVerifyDistanceMatrix()
                     || cfg.isVerifySimilarityMatrix() || cfg.isVerifyUpgma()) {
                 boolean gpuDist = (cfg.getComputeMode() == Config.ComputeMode.GPU)
@@ -129,7 +130,7 @@ public class Main {
                         ? SimilarityMatrixBuilder.buildGPU(trees, registry.size())
                         : SimilarityMatrixBuilder.buildCPU(trees, registry.size());
                     int n = registry.size();
-                    Tree upgmaTree = UPGMAClusterer.build(sm.sim, n, trees.size());
+                    Tree upgmaTree = UPGMAClusterer.build(sm, trees.size());
                     dumpUpgmaBipartitions(upgmaTree, registry);
                     return;
                 }
@@ -153,18 +154,20 @@ public class Main {
                     // already available regardless of completionMethod.
                     // dist is used only to build sortedRows (nearest-neighbour order);
                     // for SIMILARITY mode we reuse smForUpgma.dist (= 1 - sim).
-                    double[] completionSim  = smForUpgma.sim;
-                    double[] completionDist;
                     if (useSim) {
-                        completionDist = smForUpgma.dist;   // reuse already-built matrix
+                        trees = TreeCompleter.completeAll(trees, smForUpgma, registry.size());
                     } else {
+                        if (smForUpgma.isPacked()) {
+                            throw new IllegalArgumentException("Large-N distance-guided completion "
+                                + "requires a segmented distance matrix; use the exact default "
+                                + "--completion-method similarity for this dataset");
+                        }
                         DistanceMatrix dm = gpuDist
                             ? DistanceMatrixBuilder.buildGPU(trees, registry.size())
                             : DistanceMatrixBuilder.buildCPU(trees, registry.size());
-                        completionDist = dm.dist;
+                        trees = TreeCompleter.completeAll(trees, smForUpgma.sim, dm.dist,
+                            registry.size());
                     }
-                    // originalTrees already saved above; trees is reassigned to completed list
-                    trees = TreeCompleter.completeAll(trees, completionSim, completionDist, registry.size());
                     Logging.info("Phase 1b: using original incomplete trees for weight scoring, completed trees for X");
 
                     if (cfg.getDumpCompletedTreesFile() != null) {
@@ -179,7 +182,7 @@ public class Main {
                 // It is NOT added to originalTrees, so tripartition scoring (Phase 4/6)
                 // is unaffected.
                 int nTaxa = registry.size();
-                Tree upgmaGuideTree = UPGMAClusterer.build(smForUpgma.sim, nTaxa, trees.size());
+                upgmaGuideTree = UPGMAClusterer.build(smForUpgma, trees.size());
                 trees = new ArrayList<>(trees);
                 trees.add(upgmaGuideTree);
                 Logging.info("Phase 1b: UPGMA guide tree (%d taxa) added to cluster search space", nTaxa);
@@ -248,7 +251,9 @@ public class Main {
                 if (similarityMatrix == null) {
                     similarityMatrix = SimilarityMatrixBuilder.buildCPU(trees, nT);
                 }
-                Tree guide = UPGMAClusterer.build(similarityMatrix.sim, nT, trees.size());
+                Tree guide = upgmaGuideTree != null
+                    ? upgmaGuideTree
+                    : UPGMAClusterer.build(similarityMatrix, trees.size());
                 astralx.greedy.GeneTreePolytomySampler.run(
                     trees, originalTrees.size(), guide, pref, nT, pref.numSeeds(),
                     cfg.getBaseSeed() ^ 0xC0FFEEL, clusterTable);
@@ -801,7 +806,7 @@ public class Main {
               --gpu-vram-occupancy-factor F
               --gpu-vram-control-factor F
               --gpu-treewalk-vram-cap-mb MiB    Default: 512
-              --gpu-sim-vram-cap-mb MiB         Default: 512
+              --gpu-sim-vram-cap-mb MiB         Default: 512; large-N auto may raise within free VRAM
               --gpu-dist-tile-size N
               --gpu-dp-state-space-construction-output-cap SIZE
               --gpu-progress-interval SECONDS

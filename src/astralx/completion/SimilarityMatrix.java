@@ -20,7 +20,12 @@ package astralx.completion;
  * Pairs that never co-occur in any tree have sim = 0, dist = 1.
  */
 public class SimilarityMatrix {
+    private static final int MAX_JAVA_ARRAY_LENGTH = Integer.MAX_VALUE - 8;
+
     public final int n;
+
+    /** True when the exact symmetric matrix is held as segmented upper triangles. */
+    private final boolean packed;
 
     /** Accumulated numerator: Σ num_t(a,b). Flat n×n double. */
     final double[] numSum;
@@ -37,19 +42,29 @@ public class SimilarityMatrix {
      */
     public final double[] dist;
 
+    private SegmentedDoubleArray packedNum;
+    private SegmentedDoubleArray packedDen;
+
     public SimilarityMatrix(int n) {
         long cellsLong = (long)n * n;
-        if (cellsLong > Integer.MAX_VALUE - 8) {
-            throw new IllegalArgumentException("Similarity matrix for " + n + " taxa requires "
-                + cellsLong + " cells per array; Java arrays support at most "
-                + (Integer.MAX_VALUE - 8));
+        this.n = n;
+        this.packed = Boolean.getBoolean("astralx.similarity.forcePacked")
+            || requiresPacked(n);
+        if (packed) {
+            long triangleCells = triangleCellCount(n);
+            this.numSum = null;
+            this.denSum = null;
+            this.sim = null;
+            this.dist = null;
+            this.packedNum = new SegmentedDoubleArray(triangleCells);
+            this.packedDen = new SegmentedDoubleArray(triangleCells);
+        } else {
+            int cells = (int)cellsLong;
+            this.numSum = new double[cells];
+            this.denSum = new double[cells];
+            this.sim = new double[cells];
+            this.dist = new double[cells];
         }
-        int cells = (int)cellsLong;
-        this.n      = n;
-        this.numSum = new double[cells];
-        this.denSum = new double[cells];
-        this.sim    = new double[cells];
-        this.dist   = new double[cells];
     }
 
     /**
@@ -58,6 +73,21 @@ public class SimilarityMatrix {
      * Diagonal is set to sim = 1, dist = 0.
      */
     public void normalize() {
+        if (packed) {
+            double[][] nums = packedNum.segments();
+            double[][] dens = packedDen.segments();
+            for (int s = 0; s < nums.length; s++) {
+                double[] num = nums[s];
+                double[] den = dens[s];
+                for (int i = 0; i < num.length; i++) {
+                    num[i] = den[i] > 0.0 ? num[i] / den[i] : 0.0;
+                }
+            }
+            for (int a = 0; a < n; a++) packedNum.set(index(a, a), 1.0);
+            // Make the (potentially multi-GiB) denominator immediately collectible.
+            packedDen = null;
+            return;
+        }
         for (int i = 0; i < sim.length; i++) {
             sim [i] = (denSum[i] > 0.0) ? numSum[i] / denSum[i] : 0.0;
             dist[i] = 1.0 - sim[i];
@@ -70,8 +100,56 @@ public class SimilarityMatrix {
     }
 
     /** Returns M[a][b]. Call after normalize(). */
-    public double getSim(int a, int b)  { return sim [a * n + b]; }
+    public double getSim(int a, int b)  {
+        return packed ? packedNum.get(index(a, b)) : sim[a * n + b];
+    }
 
     /** Returns (1 − M[a][b]). Call after normalize(). */
-    public double getDist(int a, int b) { return dist[a * n + b]; }
+    public double getDist(int a, int b) {
+        return packed ? 1.0 - packedNum.get(index(a, b)) : dist[a * n + b];
+    }
+
+    public boolean isPacked() { return packed; }
+
+    static long triangleCellCount(int n) {
+        return (long)n * (n + 1L) / 2L;
+    }
+
+    static boolean requiresPacked(int n) {
+        return (long)n * n > MAX_JAVA_ARRAY_LENGTH;
+    }
+
+    static long packedIndex(int n, int a, int b) {
+        if (a > b) { int t = a; a = b; b = t; }
+        return (long)a * n - (long)a * (a + 1L) / 2L + b;
+    }
+
+    long index(int a, int b) {
+        return packedIndex(n, a, b);
+    }
+
+    void addPackedNumerator(int a, int b, double value) {
+        packedNum.add(index(a, b), value);
+    }
+
+    void addPackedDenominator(int a, int b, double value) {
+        packedDen.add(index(a, b), value);
+    }
+
+    double[][] packedNumeratorSegments() { return packedNum.segments(); }
+    double[][] packedDenominatorSegments() { return packedDen.segments(); }
+    int packedSegmentShift() { return SegmentedDoubleArray.SEGMENT_SHIFT; }
+
+    SegmentedDoubleArray copyPackedSimilarity() {
+        if (!packed || packedDen != null) {
+            throw new IllegalStateException("packed similarity is not normalized");
+        }
+        SegmentedDoubleArray copy = new SegmentedDoubleArray(packedNum.length());
+        double[][] src = packedNum.segments();
+        double[][] dst = copy.segments();
+        for (int s = 0; s < src.length; s++) {
+            System.arraycopy(src[s], 0, dst[s], 0, src[s].length);
+        }
+        return copy;
+    }
 }

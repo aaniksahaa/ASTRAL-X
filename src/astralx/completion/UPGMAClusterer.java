@@ -140,6 +140,19 @@ public class UPGMAClusterer {
         return u.run(treeIndex);
     }
 
+    /** Dispatch to the unchanged dense implementation or the exact large-N implementation. */
+    public static Tree build(SimilarityMatrix sim, int treeIndex) {
+        if (!sim.isPacked()) return build(sim.sim, sim.n, treeIndex);
+        if (sim.n == 1) {
+            TreeNode leaf = new TreeNode();
+            leaf.taxonId = 0;
+            leaf.rangeStart = 0;
+            leaf.rangeEnd = 1;
+            return new Tree(treeIndex, leaf, new int[]{0}, new int[]{0}, 1, 1);
+        }
+        return SegmentedUPGMAClusterer.build(sim, treeIndex);
+    }
+
     // ── Core UPGMA loop ───────────────────────────────────────────────────────
 
     private Tree run(int treeIndex) {

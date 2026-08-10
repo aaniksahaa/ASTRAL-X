@@ -189,16 +189,25 @@ TRUE_SPECIES_TREE="${SIMPHY_RUN_DIR%/}/s_tree.trees"
 RESULTS_DIR="${SIMPHY_RUN_DIR%/}/astralx_outputs/${SETTING_NAME}"
 STAT_FILE="${RESULTS_DIR%/}/stat-astralx.csv"
 LOCK_FILE="${RESULTS_DIR%/}/.astralx.lock"
+SUCCESS_FILE="${RESULTS_DIR%/}/.astralx.success"
 OUT_ASTRALX="${RESULTS_DIR%/}/out-astralx.tre"
 RUN_LOG="${RESULTS_DIR%/}/.astralx_run.log"
+STATS_SIDE_FILE="${OUT_ASTRALX%.tre}_stats.csv"
 
 if [[ "${DEBUG:-0}" == "1" ]]; then
   set -x
 fi
 
 if [[ "$FRESH" == false && -f "$STAT_FILE" ]]; then
-  echo "SKIPPING: ${STAT_FILE} already exists. Use --fresh to force rerun."
-  exit 0
+  PREVIOUS_EXIT=""
+  if [[ -f "$STATS_SIDE_FILE" ]]; then
+    PREVIOUS_EXIT=$(awk -F, 'NR==2 {print $9}' "$STATS_SIDE_FILE")
+  fi
+  if [[ -f "$OUT_ASTRALX" && ( -f "$SUCCESS_FILE" || "$PREVIOUS_EXIT" == "0" ) ]]; then
+    echo "SKIPPING: successful output already exists at ${OUT_ASTRALX}. Use --fresh to force rerun."
+    exit 0
+  fi
+  echo "Previous statistics exist but no successful output was recorded; rerunning."
 fi
 
 if [[ ! -f "$ALL_GT_FILE" ]]; then
@@ -244,8 +253,10 @@ if [[ ! -f "$ALL_GT_FILE" ]]; then
       RESULTS_DIR="${SIMPHY_RUN_DIR%/}/astralx_outputs/${SETTING_NAME}"
       STAT_FILE="${RESULTS_DIR%/}/stat-astralx.csv"
       LOCK_FILE="${RESULTS_DIR%/}/.astralx.lock"
+      SUCCESS_FILE="${RESULTS_DIR%/}/.astralx.success"
       OUT_ASTRALX="${RESULTS_DIR%/}/out-astralx.tre"
       RUN_LOG="${RESULTS_DIR%/}/.astralx_run.log"
+      STATS_SIDE_FILE="${OUT_ASTRALX%.tre}_stats.csv"
     fi
 
     SIM_CMD=("${ASTRALX_ROOT}/sim.sh" -t "$TAXA_NUM" -g "$GENE_TREES" -r "$REPLICATE" -rs "$REPLICATE_COUNT" --sb "$SB" --spmin "$SPMIN" --spmax "$SPMAX")
@@ -263,7 +274,7 @@ if [[ ! -f "$ALL_GT_FILE" ]]; then
 fi
 
 mkdir -p "${RESULTS_DIR%/}"
-rm -f "$LOCK_FILE" "$RUN_LOG"
+rm -f "$LOCK_FILE" "$SUCCESS_FILE" "$RUN_LOG" "$OUT_ASTRALX"
 touch "$LOCK_FILE"
 
 echo "Parameters:"
@@ -296,7 +307,6 @@ MAX_CPU_MB="NA"
 MAX_GPU_MB="NA"
 OPTIMAL_QUARTET_SCORE="NA"
 
-STATS_SIDE_FILE="${OUT_ASTRALX%.tre}_stats.csv"
 if [[ -f "$STATS_SIDE_FILE" ]]; then
   RUNNING_TIME=$(awk -F, 'NR==2 {print $4}' "$STATS_SIDE_FILE")
   MAX_CPU_MB=$(awk -F, 'NR==2 {print $5}' "$STATS_SIDE_FILE")
@@ -317,9 +327,12 @@ echo "alg,setting,num-taxa,gene-trees,replicate,sb,spmin,spmax,rf-rate,optimal-q
 echo "astralx,${SETTING_NAME},${TAXA_NUM},${GENE_TREES},${REPLICATE},${SB},${SPMIN},${SPMAX},${RF_RATE},${OPTIMAL_QUARTET_SCORE},${RUNNING_TIME},${MAX_CPU_MB},${MAX_GPU_MB}" >> "$STAT_FILE"
 
 if [[ "$ASTRALX_EXIT_CODE" -ne 0 ]]; then
-  rm -f "$LOCK_FILE"
+  rm -f "$LOCK_FILE" "$SUCCESS_FILE"
 else
   touch "$LOCK_FILE"
+  SUCCESS_TMP="${SUCCESS_FILE}.tmp.$$"
+  printf 'exit_code=0\noutput=%s\n' "$OUT_ASTRALX" > "$SUCCESS_TMP"
+  mv -f "$SUCCESS_TMP" "$SUCCESS_FILE"
 fi
 
 echo

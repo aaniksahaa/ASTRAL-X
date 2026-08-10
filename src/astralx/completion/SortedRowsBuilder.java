@@ -59,6 +59,27 @@ public class SortedRowsBuilder {
         return sortedRows;
     }
 
+    /**
+     * Exact segmented-row variant used when a flat n*n int array is impossible.
+     * Comparator and tie order are identical to {@link #buildCPU(double[], int)}.
+     */
+    public static int[][] buildPackedCPU(SimilarityMatrix sim) {
+        int n = sim.n;
+        int[][] sortedRows = new int[n][];
+        Threading.processRangeParallel(n, x -> {
+            Integer[] indices = new Integer[n];
+            for (int j = 0; j < n; j++) indices[j] = j;
+            Arrays.sort(indices, (a, b) -> {
+                int c = Double.compare(sim.getDist(x, a), sim.getDist(x, b));
+                return c != 0 ? c : Integer.compare(b, a);
+            });
+            int[] row = new int[n];
+            for (int rank = 0; rank < n; rank++) row[rank] = indices[rank];
+            sortedRows[x] = row;
+        });
+        return sortedRows;
+    }
+
     // TODO (GPU path): implement buildGPU(double[] dist, int n) using batched
     // Thrust argsort as described in the implementation plan Section 3.2.
     // Signature: public static int[] buildGPU(double[] dist, int n)

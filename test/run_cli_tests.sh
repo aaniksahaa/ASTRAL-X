@@ -17,15 +17,23 @@ source "${ROOT}/experiment-setting-name.sh"
 "${ROOT}/build.sh" >/dev/null
 javac -cp "${ROOT}/build" -d "$TEST_CLASSES" \
   "${ROOT}/test/CliPresetsTest.java" \
+  "${ROOT}/test/PackedSimilarityParityTest.java" \
+  "${ROOT}/test/PackedPreflightTest.java" \
+  "${ROOT}/test/astralx/completion/PackedMatrixBoundaryTest.java" \
   "${ROOT}/test/SimilarityArgminTest.java" \
   "${ROOT}/test/ThreadingFailureTest.java" \
   "${ROOT}/test/WideSimilarityBoundaryTest.java"
 java -cp "${ROOT}/build:${TEST_CLASSES}" astralx.CliPresetsTest
+java -cp "${ROOT}/build:${TEST_CLASSES}" astralx.completion.PackedMatrixBoundaryTest
+java -Xmx1g -cp "${ROOT}/build:${TEST_CLASSES}" PackedPreflightTest
+java -cp "${ROOT}/build:${TEST_CLASSES}" PackedSimilarityParityTest \
+  "${ROOT}/test/input/tc5_heavy_incomplete.tre"
 java -cp "${ROOT}/build:${TEST_CLASSES}" ThreadingFailureTest
 java -Xmx4g -cp "${ROOT}/build:${TEST_CLASSES}" WideSimilarityBoundaryTest
 java -cp "${ROOT}/build:${TEST_CLASSES}" SimilarityArgminTest \
   "${ROOT}/test/input/tc10_unrooted_8taxa.tre" \
   "${ROOT}/test/input/tc14_polytomy_6taxa.tre"
+bash "${ROOT}/test/test_simulated_success_detection.sh"
 
 VERSION_TEXT="$(NO_COLOR=1 java -cp "${ROOT}/build" astralx.Main --version)"
 [[ "$VERSION_TEXT" == *"ASTRAL-X  v1.0.0"* ]]
@@ -58,6 +66,20 @@ run_score() {
       --consensus-experimental --stepb-quadratic-nn-balls \
       --stepb-random-leftover-resolution --stepb-process-large-polytomies \
       --resolve-input-gene-tree-polytomies --weight-intersection-method prefix-sum)" ]]
+
+# Force the large-N matrix implementation through complete S2/S3 inference on a
+# small incomplete dataset.  Final Newick must remain byte-for-byte identical.
+for preset in S2 S3; do
+  dense_tree="${TEST_CLASSES}/${preset}-dense.tre"
+  packed_tree="${TEST_CLASSES}/${preset}-packed.tre"
+  java -cp "${ROOT}/build" astralx.Main --cpu -q \
+    -i "${ROOT}/test/input/tc5_heavy_incomplete.tre" -o "$dense_tree" \
+    --search-space "$preset" --intersection-method I1 >/dev/null 2>&1
+  java -Dastralx.similarity.forcePacked=true -cp "${ROOT}/build" astralx.Main --cpu -q \
+    -i "${ROOT}/test/input/tc5_heavy_incomplete.tre" -o "$packed_tree" \
+    --search-space "$preset" --intersection-method I1 >/dev/null 2>&1
+  cmp "$dense_tree" "$packed_tree"
+done
 
 if java -cp "${ROOT}/build" astralx.Main --cpu --diagnose --search-space S4 \
     >/dev/null 2>&1; then

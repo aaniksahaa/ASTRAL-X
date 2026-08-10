@@ -77,6 +77,92 @@ public class TreeCompleter {
         return Arrays.asList(result);
     }
 
+    /** Exact large-matrix entry point; the original dense path remains unchanged. */
+    public static List<Tree> completeAll(List<Tree> trees, SimilarityMatrix sim, int n) {
+        if (!sim.isPacked()) return completeAll(trees, sim.sim, sim.dist, n);
+
+        List<Integer> incomplete = new ArrayList<>();
+        for (int i = 0; i < trees.size(); i++) {
+            if (!trees.get(i).isComplete) incomplete.add(i);
+        }
+        if (incomplete.isEmpty()) return trees;
+
+        Logging.info("Tree completion: %d/%d trees incomplete (segmented exact matrix)",
+            incomplete.size(), trees.size());
+        int[][] sortedRows = SortedRowsBuilder.buildPackedCPU(sim);
+        Tree[] result = trees.toArray(new Tree[0]);
+        ProgressBar bar = new ProgressBar("Completing incomplete gene trees", incomplete.size());
+        AtomicInteger cnt = new AtomicInteger(0);
+        Threading.processParallel(incomplete, idx -> {
+            result[idx] = completeTreeFourPointPacked(trees.get(idx), sim, sortedRows, n);
+            bar.update(cnt.incrementAndGet());
+        });
+        bar.done();
+        return Arrays.asList(result);
+    }
+
+    private static Tree completeTreeFourPointPacked(Tree tree, SimilarityMatrix sim,
+                                                     int[][] sortedRows, int n) {
+        boolean[] inTree = new boolean[n];
+        TreeNode[] taxonNode = new TreeNode[n];
+        TreeNode root = deepCopyNodes(tree.root, null, taxonNode);
+        for (int i = 0; i < n; i++) if (tree.positionMap[i] != -1) inTree[i] = true;
+        root = preprocessReroot(root, tree.leafCount);
+
+        for (int x = 0; x < n; x++) {
+            if (inTree[x]) continue;
+            int anchor = findAnchorPacked(x, inTree, sortedRows);
+            root = rerootAtLeafEdge(taxonNode[anchor], root);
+            TreeNode start = root.right;
+            int c1rep = -1, c2rep = -1;
+            TreeNode c1 = null, c2 = null;
+            while (!start.isLeaf()) {
+                c1 = start.left;
+                c2 = start.right;
+                if (c1rep == -1) c1rep = leftmostTaxon(c1);
+                if (c2rep == -1) c2rep = leftmostTaxon(c2);
+                int better = fourPointBetterSidePacked(x, anchor, c1rep, c2rep, sim);
+                if (better == anchor) break;
+                if (better == c1rep) {
+                    start = c1;
+                    c2rep = -1;
+                } else {
+                    start = c2;
+                    c1rep = c2rep;
+                    c2rep = -1;
+                }
+            }
+            TreeNode newLeaf = insertTaxon(x, start, c1, c2);
+            inTree[x] = true;
+            taxonNode[x] = newLeaf;
+        }
+        return rebuildTree(tree.treeIndex, root, n);
+    }
+
+    private static int findAnchorPacked(int x, boolean[] inTree, int[][] sortedRows) {
+        int[] row = sortedRows[x];
+        for (int candidate : row) {
+            if (candidate != x && inTree[candidate]) return candidate;
+        }
+        throw new RuntimeException("No anchor found for taxon " + x + " — inTree array may be empty");
+    }
+
+    private static int fourPointBetterSidePacked(int x, int a, int b, int c,
+                                                  SimilarityMatrix sim) {
+        double xa = sim.getSim(x, a);
+        double xb = sim.getSim(x, b);
+        double xc = sim.getSim(x, c);
+        double ab = sim.getSim(a, b);
+        double ac = sim.getSim(a, c);
+        double bc = sim.getSim(b, c);
+        double ascore = xa + bc - (xb + ac);
+        double bscore = xb + ac - (xa + bc);
+        double cscore = xc + ab - (xb + ac);
+        return ascore >= bscore
+            ? (ascore >= cscore ? a : c)
+            : (bscore >= cscore ? b : c);
+    }
+
     // ── Per-tree completion ───────────────────────────────────────────────────
 
     /**
