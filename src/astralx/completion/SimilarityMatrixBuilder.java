@@ -52,6 +52,13 @@ public class SimilarityMatrixBuilder {
 
     private static final int COMPACT_MAX_TOUR = Character.MAX_VALUE + 1;
     private static final int MAX_JAVA_ARRAY_LENGTH = Integer.MAX_VALUE - 8;
+    /**
+     * Only used after the ordinary one-shot compact layout has exceeded a Java
+     * array limit.  Keeping each streamed flattening batch around 4 GiB avoids
+     * replacing one impossible array with several near-limit arrays while
+     * retaining large enough batches to amortize JNI/GPU setup.
+     */
+    private static final long STREAMED_COMPACT_HOST_BATCH_BYTES = 4L << 30;
     /** Large-N only: enough to keep the observed 50k×1000 wide tree data in one GPU batch. */
     private static final int LARGE_PACKED_GPU_TREE_CAP_MIB = 8192;
 
@@ -103,13 +110,17 @@ public class SimilarityMatrixBuilder {
             || !fitsJavaArray((long)k * n);
         boolean forceWide = Boolean.getBoolean("astralx.similarity.forceWide");
 
-        if (forceWide || compactTourOverflow || compactLayoutOverflow) {
+        if (!forceWide && !compactTourOverflow && compactLayoutOverflow) {
+            Logging.info("GPU similarity RMQ: compact unsigned-16 mode with streamed host "
+                + "batches (flat layout exceeds the Java single-array limit)");
+            return buildGPUCompactStreamed(trees, n, ePadded, logMax);
+        }
+
+        if (forceWide || compactTourOverflow) {
             String reason = forceWide
                 ? "forced by -Dastralx.similarity.forceWide=true"
-                : compactTourOverflow
-                    ? "maximum Euler tour " + eMaxRaw + " exceeds compact limit "
-                        + COMPACT_MAX_TOUR
-                    : "compact flat layout exceeds the Java single-array limit";
+                : "maximum Euler tour " + eMaxRaw + " exceeds compact limit "
+                    + COMPACT_MAX_TOUR;
             Logging.info("GPU similarity RMQ: wide blocked mode (%s)", reason);
             return buildGPUWide(trees, n, eMaxRaw);
         }
@@ -119,6 +130,41 @@ public class SimilarityMatrixBuilder {
     }
 
     private static SimilarityMatrix buildGPUCompact(List<Tree> trees, int n) {
+        SimilarityMatrix sm = new SimilarityMatrix(n);
+        accumulateGPUCompact(trees, n, sm, 0);
+        sm.normalize();
+        return sm;
+    }
+
+    /**
+     * Stream compact tree data through bounded Java arrays.  This path is
+     * selected only when the established one-shot layout is impossible; the
+     * ordinary compact path above remains unchanged for all fitting inputs.
+     */
+    private static SimilarityMatrix buildGPUCompactStreamed(List<Tree> trees, int n,
+                                                             int ePadded, int logMax) {
+        int batchTrees = compactBatchTreeCount(trees.size(), n, ePadded, logMax,
+            MAX_JAVA_ARRAY_LENGTH, STREAMED_COMPACT_HOST_BATCH_BYTES);
+        int batches = (int)((trees.size() + (long)batchTrees - 1L) / batchTrees);
+        Logging.info("Streaming %d compact similarity trees in %d host batches "
+                + "(up to %d trees per batch; original tree order preserved)",
+            trees.size(), batches, batchTrees);
+
+        SimilarityMatrix sm = new SimilarityMatrix(n);
+        for (int from = 0, batch = 1; from < trees.size(); batch++) {
+            int to = (int)Math.min(trees.size(), from + (long)batchTrees);
+            Logging.info("Compact similarity host batch %d/%d: trees %d..%d",
+                batch, batches, from, to - 1);
+            accumulateGPUCompact(trees.subList(from, to), n, sm, from);
+            from = to;
+        }
+        sm.normalize();
+        return sm;
+    }
+
+    /** Flatten and accumulate one compact host batch without normalizing it. */
+    private static void accumulateGPUCompact(List<Tree> trees, int n, SimilarityMatrix sm,
+                                             int treeIndexBase) {
         int k = trees.size();
         Logging.info("Building FullTourData for %d trees (parallel CPU)", k);
 
@@ -132,7 +178,7 @@ public class SimilarityMatrixBuilder {
                 tours[i] = EulerTourBuilder.buildFull(trees.get(i), n);
                 eulerBar.update(eulerDone.incrementAndGet());
             } catch (RuntimeException e) {
-                throw treeBuildFailure(i, trees.get(i), e);
+                throw treeBuildFailure(treeIndexBase + i, trees.get(i), e);
             }
         });
         eulerBar.done();
@@ -228,7 +274,6 @@ public class SimilarityMatrixBuilder {
         double progressInterval = cfg.getGpuDpProgressInterval();
         int    progressMaxSteps = cfg.getGpuDpProgressMaxSteps();
 
-        SimilarityMatrix sm = new SimilarityMatrix(n);
         int treeCapMiB = effectiveTreeCapMiB(sm, cfg);
         GPUSimilarityMatrix.computeSimilarityGPU(
             eulerDepths,
@@ -245,9 +290,6 @@ public class SimilarityMatrixBuilder {
             sm.isPacked() ? sm.packedDenominatorSegments() : null,
             sm.packedSegmentShift()
         );
-
-        sm.normalize();
-        return sm;
     }
 
     private static SimilarityMatrix buildGPUWide(List<Tree> trees, int n, int eMaxRaw) {
@@ -393,6 +435,40 @@ public class SimilarityMatrixBuilder {
 
     private static boolean fitsJavaArray(long length) {
         return length >= 0 && length <= MAX_JAVA_ARRAY_LENGTH;
+    }
+
+    /**
+     * Choose a safe streamed compact batch size from both Java's per-array
+     * element bound and a total flattened-host-memory bound.
+     *
+     * Package-private with explicit limits so boundary arithmetic can be unit
+     * tested without allocating multi-gigabyte arrays.
+     */
+    static int compactBatchTreeCount(int treeCount, int n, int ePadded, int logMax,
+                                     long maxArrayLength, long maxBatchBytes) {
+        if (treeCount <= 0) return 1;
+        if (n <= 0 || ePadded <= 0 || logMax <= 0
+                || maxArrayLength <= 0 || maxBatchBytes <= 0) {
+            throw new IllegalArgumentException("invalid compact similarity batch dimensions");
+        }
+
+        long sparseCellsPerTree = Math.multiplyExact((long)logMax, ePadded);
+        long flattenedBytesPerTree = Math.addExact(
+            Math.addExact(Math.multiplyExact((long)ePadded, 30L),
+                Math.multiplyExact(sparseCellsPerTree, Character.BYTES)),
+            Math.addExact(Math.multiplyExact((long)n, Integer.BYTES), 2L * Integer.BYTES));
+
+        long byEulerArray = maxArrayLength / ePadded;
+        long bySparseArray = maxArrayLength / sparseCellsPerTree;
+        long byFirstOccurrence = maxArrayLength / n;
+        long byHostBytes = maxBatchBytes / flattenedBytesPerTree;
+        long safe = Math.min(Math.min(byEulerArray, bySparseArray),
+            Math.min(byFirstOccurrence, byHostBytes));
+        if (safe < 1) {
+            throw new IllegalArgumentException("one compact similarity tree cannot fit in the "
+                + "configured streamed host-array bounds");
+        }
+        return (int)Math.min(treeCount, Math.min(safe, Integer.MAX_VALUE));
     }
 
     private static int checkedLength(long length, String label) {

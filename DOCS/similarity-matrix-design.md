@@ -85,6 +85,12 @@ Same architecture as the distance matrix kernel:
   pair across many small tree batches; the established dense path is unchanged.
 - **Upper-triangle tiling**: only tiles with a0 ≤ b0 are processed; dense results
   are mirrored, while large-N results are written once to packed symmetric storage.
+- **Bounded host flattening**: if every tour fits the compact 16-bit RMQ but the
+  aggregate compact table would exceed Java's single-array element limit, trees
+  are flattened and submitted in original-order host batches of at most 4 GiB.
+  Each batch adds to the same unnormalized numerator and denominator, and the
+  matrix is normalized once after the final batch. Inputs whose compact arrays
+  already fit retain the established one-shot path.
 
 For each tile:
 1. Zero `numTile[B×B]` and `denTile[B×B]` on GPU
@@ -244,8 +250,11 @@ stores only the symmetric upper triangle in 512-MiB Java segments and uses
 9.31 GiB per accumulator, rather than 2,500,000,000 cells per dense array.
 Precision remains `double`; no pair is sampled or omitted.
 
-Both representations remain O(n²) — unavoidable for this output.
-All preprocessed trees: O(k·n·log n).
+Both representations remain O(n²) — unavoidable for this output. Compact
+preprocessing is O(k·n·log n) in total work. Its peak host storage is also
+O(k·n·log n) while the flattened arrays fit; beyond Java's single-array limit,
+bounded original-order streaming reduces the flattened/preprocessed-tree peak
+to O(Δ_host·n·log n) without changing the accumulated values.
 
 ---
 

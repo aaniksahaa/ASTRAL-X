@@ -62,6 +62,37 @@ public final class PackedMatrixBoundaryTest {
         if (SimilarityMatrixBuilder.effectiveTreeCapMiB(tinyPacked, cfg) != 256) {
             throw new AssertionError("explicit GPU batching ceiling was not respected");
         }
+
+        // The reported 100k × 1000-tree case has E=4096 and LOG=12.  Its
+        // compact sparse table cannot be one Java array, but every planned
+        // streamed batch must fit both the array limit and the host-byte cap.
+        int streamed = SimilarityMatrixBuilder.compactBatchTreeCount(
+            100_000, 1_000, 4_096, 12, Integer.MAX_VALUE - 8L, 4L << 30);
+        if (streamed != 19_072) {
+            throw new AssertionError("100k compact batch size changed: " + streamed);
+        }
+        long sparseCells = (long)streamed * 12 * 4_096;
+        long flatBytes = (long)streamed
+            * (30L * 4_096 + 2L * 12 * 4_096 + 4L * 1_000 + 8L);
+        if (sparseCells > Integer.MAX_VALUE - 8L || flatBytes > (4L << 30)) {
+            throw new AssertionError("streamed compact batch exceeds a safety bound");
+        }
+        long nextFlatBytes = (long)(streamed + 1)
+            * (30L * 4_096 + 2L * 12 * 4_096 + 4L * 1_000 + 8L);
+        if (nextFlatBytes <= (4L << 30)) {
+            throw new AssertionError("streamed compact batch is smaller than necessary");
+        }
+
+        // Small fitting inputs retain one batch, and artificial tiny limits
+        // exercise the exact per-array planner boundary without large arrays.
+        if (SimilarityMatrixBuilder.compactBatchTreeCount(
+                7, 10, 16, 4, 1_000, 1_000_000) != 7) {
+            throw new AssertionError("fitting compact input was unnecessarily split");
+        }
+        if (SimilarityMatrixBuilder.compactBatchTreeCount(
+                100, 10, 16, 4, 1_000, 1_000_000) != 15) {
+            throw new AssertionError("sparse-array boundary was not enforced exactly");
+        }
         System.out.println("Packed matrix 46,340/46,341/50,000 boundaries: PASS");
     }
 }

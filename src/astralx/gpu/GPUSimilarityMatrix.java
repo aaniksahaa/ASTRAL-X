@@ -78,8 +78,8 @@ public class GPUSimilarityMatrix {
      * @param treeVramCapMiB    maximum tree-batch data allocation in MiB
      * @param progressInterval  seconds between progress updates
      * @param progressMaxSteps  max progress prints (0 = time-interval mode)
-     * @param numSumOut         pre-zeroed [n × n] — native fills numerator sums
-     * @param denSumOut         pre-zeroed [n × n] — native fills denominator sums
+     * @param numSumOut         [n × n] accumulator — native adds numerator sums
+     * @param denSumOut         [n × n] accumulator — native adds denominator sums
      * @param packedNumOut      segmented packed upper triangle, or null for dense mode
      * @param packedDenOut      segmented packed upper triangle, or null for dense mode
      */
