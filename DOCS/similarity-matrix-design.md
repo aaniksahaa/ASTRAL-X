@@ -85,12 +85,15 @@ Same architecture as the distance matrix kernel:
   pair across many small tree batches; the established dense path is unchanged.
 - **Upper-triangle tiling**: only tiles with a0 ≤ b0 are processed; dense results
   are mirrored, while large-N results are written once to packed symmetric storage.
-- **Bounded host flattening**: if every tour fits the compact 16-bit RMQ but the
-  aggregate compact table would exceed Java's single-array element limit, trees
-  are flattened and submitted in original-order host batches of at most 4 GiB.
-  Each batch adds to the same unnormalized numerator and denominator, and the
-  matrix is normalized once after the final batch. Inputs whose compact arrays
-  already fit retain the established one-shot path.
+- **Bounded host flattening**: when the established wide blocked layout itself
+  would exceed Java's single-array element limit, its trees are flattened and
+  submitted in original-order host batches of at most 1 GiB. Each batch adds to
+  the same unnormalized numerator and denominator, and the matrix is normalized
+  once after the final batch. Inputs whose compact or wide arrays already fit
+  retain their established one-shot paths. After the completion/consensus phases
+  have consumed a streamed matrix, its reference is dropped and one full-GC hint
+  is issued before the allocation-heavy tripartition scan; this cleanup is not
+  applied to one-shot runs.
 
 For each tile:
 1. Zero `numTile[B×B]` and `denTile[B×B]` on GPU
@@ -250,11 +253,11 @@ stores only the symmetric upper triangle in 512-MiB Java segments and uses
 9.31 GiB per accumulator, rather than 2,500,000,000 cells per dense array.
 Precision remains `double`; no pair is sampled or omitted.
 
-Both representations remain O(n²) — unavoidable for this output. Compact
-preprocessing is O(k·n·log n) in total work. Its peak host storage is also
-O(k·n·log n) while the flattened arrays fit; beyond Java's single-array limit,
-bounded original-order streaming reduces the flattened/preprocessed-tree peak
-to O(Δ_host·n·log n) without changing the accumulated values.
+Both representations remain O(n²) — unavoidable for this output. Preprocessing
+is O(k·n·log n) in total work. Its peak host storage is also O(k·n·log n) while
+the selected flattened arrays fit; beyond Java's single-array limit, bounded
+original-order wide streaming reduces the preprocessing peak to
+O(Δ_host·n·log n) without changing the accumulated values.
 
 ---
 

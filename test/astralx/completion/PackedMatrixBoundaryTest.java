@@ -63,35 +63,43 @@ public final class PackedMatrixBoundaryTest {
             throw new AssertionError("explicit GPU batching ceiling was not respected");
         }
 
-        // The reported 100k × 1000-tree case has E=4096 and LOG=12.  Its
-        // compact sparse table cannot be one Java array, but every planned
-        // streamed batch must fit both the array limit and the host-byte cap.
-        int streamed = SimilarityMatrixBuilder.compactBatchTreeCount(
-            100_000, 1_000, 4_096, 12, Integer.MAX_VALUE - 8L, 4L << 30);
-        if (streamed != 19_072) {
-            throw new AssertionError("100k compact batch size changed: " + streamed);
+        // For the reported 1,000-taxon trees E=2,998. The former 75k case must
+        // retain its established one-shot wide path, while 100k must stream
+        // because its wide micro-RMQ array would exceed Java's element limit.
+        long arrayLimit = Integer.MAX_VALUE - 8L;
+        if (!SimilarityMatrixBuilder.wideLayoutFits(75_000, 1_000, 2_998, arrayLimit)) {
+            throw new AssertionError("75k wide layout was unnecessarily moved off one-shot mode");
         }
-        long sparseCells = (long)streamed * 12 * 4_096;
+        if (SimilarityMatrixBuilder.wideLayoutFits(100_000, 1_000, 2_998, arrayLimit)) {
+            throw new AssertionError("100k overflowing wide layout was accepted as one-shot");
+        }
+
+        int streamed = SimilarityMatrixBuilder.wideBatchTreeCount(
+            100_000, 1_000, 2_998, arrayLimit, 1L << 30);
+        if (streamed != 7_718) {
+            throw new AssertionError("100k wide batch size changed: " + streamed);
+        }
+        long microCells = (long)streamed * 9 * 2_998;
         long flatBytes = (long)streamed
-            * (30L * 4_096 + 2L * 12 * 4_096 + 4L * 1_000 + 8L);
-        if (sparseCells > Integer.MAX_VALUE - 8L || flatBytes > (4L << 30)) {
-            throw new AssertionError("streamed compact batch exceeds a safety bound");
+            * (36L * 2_998 + 9L * 2_998 + 4L * 4 * 12 + 4L * 1_000 + 8L);
+        if (microCells > arrayLimit || flatBytes > (1L << 30)) {
+            throw new AssertionError("streamed wide batch exceeds a safety bound");
         }
         long nextFlatBytes = (long)(streamed + 1)
-            * (30L * 4_096 + 2L * 12 * 4_096 + 4L * 1_000 + 8L);
-        if (nextFlatBytes <= (4L << 30)) {
-            throw new AssertionError("streamed compact batch is smaller than necessary");
+            * (36L * 2_998 + 9L * 2_998 + 4L * 4 * 12 + 4L * 1_000 + 8L);
+        if (nextFlatBytes <= (1L << 30)) {
+            throw new AssertionError("streamed wide batch is smaller than necessary");
         }
 
         // Small fitting inputs retain one batch, and artificial tiny limits
         // exercise the exact per-array planner boundary without large arrays.
-        if (SimilarityMatrixBuilder.compactBatchTreeCount(
-                7, 10, 16, 4, 1_000, 1_000_000) != 7) {
-            throw new AssertionError("fitting compact input was unnecessarily split");
+        if (SimilarityMatrixBuilder.wideBatchTreeCount(
+                7, 10, 16, 2_000, 1_000_000) != 7) {
+            throw new AssertionError("fitting wide input was unnecessarily split");
         }
-        if (SimilarityMatrixBuilder.compactBatchTreeCount(
-                100, 10, 16, 4, 1_000, 1_000_000) != 15) {
-            throw new AssertionError("sparse-array boundary was not enforced exactly");
+        if (SimilarityMatrixBuilder.wideBatchTreeCount(
+                100, 10, 16, 1_000, 1_000_000) != 6) {
+            throw new AssertionError("wide host-byte boundary was not enforced exactly");
         }
         System.out.println("Packed matrix 46,340/46,341/50,000 boundaries: PASS");
     }

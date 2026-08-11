@@ -44,6 +44,8 @@ public class SimilarityMatrix {
 
     private SegmentedDoubleArray packedNum;
     private SegmentedDoubleArray packedDen;
+    /** True only when similarity preprocessing crossed the wide Java-array boundary. */
+    private boolean streamedHostBatches;
 
     public SimilarityMatrix(int n) {
         long cellsLong = (long)n * n;
@@ -110,6 +112,9 @@ public class SimilarityMatrix {
     }
 
     public boolean isPacked() { return packed; }
+
+    void markStreamedHostBatches() { streamedHostBatches = true; }
+    public boolean usedStreamedHostBatches() { return streamedHostBatches; }
 
     static long triangleCellCount(int n) {
         return (long)n * (n + 1L) / 2L;

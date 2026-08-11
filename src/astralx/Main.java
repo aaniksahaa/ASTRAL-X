@@ -314,6 +314,29 @@ public class Main {
                 }
             }
 
+            // Overflow-streamed similarity preprocessing uses large, short-lived
+            // Java arrays.  Nothing after Phase 3.5 consumes the matrix, so drop
+            // its final reference and request one collection before Phase 4's
+            // allocation-heavy candidate scan.  This is deliberately gated to
+            // the 100k-class overflow path: established one-shot runs receive no
+            // extra full-GC pause. The JVM may ignore the hint when explicit GC
+            // is disabled, without affecting correctness.
+            boolean reclaimStreamedSimilarity = similarityMatrix != null
+                && similarityMatrix.usedStreamedHostBatches();
+            // The matrix has no consumers after Phase 3.5. Always end its
+            // lifetime here; only overflow-streamed runs pay for an immediate GC.
+            similarityMatrix = null;
+            if (reclaimStreamedSimilarity) {
+                long heapBefore = Runtime.getRuntime().totalMemory()
+                    - Runtime.getRuntime().freeMemory();
+                System.gc();
+                long heapAfter = Runtime.getRuntime().totalMemory()
+                    - Runtime.getRuntime().freeMemory();
+                Logging.info("Released streamed similarity host buffers before Phase 4: "
+                        + "heap %d MiB -> %d MiB",
+                    heapBefore >> 20, heapAfter >> 20);
+            }
+
             // ── Phase 4: Gene-tree tripartition extraction (from ORIGINAL trees) ──
             // Uses originalTrees so tripartitions reflect actual gene-tree signal.
             long t4 = PhaseLogger.begin("Phase 4  Tripartition extraction", false);
