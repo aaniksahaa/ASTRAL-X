@@ -3,25 +3,28 @@ package astralx.tree;
 import astralx.Logging;
 import astralx.taxon.TaxonRegistry;
 import astralx.util.ProgressBar;
+import astralx.util.Threading;
 
 import java.io.*;
 import java.util.*;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * Newick parser for binary gene trees — supports both rooted and unrooted input.
+ * Newick parser for rooted or unrooted gene trees with optional native polytomies.
  *
  * Two-pass design:
  *   Pass 1  -- collectTaxonNames(): scan every Newick string, register all names.
  *   Pass 2  -- parseNewick(): build Tree objects with postorder arrays + node ranges.
  *
  * Parsing is intentionally lenient: any number of children is allowed during the
- * stack-based parse phase.  A separate validation+rooting step then checks:
+ * stack-based parse phase.  The conversion step then applies the selected input
+ * policy and roots the in-memory representation:
  *
  *   Root node with 2 children → already a rooted binary tree, keep as-is.
  *   Root node with 3 children → unrooted binary tree; arbitrarily rooted here
  *                                (ASTRAL is rooting-agnostic, so any choice is fine).
- *   Any internal node with exactly 2 children → valid binary node.
- *   Any other arity → polytomy error (not yet supported).
+ *   Default                            → deterministic first-pair binary refinement.
+ *   --keep-polytomy internal degree≥3 → native polytomous node.
  *
  * After parsing every node has a half-open range [rangeStart, rangeEnd) that indexes
  * into the tree's postorderArray (left-to-right leaf ordering).
@@ -34,6 +37,18 @@ public class TreeParser {
 
     public static List<Tree> parseGeneTrees(String inputFile,
                                              TaxonRegistry registry) throws IOException {
+        return parseGeneTrees(inputFile, registry, false);
+    }
+
+    /**
+     * Parse gene trees and, by default, apply the same deterministic first-pair
+     * binary refinement available in {@code clean.py --deterministic}.  Passing
+     * {@code keepPolytomy=true} retains native multifurcations for downstream
+     * unresolved-quartet scoring.
+     */
+    public static List<Tree> parseGeneTrees(String inputFile,
+                                             TaxonRegistry registry,
+                                             boolean keepPolytomy) throws IOException {
         long t0 = System.nanoTime();
 
         // Read all non-empty lines
@@ -53,26 +68,56 @@ public class TreeParser {
         int n = registry.size();
         Logging.info("Registered %d unique taxa", n);
 
-        // Pass 2 – parse each tree.  rootingCounts[0] = #trees rooted from a 3-furcation
-        // (unrooted binary), [1] = #trees with a ≥4-furcation polytomy at the root,
-        // and [2] = total polytomous nodes (used to tag each Tree without another scan).
-        // These are tallied (not logged per-tree — that floods on large inputs) and
-        // summarized once below.
-        List<Tree> trees = new ArrayList<>(lines.size());
-        int[] rootingCounts = {0, 0, 0};
+        // Pass 2 is independent after the registry is locked.  In normal CLI runs
+        // Threading is already initialized, so parsing + optional refinement uses
+        // the configured worker pool while preserving input order in parsed[].
+        Tree[] parsed = new Tree[lines.size()];
+        int[][] perTreeCounts = new int[lines.size()][6];
         ProgressBar parseBar = new ProgressBar("Parsing trees", lines.size());
-        for (int i = 0; i < lines.size(); i++) {
-            trees.add(parseNewick(lines.get(i), i, registry, rootingCounts));
-            parseBar.update(i + 1);
+        AtomicInteger completed = new AtomicInteger(0);
+        if (lines.size() > 1 && Threading.isStarted() && Threading.getNumThreads() > 1) {
+            Threading.processRangeParallel(lines.size(), i -> {
+                parsed[i] = parseNewick(lines.get(i), i, registry, perTreeCounts[i], keepPolytomy);
+                parseBar.update(completed.incrementAndGet());
+            });
+        } else {
+            for (int i = 0; i < lines.size(); i++) {
+                parsed[i] = parseNewick(lines.get(i), i, registry, perTreeCounts[i], keepPolytomy);
+                parseBar.update(i + 1);
+            }
         }
         parseBar.done();
+        List<Tree> trees = new ArrayList<>(Arrays.asList(parsed));
+
+        int[] totals = new int[6];
+        int treesWithPolytomies = 0;
+        int treesRefined = 0;
+        for (int[] counts : perTreeCounts) {
+            for (int j = 0; j < totals.length; j++) totals[j] += counts[j];
+            if (counts[4] > 0) treesWithPolytomies++;
+            if (counts[3] > 0) treesRefined++;
+        }
 
         long ms = (System.nanoTime() - t0) / 1_000_000;
         Logging.info("Parsed %d gene trees in %d ms", trees.size(), ms);
-        if (rootingCounts[0] > 0 || rootingCounts[1] > 0) {
+        if (keepPolytomy && (totals[0] > 0 || totals[1] > 0)) {
             Logging.info("Rooted unrooted input at the root: %d tree(s) with a 3-furcation "
                 + "(unrooted binary), %d tree(s) with a ≥4-furcation polytomy — rooted arbitrarily "
-                + "(ASTRAL is rooting-agnostic).", rootingCounts[0], rootingCounts[1]);
+                + "(ASTRAL is rooting-agnostic).", totals[0], totals[1]);
+        }
+        if (keepPolytomy) {
+            Logging.info("Input polytomies: keeping %d node(s) across %d tree(s); "
+                + "native downstream handling enabled", totals[4], treesWithPolytomies);
+        } else if (totals[3] > 0) {
+            Logging.info("Input binary refinement: detected %d polytomy node(s); resolved "
+                + "%d multifurcation(s) across %d tree(s) by deterministic first-pair pairing "
+                + "(%s; includes %d unrooted 3-way root(s))",
+                totals[4], totals[3], treesRefined,
+                lines.size() > 1 && Threading.isStarted() && Threading.getNumThreads() > 1
+                    ? "parallel" : "serial",
+                totals[5]);
+        } else {
+            Logging.info("Input binary refinement: no multifurcations detected");
         }
 
         // Per-tree debug log -- cap at 5 trees to avoid flooding on large inputs
@@ -117,8 +162,8 @@ public class TreeParser {
             throw new IllegalArgumentException("Species tree file must contain exactly one Newick tree: " + inputFile);
         }
 
-        int[] rootingCounts = {0, 0, 0};
-        Tree tree = parseNewick(lines.get(0), 0, registry, rootingCounts);
+        int[] rootingCounts = new int[6];
+        Tree tree = parseNewick(lines.get(0), 0, registry, rootingCounts, true);
         validateCompleteTaxonSet(tree, registry, inputFile);
         Logging.info("Parsed supplied species tree: %d leaves", tree.leafCount);
         if (rootingCounts[0] > 0 || rootingCounts[1] > 0) {
@@ -187,7 +232,8 @@ public class TreeParser {
     /** Sentinel object pushed onto the stack to mark an open parenthesis. */
     private static final Object SENTINEL = new Object();
 
-    private static Tree parseNewick(String s, int treeIdx, TaxonRegistry reg, int[] rootingCounts) {
+    private static Tree parseNewick(String s, int treeIdx, TaxonRegistry reg,
+                                    int[] rootingCounts, boolean keepPolytomy) {
         int n = s.length(), totalTaxa = reg.size();
         Deque<Object> stack = new ArrayDeque<>();   // contains RawNode or SENTINEL
         int i = 0;
@@ -251,7 +297,8 @@ public class TreeParser {
 
         // Validate arity and root unrooted trees; convert RawNode → TreeNode
         int polytomyCountBefore = rootingCounts[2];
-        TreeNode root = validateAndConvert(rawRoot, treeIdx, true, rootingCounts);
+        TreeNode root = validateAndConvert(
+            rawRoot, treeIdx, true, rootingCounts, keepPolytomy);
         boolean hasPolytomy = rootingCounts[2] != polytomyCountBefore;
 
         // Assign ranges and build postorderArray in one left-to-right DFS
@@ -270,6 +317,21 @@ public class TreeParser {
             hasPolytomy);
     }
 
+    /** Exact child-order semantics of one clean.py deterministic first-pair refinement. */
+    private static void resolveNodeFirstPair(RawNode node) {
+        ArrayDeque<RawNode> work = new ArrayDeque<>(node.children);
+        while (work.size() > 2) {
+            RawNode first = work.removeFirst();
+            RawNode second = work.removeFirst();
+            RawNode joined = new RawNode();
+            joined.children.add(first);
+            joined.children.add(second);
+            work.addLast(joined);
+        }
+        node.children.clear();
+        node.children.addAll(work);
+    }
+
     /**
      * Recursively validates a RawNode tree and converts it to a TreeNode (binary or
      * polytomous — see DOCS/polytomy-design.md §3.2):
@@ -286,7 +348,7 @@ public class TreeParser {
      *   leaf                      → leaf node.
      */
     private static TreeNode validateAndConvert(RawNode raw, int treeIdx, boolean isRoot,
-                                               int[] rootingCounts) {
+                                               int[] rootingCounts, boolean keepPolytomy) {
         if (raw.isLeaf()) {
             TreeNode leaf = new TreeNode();
             leaf.taxonId = raw.taxonId;
@@ -294,11 +356,20 @@ public class TreeParser {
         }
 
         int nc = raw.children.size();
+        if (nc > (isRoot ? 3 : 2)) rootingCounts[4]++;
+        if (isRoot && nc == 3) rootingCounts[5]++;
+        if (!keepPolytomy && nc > 2) {
+            rootingCounts[3]++;
+            resolveNodeFirstPair(raw);
+            nc = 2;
+        }
 
         if (nc == 2) {
             TreeNode node = new TreeNode();
-            node.left  = validateAndConvert(raw.children.get(0), treeIdx, false, rootingCounts);
-            node.right = validateAndConvert(raw.children.get(1), treeIdx, false, rootingCounts);
+            node.left  = validateAndConvert(
+                raw.children.get(0), treeIdx, false, rootingCounts, keepPolytomy);
+            node.right = validateAndConvert(
+                raw.children.get(1), treeIdx, false, rootingCounts, keepPolytomy);
             node.left.parent  = node;
             node.right.parent = node;
             return node;
@@ -309,9 +380,12 @@ public class TreeParser {
             // into a new binary right node.  Rooting-agnostic ⇒ any choice is fine.
             rootingCounts[0]++;   // tallied; summarized once in parseGeneTrees (no per-tree log)
 
-            TreeNode c0 = validateAndConvert(raw.children.get(0), treeIdx, false, rootingCounts);
-            TreeNode c1 = validateAndConvert(raw.children.get(1), treeIdx, false, rootingCounts);
-            TreeNode c2 = validateAndConvert(raw.children.get(2), treeIdx, false, rootingCounts);
+            TreeNode c0 = validateAndConvert(
+                raw.children.get(0), treeIdx, false, rootingCounts, keepPolytomy);
+            TreeNode c1 = validateAndConvert(
+                raw.children.get(1), treeIdx, false, rootingCounts, keepPolytomy);
+            TreeNode c2 = validateAndConvert(
+                raw.children.get(2), treeIdx, false, rootingCounts, keepPolytomy);
 
             TreeNode inner = new TreeNode();
             inner.left  = c1;
@@ -333,12 +407,14 @@ public class TreeParser {
             rootingCounts[1]++;   // tallied; summarized once in parseGeneTrees (no per-tree log)
             rootingCounts[2]++;
 
-            TreeNode c0 = validateAndConvert(raw.children.get(0), treeIdx, false, rootingCounts);
+            TreeNode c0 = validateAndConvert(
+                raw.children.get(0), treeIdx, false, rootingCounts, keepPolytomy);
 
             TreeNode inner = new TreeNode();
             inner.children = new TreeNode[nc - 1];
             for (int j = 1; j < nc; j++) {
-                TreeNode cj = validateAndConvert(raw.children.get(j), treeIdx, false, rootingCounts);
+                TreeNode cj = validateAndConvert(
+                    raw.children.get(j), treeIdx, false, rootingCounts, keepPolytomy);
                 inner.children[j - 1] = cj;
                 cj.parent = inner;
             }
@@ -358,7 +434,8 @@ public class TreeParser {
             TreeNode node = new TreeNode();
             node.children = new TreeNode[nc];
             for (int j = 0; j < nc; j++) {
-                TreeNode cj = validateAndConvert(raw.children.get(j), treeIdx, false, rootingCounts);
+                TreeNode cj = validateAndConvert(
+                    raw.children.get(j), treeIdx, false, rootingCounts, keepPolytomy);
                 node.children[j] = cj;
                 cj.parent = node;
             }

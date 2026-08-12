@@ -90,6 +90,11 @@ run_tc () {
         cmd=(java -Djava.library.path="$NATIVE_DIR" -cp "$BUILD_DIR" astralx.Main
              $COMPUTE_MODE --search-mode full "${EXTRA_OPTS[@]}")
     fi
+    # The independent oracle scores unresolved quartets. Keep native polytomies
+    # for these fixtures; default CLI refinement is covered separately.
+    if [[ "$name" == *polytomy* ]]; then
+        cmd+=(--keep-polytomy)
+    fi
     local astralx_out actual_score astralx_tree
     if ! astralx_out="$("${cmd[@]}" -i "$input" 2>&1)"; then
         printf "${RED}FAIL${NC}  ASTRAL-X crashed\n"

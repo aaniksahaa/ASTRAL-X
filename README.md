@@ -205,6 +205,19 @@ Moving from S1 to S3 progressively broadens the candidate topology set. A
 larger preset can increase runtime and memory substantially and is not
 guaranteed to change the inferred tree.
 
+By default, input polytomies are detected during parsing and refined to binary
+trees with the deterministic first-pair algorithm used by
+`clean.py --deterministic`. This preprocessing is parallel when multiple CPU
+threads are configured and is reproducible regardless of worker scheduling.
+Use `--keep-polytomy` to retain unresolved input nodes and activate ASTRAL-X's
+native polytomy-aware partition and quartet-weight paths instead. An unrooted
+three-way Newick root is normalized during default refinement but does not
+represent a biological polytomy; its unrooted topology is unchanged.
+Because binary refinement turns unresolved input relationships into arbitrary
+resolved quartets, it can change quartet scores and inferred trees. Use
+`--keep-polytomy` when unresolved relationships must remain scientifically
+unresolved rather than matching the existing `clean.py` preprocessing workflow.
+
 Most analyses only need one search-space preset. Individual search controls are
 also available for specialized workflows; `astralx --help` lists them. When
 options are combined, they are applied from left to right. A later individual

@@ -70,6 +70,8 @@ Optional:
   --seeds, -m        Number of hash seeds
   --rooted           Treat input as rooted
   --unrooted         Treat input as unrooted
+  --keep-polytomy    Keep input polytomies for native unresolved-quartet scoring
+                     (default: deterministic first-pair binary refinement)
   --no-gpu-batch              Disable GPU batching
   --gpu-batch-size            GPU batch size (manual)
   --gpu-batches               Number of GPU batches (manual)
@@ -156,7 +158,7 @@ while [[ $# -gt 0 ]]; do
       PROGRAM_ARGS+=("--stepb-restriction" "dlogd")
       shift
       ;;
-    --rooted|--unrooted|--anchor-outgroup|--anchor|--no-anchor-outgroup|--no-anchor|--no-prune-search-space|--no-prune-unreachable|--prune-search-space|--prune-unreachable|--no-gpu-batch|--consensus-experimental|--stepb-quadratic-nn-balls|--stepb-random-leftover-resolution|--stepb-process-large-polytomies|--resolve-input-gene-tree-polytomies|--verify-parse|--verify-hash|--verify-clusters|--verify-partitions|--verify-dp|--verify-weights|--verify-distance-matrix|--verify-similarity-matrix|--verify-upgma|--verify-greedy-consensus|--autocomplete-incomplete-gene-trees|-v|-vv|-vvv|-q|--quiet)
+    --rooted|--unrooted|--keep-polytomy|--keep-polytomies|--anchor-outgroup|--anchor|--no-anchor-outgroup|--no-anchor|--no-prune-search-space|--no-prune-unreachable|--prune-search-space|--prune-unreachable|--no-gpu-batch|--consensus-experimental|--stepb-quadratic-nn-balls|--stepb-random-leftover-resolution|--stepb-process-large-polytomies|--resolve-input-gene-tree-polytomies|--verify-parse|--verify-hash|--verify-clusters|--verify-partitions|--verify-dp|--verify-weights|--verify-distance-matrix|--verify-similarity-matrix|--verify-upgma|--verify-greedy-consensus|--autocomplete-incomplete-gene-trees|-v|-vv|-vvv|-q|--quiet)
       PROGRAM_ARGS+=("$1")
       shift
       ;;

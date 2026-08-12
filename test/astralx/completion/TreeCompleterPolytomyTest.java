@@ -22,7 +22,7 @@ public final class TreeCompleterPolytomyTest {
         Threading.start(Math.min(4, Runtime.getRuntime().availableProcessors()));
         try {
             TaxonRegistry registry = new TaxonRegistry();
-            List<Tree> trees = TreeParser.parseGeneTrees(args[0], registry);
+            List<Tree> trees = TreeParser.parseGeneTrees(args[0], registry, true);
             for (Tree tree : trees) {
                 check(tree.hasPolytomy, "input tree " + tree.treeIndex + " lost its polytomy marker");
                 check(!tree.isComplete, "fixture tree " + tree.treeIndex + " must be incomplete");

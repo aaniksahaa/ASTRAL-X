@@ -86,20 +86,32 @@ public class Phase1Verifier {
             out.printf("%sleaf %s : [%d,%d)%n",
                 indent, reg.getName(n.taxonId), n.rangeStart, n.rangeEnd);
         } else {
-            out.printf("%sinternal [%d,%d)%n", indent, n.rangeStart, n.rangeEnd);
-            printNodeRanges(n.left,  indent + "  ", out, reg);
-            printNodeRanges(n.right, indent + "  ", out, reg);
+            out.printf("%sinternal%s [%d,%d)%n", indent,
+                n.isPolytomous() ? " degree=" + n.children.length : "",
+                n.rangeStart, n.rangeEnd);
+            if (n.isPolytomous()) {
+                for (TreeNode child : n.children) {
+                    printNodeRanges(child, indent + "  ", out, reg);
+                }
+            } else {
+                printNodeRanges(n.left,  indent + "  ", out, reg);
+                printNodeRanges(n.right, indent + "  ", out, reg);
+            }
         }
     }
 
     private static boolean checkRanges(TreeNode n, PrintStream out) {
         if (n.isLeaf()) return true;
         boolean ok = true;
-        // Children must be contiguous and together cover parent
-        if (n.left.rangeEnd != n.right.rangeStart) {
-            out.printf("  FAIL: children not contiguous: left.rangeEnd=%d != right.rangeStart=%d%n",
-                n.left.rangeEnd, n.right.rangeStart);
-            ok = false;
+        TreeNode[] children = n.isPolytomous()
+            ? n.children : new TreeNode[]{n.left, n.right};
+        // Children must be contiguous and together cover parent.
+        for (int i = 1; i < children.length; i++) {
+            if (children[i - 1].rangeEnd != children[i].rangeStart) {
+                out.printf("  FAIL: children %d/%d not contiguous: %d != %d%n",
+                    i - 1, i, children[i - 1].rangeEnd, children[i].rangeStart);
+                ok = false;
+            }
         }
         if (n.rangeStart != n.left.rangeStart) {
             out.printf("  FAIL: node.rangeStart=%d != left.rangeStart=%d%n",
@@ -111,7 +123,8 @@ public class Phase1Verifier {
                 n.rangeEnd, n.right.rangeEnd);
             ok = false;
         }
-        return checkRanges(n.left, out) && checkRanges(n.right, out) && ok;
+        for (TreeNode child : children) ok = checkRanges(child, out) && ok;
+        return ok;
     }
 
     private static String taxonNames(int[] ids, TaxonRegistry reg) {

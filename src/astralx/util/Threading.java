@@ -18,10 +18,12 @@ public class Threading {
             executor.shutdown();
             try { executor.awaitTermination(60, TimeUnit.SECONDS); }
             catch (InterruptedException e) { executor.shutdownNow(); Thread.currentThread().interrupt(); }
+            finally { executor = null; numThreads = 0; }
         }
     }
 
     public static int getNumThreads() { return numThreads; }
+    public static boolean isStarted() { return executor != null; }
     public static Future<?> submit(Runnable r) { return executor.submit(r); }
     public static <T> Future<T> submit(Callable<T> c) { return executor.submit(c); }
 

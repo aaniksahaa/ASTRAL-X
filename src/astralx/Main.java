@@ -78,7 +78,8 @@ public class Main {
             // ── Phase 1: Parse gene trees ─────────────────────────────────────
             long t1 = PhaseLogger.begin("Phase 1  Parse gene trees", false);
             TaxonRegistry registry = new TaxonRegistry();
-            List<Tree> trees = TreeParser.parseGeneTrees(cfg.getInputFile(), registry);
+            List<Tree> trees = TreeParser.parseGeneTrees(
+                cfg.getInputFile(), registry, cfg.isKeepPolytomy());
             PhaseLogger.end("Phase 1  Parse gene trees", t1, false);
 
             if (cfg.isVerifyParse()) {
@@ -524,6 +525,7 @@ public class Main {
                 case "-m","--seeds"    -> { if (++i>=args.length) return false; cfg.setNumHashSeeds(Integer.parseInt(args[i])); }
                 case "--rooted"        -> cfg.setTreatAsUnrooted(false);
                 case "--unrooted"      -> cfg.setTreatAsUnrooted(true);
+                case "--keep-polytomy", "--keep-polytomies" -> cfg.setKeepPolytomy(true);
                 case "--no-gpu-batch"    -> cfg.setGpuBatch(false);
                 case "--gpu-batch-size"  -> { if (++i>=args.length) return false; cfg.setGpuBatchSize(Integer.parseInt(args[i])); }
                 case "--gpu-batches"     -> { if (++i>=args.length) return false; cfg.setGpuNumBatches(Integer.parseInt(args[i])); }
@@ -810,6 +812,8 @@ public class Main {
               --anchor-taxon ID                 Anchor taxon ID (default: 0)
               --no-prune-search-space           Disable reachability pruning
               --rooted | --unrooted             Input treatment (default: unrooted)
+              --keep-polytomy                    Keep input polytomies for native scoring
+                                                 (default: deterministic binary refinement)
               -m, --seeds N                     Number of cluster-hash seeds
 
             Incomplete trees and enrichment:

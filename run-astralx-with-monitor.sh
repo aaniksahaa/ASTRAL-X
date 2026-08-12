@@ -46,6 +46,7 @@ Optional:
   --search-space S1..S3  Search-space preset
   --intersection-method I1..I4
                          Intersection method preset
+  --keep-polytomy        Keep input polytomies for native unresolved-quartet scoring
   --log-file FILE        Save run messages to FILE (progress remains terminal-only)
   --no-time-monitor     Disable time monitoring
   --no-gpu-monitor      Disable GPU monitoring
@@ -72,7 +73,7 @@ while [[ $# -gt 0 ]]; do
     --no-notify|-nn) NO_NOTIFY=true; shift ;;
     --debug) DEBUG=1; shift ;;
     --help|-h) print_help; exit 0 ;;
-    --auto|--cpu|--gpu|--gpu-strict|--rooted|--unrooted|--anchor-outgroup|--anchor|--no-anchor-outgroup|--no-anchor|--no-prune-search-space|--no-gpu-batch|--consensus-experimental|--stepb-fast-restriction|--stepb-quadratic-nn-balls|--stepb-random-leftover-resolution|--stepb-process-large-polytomies|--resolve-input-gene-tree-polytomies|--verify-parse|--verify-hash|--verify-clusters|--verify-partitions|--verify-dp|--verify-weights|--verify-distance-matrix|--verify-similarity-matrix|--verify-upgma|--verify-greedy-consensus|--autocomplete-incomplete-gene-trees|-v|-vv|-vvv|-q|--quiet)
+    --auto|--cpu|--gpu|--gpu-strict|--rooted|--unrooted|--keep-polytomy|--keep-polytomies|--anchor-outgroup|--anchor|--no-anchor-outgroup|--no-anchor|--no-prune-search-space|--no-gpu-batch|--consensus-experimental|--stepb-fast-restriction|--stepb-quadratic-nn-balls|--stepb-random-leftover-resolution|--stepb-process-large-polytomies|--resolve-input-gene-tree-polytomies|--verify-parse|--verify-hash|--verify-clusters|--verify-partitions|--verify-dp|--verify-weights|--verify-distance-matrix|--verify-similarity-matrix|--verify-upgma|--verify-greedy-consensus|--autocomplete-incomplete-gene-trees|-v|-vv|-vvv|-q|--quiet)
       ASTRALX_ARGS+=("$1")
       shift
       ;;

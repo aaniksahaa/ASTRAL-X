@@ -161,6 +161,9 @@ public class Banner {
         out.println("    " + row("CPU threads",    c(available == using ? WHT : YLW, String.valueOf(using))
                                                   + c(DIM, "  (" + available + " available)")));
         out.println("    " + row("Tree treatment", c(WHT, cfg.getTreatAsUnrooted() ? "unrooted" : "rooted")));
+        out.println("    " + row("Input polytomies", c(WHT, cfg.isKeepPolytomy()
+            ? "keep  (native unresolved-quartet scoring)"
+            : "resolve  (deterministic first-pair refinement)")));
         out.println();
 
         // ── Search ─────────────────────────────────────────────────────────

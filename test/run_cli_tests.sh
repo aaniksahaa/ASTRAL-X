@@ -19,6 +19,7 @@ javac -cp "${ROOT}/build" -d "$TEST_CLASSES" \
   "${ROOT}/test/CliPresetsTest.java" \
   "${ROOT}/test/PackedSimilarityParityTest.java" \
   "${ROOT}/test/PackedPreflightTest.java" \
+  "${ROOT}/test/PolytomyPreprocessingTest.java" \
   "${ROOT}/test/astralx/completion/PackedMatrixBoundaryTest.java" \
   "${ROOT}/test/astralx/completion/TreeCompleterPolytomyTest.java" \
   "${ROOT}/test/SimilarityArgminTest.java" \
@@ -26,17 +27,21 @@ javac -cp "${ROOT}/build" -d "$TEST_CLASSES" \
   "${ROOT}/test/WideSimilarityBoundaryTest.java"
 java -cp "${ROOT}/build:${TEST_CLASSES}" astralx.CliPresetsTest
 java -cp "${ROOT}/build:${TEST_CLASSES}" astralx.completion.PackedMatrixBoundaryTest
+java -cp "${ROOT}/build:${TEST_CLASSES}" PolytomyPreprocessingTest \
+  "${ROOT}/test/input/completion/incomplete_polytomy_7taxa.tre"
 java -cp "${ROOT}/build:${TEST_CLASSES}" astralx.completion.TreeCompleterPolytomyTest \
   "${ROOT}/test/input/completion/incomplete_polytomy_7taxa.tre"
 
 polytomy_completion_score() {
   java -cp "${ROOT}/build" astralx.Main --cpu -q \
     -i "${ROOT}/test/input/tc16_polytomy_incomplete.tre" \
-    --search-space "$1" --intersection-method I3 2>&1 |
+    --search-space "$1" --intersection-method I3 "${@:2}" 2>&1 |
     sed -n 's/.*Quartet score[[:space:]]*\([0-9][0-9]*\).*/\1/p'
 }
-[[ "$(polytomy_completion_score S2)" == "794" ]]
-[[ "$(polytomy_completion_score S3)" == "798" ]]
+[[ "$(polytomy_completion_score S2)" == "998" ]]
+[[ "$(polytomy_completion_score S3)" == "998" ]]
+[[ "$(polytomy_completion_score S2 --keep-polytomy)" == "794" ]]
+[[ "$(polytomy_completion_score S3 --keep-polytomy)" == "798" ]]
 
 java -Xmx1g -cp "${ROOT}/build:${TEST_CLASSES}" PackedPreflightTest
 java -cp "${ROOT}/build:${TEST_CLASSES}" PackedSimilarityParityTest \
@@ -61,6 +66,7 @@ HELP_TEXT="$(NO_COLOR=1 java -cp "${ROOT}/build" astralx.Main --help 2>&1)"
 [[ "$HELP_TEXT" == *"ASTRAL-X  v1.0.0"* ]]
 [[ "$HELP_TEXT" == *"Usage:"* ]]
 [[ "$HELP_TEXT" == *"--log-file FILE"* ]]
+[[ "$HELP_TEXT" == *"--keep-polytomy"* ]]
 [[ "$(NO_COLOR=1 java -cp "${ROOT}/build" astralx.Main -h 2>&1)" == "$HELP_TEXT" ]]
 
 run_score() {
