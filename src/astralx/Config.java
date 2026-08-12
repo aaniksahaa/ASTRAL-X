@@ -56,12 +56,20 @@ public class Config {
      */
     public enum LargeScoreType { INT128, DOUBLE }
 
+    /** Set operation used by the parser-backed taxa extraction mode. */
+    public enum TaxaSetMode { UNION, INTERSECTION }
+
     private static Config instance;
 
     private String inputFile;
     private String outputFile;
     private String logFile;
     private String scoreSpeciesTreeFile;
+    /** Optional score-only taxon allow-list (one taxon name per non-empty line). */
+    private String taxaFile;
+    /** Parser-backed utility mode: write taxa from the input tree file and exit. */
+    private boolean extractTaxa = false;
+    private TaxaSetMode taxaSetMode = TaxaSetMode.UNION;
     /** AUTO probes the bundled CUDA backend and falls back safely to CPU. */
     private ComputeMode computeMode = ComputeMode.AUTO;
     private ComputeMode requestedComputeMode = ComputeMode.AUTO;
@@ -225,6 +233,12 @@ public class Config {
     public String getScoreSpeciesTreeFile()      { return scoreSpeciesTreeFile; }
     public void setScoreSpeciesTreeFile(String f){ this.scoreSpeciesTreeFile = f; }
     public boolean isScoreOnly()       { return scoreSpeciesTreeFile != null; }
+    public String getTaxaFile()        { return taxaFile; }
+    public void setTaxaFile(String f)  { this.taxaFile = f; }
+    public boolean isExtractTaxa()     { return extractTaxa; }
+    public void setExtractTaxa(boolean v) { this.extractTaxa = v; }
+    public TaxaSetMode getTaxaSetMode() { return taxaSetMode; }
+    public void setTaxaSetMode(TaxaSetMode m) { this.taxaSetMode = m; }
     public ComputeMode getComputeMode()          { return computeMode; }
     public ComputeMode getRequestedComputeMode() { return requestedComputeMode; }
     public void setComputeMode(ComputeMode m) {

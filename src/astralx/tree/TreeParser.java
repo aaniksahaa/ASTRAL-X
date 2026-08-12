@@ -8,6 +8,7 @@ import astralx.util.Threading;
 import java.io.*;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Consumer;
 
 /**
  * Newick parser for rooted or unrooted gene trees with optional native polytomies.
@@ -174,6 +175,32 @@ public class TreeParser {
         return tree;
     }
 
+    /**
+     * Parse exactly one tree with its own registry, without requiring it to have
+     * the same taxon set as a previously parsed gene-tree collection.  This is
+     * used only by opt-in taxon-restricted scoring; the ordinary strict species-
+     * tree parser above remains unchanged.
+     */
+    public static StandaloneTree parseStandaloneTree(String inputFile) throws IOException {
+        List<String> lines = readNonEmptyLines(inputFile);
+        if (lines.isEmpty()) {
+            throw new IllegalArgumentException("Tree file is empty: " + inputFile);
+        }
+        if (lines.size() != 1) {
+            throw new IllegalArgumentException(
+                "Expected exactly one Newick tree: " + inputFile);
+        }
+
+        TaxonRegistry registry = new TaxonRegistry();
+        collectTaxonNames(lines.get(0), registry);
+        registry.lock();
+        int[] rootingCounts = new int[6];
+        Tree tree = parseNewick(lines.get(0), 0, registry, rootingCounts, true);
+        return new StandaloneTree(tree, registry);
+    }
+
+    public record StandaloneTree(Tree tree, TaxonRegistry registry) {}
+
     // -------------------------------------------------------------------------
     // Pass 1 – name collection
     // -------------------------------------------------------------------------
@@ -185,6 +212,15 @@ public class TreeParser {
      * This correctly handles both named taxa (strings) and integer-labelled taxa.
      */
     private static void collectTaxonNames(String s, TaxonRegistry reg) {
+        forEachTaxonName(s, reg::register);
+    }
+
+    /**
+     * Shared Newick leaf-token scanner.  Taxa extraction and coverage reporting
+     * deliberately use this exact scanner so their name semantics cannot drift
+     * from normal ASTRAL-X parsing.
+     */
+    static void forEachTaxonName(String s, Consumer<String> consumer) {
         int i = 0, n = s.length();
         // true if the most recent structural character was ')'
         boolean afterCloseParen = false;
@@ -205,10 +241,22 @@ public class TreeParser {
             while (i < n && !isDelim(s.charAt(i))) i++;
             String tok = s.substring(start, i).trim();
             if (!tok.isEmpty() && !afterCloseParen) {
-                reg.register(tok);
+                consumer.accept(tok);
             }
             afterCloseParen = false;
         }
+    }
+
+    static List<String> readNonEmptyLines(String inputFile) throws IOException {
+        List<String> lines = new ArrayList<>();
+        try (BufferedReader br = new BufferedReader(new FileReader(inputFile))) {
+            String line;
+            while ((line = br.readLine()) != null) {
+                line = line.trim();
+                if (!line.isEmpty()) lines.add(line);
+            }
+        }
+        return lines;
     }
 
     // -------------------------------------------------------------------------

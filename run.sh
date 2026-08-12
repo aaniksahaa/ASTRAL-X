@@ -52,6 +52,9 @@ Optional:
   --log-file FILE    Save run messages to FILE (progress remains terminal-only)
   --score-species-tree, --species-tree, --score, -c
                      Score the supplied species tree and exit
+  --taxa-file FILE   Score only the listed taxa (one name per line); requires --score
+  --extract-taxa     Extract input taxa and exit (union by default)
+  --taxa-set MODE    Taxa extraction mode: union | intersection
   --cpu              Force CPU mode
   --gpu              Force GPU mode
   --auto             Automatically select CUDA or CPU (default)
@@ -150,7 +153,7 @@ while [[ $# -gt 0 ]]; do
       PROGRAM_ARGS+=("$1" "$2")
       shift 2
       ;;
-    --search-space|--intersection-method|--im|--search-mode|-t|-T|--threads|--num-threads|-m|--seeds|--weight-intersection-method|--large-n-score-type|--large-score-type|--anchor-taxon|--gpu-batch-size|--gpu-batches|--gpu-vram-control-factor|--gpu-vram-occupancy-factor|--gpu-treewalk-vram-cap-mb|--gpu-progress-interval|--gpu-dp-state-space-construction-output-cap|--gpu-dp-state-space-progress-time-interval|--gpu-dp-state-space-progress-max-steps|--gpu-dist-tile-size|--gpu-sim-vram-cap-mb|--dump-clusters|--dump-completed-gene-trees|--completion-method|--stepb-restriction)
+    --search-space|--intersection-method|--im|--search-mode|-t|-T|--threads|--num-threads|-m|--seeds|--weight-intersection-method|--large-n-score-type|--large-score-type|--anchor-taxon|--gpu-batch-size|--gpu-batches|--gpu-vram-control-factor|--gpu-vram-occupancy-factor|--gpu-treewalk-vram-cap-mb|--gpu-progress-interval|--gpu-dp-state-space-construction-output-cap|--gpu-dp-state-space-progress-time-interval|--gpu-dp-state-space-progress-max-steps|--gpu-dist-tile-size|--gpu-sim-vram-cap-mb|--dump-clusters|--dump-completed-gene-trees|--completion-method|--stepb-restriction|--taxa-file|--species-list|--species-list-file|--taxa-set|--taxa-operation)
       PROGRAM_ARGS+=("$1" "$2")
       shift 2
       ;;
@@ -158,7 +161,7 @@ while [[ $# -gt 0 ]]; do
       PROGRAM_ARGS+=("--stepb-restriction" "dlogd")
       shift
       ;;
-    --rooted|--unrooted|--keep-polytomy|--keep-polytomies|--anchor-outgroup|--anchor|--no-anchor-outgroup|--no-anchor|--no-prune-search-space|--no-prune-unreachable|--prune-search-space|--prune-unreachable|--no-gpu-batch|--consensus-experimental|--stepb-quadratic-nn-balls|--stepb-random-leftover-resolution|--stepb-process-large-polytomies|--resolve-input-gene-tree-polytomies|--verify-parse|--verify-hash|--verify-clusters|--verify-partitions|--verify-dp|--verify-weights|--verify-distance-matrix|--verify-similarity-matrix|--verify-upgma|--verify-greedy-consensus|--autocomplete-incomplete-gene-trees|-v|-vv|-vvv|-q|--quiet)
+    --rooted|--unrooted|--keep-polytomy|--keep-polytomies|--anchor-outgroup|--anchor|--no-anchor-outgroup|--no-anchor|--no-prune-search-space|--no-prune-unreachable|--prune-search-space|--prune-unreachable|--no-gpu-batch|--consensus-experimental|--stepb-quadratic-nn-balls|--stepb-random-leftover-resolution|--stepb-process-large-polytomies|--resolve-input-gene-tree-polytomies|--verify-parse|--verify-hash|--verify-clusters|--verify-partitions|--verify-dp|--verify-weights|--verify-distance-matrix|--verify-similarity-matrix|--verify-upgma|--verify-greedy-consensus|--autocomplete-incomplete-gene-trees|--extract-taxa|-v|-vv|-vvv|-q|--quiet)
       PROGRAM_ARGS+=("$1")
       shift
       ;;

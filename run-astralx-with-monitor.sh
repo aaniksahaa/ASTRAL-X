@@ -47,6 +47,7 @@ Optional:
   --intersection-method I1..I4
                          Intersection method preset
   --keep-polytomy        Keep input polytomies for native unresolved-quartet scoring
+  --taxa-file FILE       Restrict score-only inputs to listed taxa (one per line)
   --log-file FILE        Save run messages to FILE (progress remains terminal-only)
   --no-time-monitor     Disable time monitoring
   --no-gpu-monitor      Disable GPU monitoring
@@ -77,7 +78,7 @@ while [[ $# -gt 0 ]]; do
       ASTRALX_ARGS+=("$1")
       shift
       ;;
-    --search-space|--intersection-method|--im|--weight-intersection-method|--search-mode|--log-file|-t|-T|--threads|--num-threads|-m|--seeds|--anchor-taxon|--gpu-batch-size|--gpu-batches|--gpu-vram-control-factor|--gpu-vram-occupancy-factor|--gpu-treewalk-vram-cap-mb|--gpu-progress-interval|--gpu-dp-state-space-construction-output-cap|--gpu-dp-state-space-progress-time-interval|--gpu-dp-state-space-progress-max-steps|--gpu-dist-tile-size|--gpu-sim-vram-cap-mb|--completion-method|--stepb-restriction|--large-n-score-type|--large-score-type)
+    --search-space|--intersection-method|--im|--weight-intersection-method|--search-mode|--log-file|-t|-T|--threads|--num-threads|-m|--seeds|--anchor-taxon|--gpu-batch-size|--gpu-batches|--gpu-vram-control-factor|--gpu-vram-occupancy-factor|--gpu-treewalk-vram-cap-mb|--gpu-progress-interval|--gpu-dp-state-space-construction-output-cap|--gpu-dp-state-space-progress-time-interval|--gpu-dp-state-space-progress-max-steps|--gpu-dist-tile-size|--gpu-sim-vram-cap-mb|--completion-method|--stepb-restriction|--large-n-score-type|--large-score-type|--taxa-file|--species-list|--species-list-file)
       ASTRALX_ARGS+=("$1" "$2")
       shift 2
       ;;

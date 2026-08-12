@@ -88,6 +88,47 @@ Use `astralx --help` for the complete option list and `astralx --diagnose` to
 check the packaged runtime, native libraries, driver, and GPU selection without
 loading a dataset.
 
+## Taxa extraction and taxon-restricted scoring
+
+`extract-taxa.sh` uses the same Newick leaf-token scanner as ASTRAL-X. It writes
+only taxon names, sorted deterministically with one name per line. For a file
+containing multiple Newick trees (one tree per non-empty line), the default is
+the union of their taxa:
+
+```bash
+./extract-taxa.sh \
+  --input /path/to/trees.nwk \
+  --output /path/to/taxa.txt
+```
+
+Use `--intersection` to retain only taxa present in every tree. The equivalent
+core CLI is `astralx -i trees.nwk --extract-taxa --taxa-set union|intersection`;
+when `-o` is omitted, names are written to standard output.
+
+Fixed-tree scoring normally remains strict: the species tree must have exactly
+the gene-tree union taxon set. To score an induced common subset instead, supply
+a one-name-per-line allow-list:
+
+```bash
+./run.sh \
+  --input /path/to/gene_trees.nwk \
+  --score-species-tree /path/to/species_tree.nwk \
+  --taxa-file /path/to/taxa.txt \
+  --output /path/to/quartet_score.txt \
+  --intersection-method I3 \
+  --auto
+```
+
+The effective scoring universe is the listed taxa present in both the gene-tree
+union and the supplied species tree. Taxa outside the list are pruned, unary
+nodes created by pruning are suppressed, and gene trees retaining fewer than
+four selected taxa are discarded because they contribute zero quartets. The run
+reports duplicate list entries, taxa absent from the gene-tree union or species
+tree, ignored outside taxa, and the mean/minimum/maximum number of listed taxa
+missing per gene tree. Missing taxa are never inserted or assigned an arbitrary
+placement. Without `--taxa-file`, the established strict score-only and inference
+paths are unchanged.
+
 ## Running ASTRAL-X on Biological Datasets
 
 Run the commands below from the directory where you want the `data/` folder.

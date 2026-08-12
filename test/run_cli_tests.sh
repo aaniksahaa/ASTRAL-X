@@ -150,4 +150,74 @@ SCORE_ONLY_OUTPUT="$(java -cp "${ROOT}/build" astralx.Main --cpu -q \
 [[ "$SCORE_ONLY_OUTPUT" == *"Run Summary"* ]]
 [[ "$SCORE_ONLY_OUTPUT" == *"Quartet score"*"10"* ]]
 
+# Parser-backed taxa extraction: deterministic union by default and explicit
+# intersection, with exactly one taxon name per output line.
+TAXA_UNION="${TEST_CLASSES}/taxa-union.txt"
+TAXA_INTERSECTION="${TEST_CLASSES}/taxa-intersection.txt"
+"${ROOT}/extract-taxa.sh" --no-build \
+  -i "${ROOT}/test/input/taxa_extract_multi.tre" -o "$TAXA_UNION" >/dev/null
+"${ROOT}/extract-taxa.sh" --no-build \
+  -i "${ROOT}/test/input/taxa_extract_multi.tre" -o "$TAXA_INTERSECTION" \
+  --intersection >/dev/null
+printf 'A\nB\nC\nD\nE\n' > "${TEST_CLASSES}/expected-union.txt"
+printf 'B\nC\nD\n' > "${TEST_CLASSES}/expected-intersection.txt"
+cmp "${TEST_CLASSES}/expected-union.txt" "$TAXA_UNION"
+cmp "${TEST_CLASSES}/expected-intersection.txt" "$TAXA_INTERSECTION"
+TAXA_STDOUT="$(java -cp "${ROOT}/build" astralx.Main -q \
+  -i "${ROOT}/test/input/taxa_extract_multi.tre" --extract-taxa)"
+[[ "$TAXA_STDOUT" == $'A\nB\nC\nD\nE' ]]
+
+# Taxon-filtered scoring must equal scoring manually induced input trees for
+# every intersection implementation. The fixture also covers a duplicate list
+# line, a listed taxon absent from both inputs, outside taxa on both sides, and
+# a post-filter gene tree with <4 leaves (zero quartet contribution).
+score_value() {
+  sed -n 's/^QUARTET_SCORE: //p' | tail -n1
+}
+for method in I1 I2 I3 I4; do
+  manual_score="$(java -cp "${ROOT}/build" astralx.Main --cpu -q \
+    -i "${ROOT}/test/input/taxa_filter_genes_manual.tre" \
+    --score-species-tree "${ROOT}/test/input/taxa_filter_species_manual.tre" \
+    --im "$method" 2>&1 | score_value)"
+  filtered_score="$(java -cp "${ROOT}/build" astralx.Main --cpu -q \
+    -i "${ROOT}/test/input/taxa_filter_genes.tre" \
+    --score-species-tree "${ROOT}/test/input/taxa_filter_species.tre" \
+    --taxa-file "${ROOT}/test/input/taxa_filter_list.txt" \
+    --im "$method" 2>&1 | score_value)"
+  [[ "$manual_score" == "4" && "$filtered_score" == "$manual_score" ]]
+done
+
+# Native-polytomy restriction parity, covering both an unrooted multifurcating
+# root and an internal polytomy whose degree decreases after pruning.
+for method in I1 I2 I3 I4; do
+  manual_score="$(java -cp "${ROOT}/build" astralx.Main --cpu -q \
+    -i "${ROOT}/test/input/taxa_filter_polytomy_genes_manual.tre" \
+    --score-species-tree "${ROOT}/test/input/taxa_filter_polytomy_species_manual.tre" \
+    --keep-polytomy --im "$method" 2>&1 | score_value)"
+  filtered_score="$(java -cp "${ROOT}/build" astralx.Main --cpu -q \
+    -i "${ROOT}/test/input/taxa_filter_polytomy_genes.tre" \
+    --score-species-tree "${ROOT}/test/input/taxa_filter_polytomy_species.tre" \
+    --taxa-file "${ROOT}/test/input/taxa_filter_polytomy_list.txt" \
+    --keep-polytomy --im "$method" 2>&1 | score_value)"
+  [[ -n "$manual_score" && "$filtered_score" == "$manual_score" ]]
+done
+
+FILTER_REPORT="$(NO_COLOR=1 java -cp "${ROOT}/build" astralx.Main --cpu \
+  -i "${ROOT}/test/input/taxa_filter_genes.tre" \
+  --score-species-tree "${ROOT}/test/input/taxa_filter_species.tre" \
+  --taxa-file "${ROOT}/test/input/taxa_filter_list.txt" --im I2 2>&1)"
+[[ "$FILTER_REPORT" == *"Taxon filter report:"* ]]
+[[ "$FILTER_REPORT" == *"5 unique name(s) (1 duplicate line(s) ignored)"* ]]
+[[ "$FILTER_REPORT" == *"mean=1.25 (25.000%), min=1, max=2"* ]]
+[[ "$FILTER_REPORT" == *"Species tree: 1 listed taxa missing (20.000%)"* ]]
+[[ "$FILTER_REPORT" == *"Ignored outside taxa: gene-tree union=1, species tree=1"* ]]
+[[ "$FILTER_REPORT" == *"Effective common scoring universe: 4 taxa"* ]]
+
+if java -cp "${ROOT}/build" astralx.Main --cpu -q \
+    -i "${ROOT}/test/input/taxa_filter_genes.tre" \
+    --taxa-file "${ROOT}/test/input/taxa_filter_list.txt" >/dev/null 2>&1; then
+  echo "--taxa-file without score-only mode was unexpectedly accepted" >&2
+  exit 1
+fi
+
 echo "CLI end-to-end aliases: PASS"

@@ -23,6 +23,8 @@ import astralx.hash.TaxonHasher;
 import astralx.taxon.TaxonRegistry;
 import astralx.tree.Tree;
 import astralx.tree.TreeParser;
+import astralx.tree.TreeRestrictor;
+import astralx.tree.TreeTaxa;
 import astralx.util.Threading;
 
 import astralx.cluster.Cluster;
@@ -61,6 +63,10 @@ public class Main {
         if (!parseArgs(args, cfg)) { printUsage(); System.exit(1); }
 
         Logging.setLevel(cfg.getVerbosity());
+        if (cfg.isExtractTaxa()) {
+            runTaxaExtraction(cfg);
+            return;
+        }
         resolveComputeMode(cfg);
         Banner.print(cfg);
 
@@ -75,6 +81,12 @@ public class Main {
         boolean analysisCompleted = false;
 
         try {
+            if (cfg.isScoreOnly() && cfg.getTaxaFile() != null) {
+                finalQuartetScore = runTaxonRestrictedScoreOnly(cfg);
+                analysisCompleted = true;
+                return;
+            }
+
             // ── Phase 1: Parse gene trees ─────────────────────────────────────
             long t1 = PhaseLogger.begin("Phase 1  Parse gene trees", false);
             TaxonRegistry registry = new TaxonRegistry();
@@ -452,6 +464,23 @@ public class Main {
                     if (++i>=args.length) return false;
                     cfg.setScoreSpeciesTreeFile(args[i]);
                 }
+                case "--taxa-file", "--species-list", "--species-list-file" -> {
+                    if (++i>=args.length) return false;
+                    cfg.setTaxaFile(args[i]);
+                }
+                case "--extract-taxa" -> cfg.setExtractTaxa(true);
+                case "--taxa-set", "--taxa-operation" -> {
+                    if (++i>=args.length) return false;
+                    if (args[i].equalsIgnoreCase("union"))
+                        cfg.setTaxaSetMode(Config.TaxaSetMode.UNION);
+                    else if (args[i].equalsIgnoreCase("intersection"))
+                        cfg.setTaxaSetMode(Config.TaxaSetMode.INTERSECTION);
+                    else {
+                        System.err.println("Unknown --taxa-set: " + args[i]
+                            + " (expected: union | intersection)");
+                        return false;
+                    }
+                }
                 case "-t", "-T", "--threads", "--num-threads" -> {
                     if (++i>=args.length) return false;
                     cfg.setThreadCount(Integer.parseInt(args[i]));
@@ -581,7 +610,16 @@ public class Main {
                 default -> { System.err.println("Unknown arg: " + args[i]); return false; }
             }
         }
-        return cfg.getInputFile() != null || cfg.isDiagnose();
+        if (cfg.getInputFile() == null && !cfg.isDiagnose()) return false;
+        if (cfg.isExtractTaxa() && cfg.isScoreOnly()) {
+            System.err.println("--extract-taxa cannot be combined with --score-species-tree");
+            return false;
+        }
+        if (cfg.getTaxaFile() != null && !cfg.isScoreOnly()) {
+            System.err.println("--taxa-file is currently valid only with --score-species-tree");
+            return false;
+        }
+        return true;
     }
 
     /** Resolve AUTO/GPU requests using the bundled CUDA backend itself. */
@@ -781,6 +819,7 @@ public class Main {
             Usage:
               astralx -i <gene_trees.tre> [-o <species_tree.tre>] [options]
               astralx -i <gene_trees.tre> --score-species-tree <species_tree.tre> [options]
+              astralx -i <trees.tre> --extract-taxa [-o <taxa.txt>]
               astralx --diagnose
 
             General:
@@ -788,6 +827,10 @@ public class Main {
               -o, --output FILE                Output species tree (stdout when omitted)
               --log-file FILE                  Save run messages to FILE (progress remains terminal-only)
               -c, --score-species-tree FILE    Score one supplied species tree and exit
+              --taxa-file FILE                 In score-only mode, restrict both inputs to
+                                                 these taxa (one name per non-empty line)
+              --extract-taxa                   Write input taxa, one name per line, and exit
+              --taxa-set union|intersection    Multi-tree extraction operation (default: union)
               -t, -T, --threads, --num-threads N
                                                  CPU worker threads (default: available cores)
               --auto                           Automatically use CUDA or fall back to CPU (default)
@@ -852,6 +895,143 @@ public class Main {
             """);
     }
 
+    private static void runTaxaExtraction(Config cfg) throws IOException {
+        if (cfg.getOutputFile() != null
+                && sameNormalizedPath(cfg.getInputFile(), cfg.getOutputFile())) {
+            throw new IllegalArgumentException(
+                "Taxa output file must differ from the input tree file");
+        }
+        int count = TreeTaxa.writeExtracted(
+            cfg.getInputFile(), cfg.getOutputFile(), cfg.getTaxaSetMode());
+        String destination = cfg.getOutputFile() == null ? "stdout" : cfg.getOutputFile();
+        Logging.info("Extracted %d taxa by %s across the input trees; written to %s",
+            count, cfg.getTaxaSetMode().name().toLowerCase(), destination);
+    }
+
+    /**
+     * Opt-in fixed-tree scoring on a named taxon subset.  This path is kept
+     * separate from ordinary inference and strict score-only mode so neither
+     * incurs filtering branches, extra scans, or changed taxon semantics.
+     */
+    private static String runTaxonRestrictedScoreOnly(Config cfg) throws IOException {
+        if (cfg.getOutputFile() != null
+                && sameNormalizedPath(cfg.getTaxaFile(), cfg.getOutputFile())) {
+            throw new IllegalArgumentException(
+                "Score output file must differ from --taxa-file");
+        }
+        TreeTaxa.TaxaList taxaList = TreeTaxa.readTaxaList(cfg.getTaxaFile());
+        java.util.LinkedHashSet<String> requested = taxaList.names();
+        TreeTaxa.Scan geneCoverage = TreeTaxa.scan(cfg.getInputFile(), requested);
+        TreeTaxa.Scan speciesCoverage = TreeTaxa.scan(
+            cfg.getScoreSpeciesTreeFile(), requested);
+        if (speciesCoverage.treeCount() != 1) {
+            throw new IllegalArgumentException(
+                "Species tree file must contain exactly one Newick tree: "
+                + cfg.getScoreSpeciesTreeFile());
+        }
+
+        java.util.LinkedHashSet<String> effective = new java.util.LinkedHashSet<>();
+        for (String name : requested) {
+            if (geneCoverage.union().contains(name)
+                    && speciesCoverage.union().contains(name)) {
+                effective.add(name);
+            }
+        }
+
+        int requestedCount = requested.size();
+        int absentGeneUnion = requestedCount
+            - intersectionSize(requested, geneCoverage.union());
+        int absentSpecies = requestedCount
+            - intersectionSize(requested, speciesCoverage.union());
+        int ignoredGeneTaxa = geneCoverage.union().size()
+            - intersectionSize(geneCoverage.union(), requested);
+        int ignoredSpeciesTaxa = speciesCoverage.union().size()
+            - intersectionSize(speciesCoverage.union(), requested);
+
+        Logging.info("Taxon filter report:");
+        Logging.info("  Taxa file: %d unique name(s)%s", requestedCount,
+            taxaList.duplicateLines() == 0 ? ""
+                : String.format(" (%d duplicate line(s) ignored)", taxaList.duplicateLines()));
+        Logging.info("  Gene trees: %d tree(s), %d union taxa; listed taxa missing per tree "
+                + "mean=%.2f (%.3f%%), min=%d, max=%d",
+            geneCoverage.treeCount(), geneCoverage.union().size(),
+            geneCoverage.meanMissing(), percentage(geneCoverage.meanMissing(), requestedCount),
+            geneCoverage.minMissing(), geneCoverage.maxMissing());
+        Logging.info("  Listed taxa absent from every gene tree: %d (%.3f%%)",
+            absentGeneUnion, percentage(absentGeneUnion, requestedCount));
+        Logging.info("  Species tree: %d listed taxa missing (%.3f%%)",
+            absentSpecies, percentage(absentSpecies, requestedCount));
+        Logging.info("  Ignored outside taxa: gene-tree union=%d, species tree=%d",
+            ignoredGeneTaxa, ignoredSpeciesTaxa);
+        Logging.info("  Effective common scoring universe: %d taxa", effective.size());
+        if (absentGeneUnion > 0 || absentSpecies > 0) {
+            Logging.warn("The effective scoring universe excludes listed taxa absent from "
+                + "the gene-tree union or species tree; no placement is invented for them");
+        }
+        if (effective.size() < 4) {
+            throw new IllegalArgumentException("Fewer than four taxa from --taxa-file "
+                + "occur in both the gene-tree union and species tree");
+        }
+
+        TaxonRegistry targetRegistry = new TaxonRegistry();
+        for (String name : effective) targetRegistry.register(name);
+        targetRegistry.lock();
+        if (cfg.isAnchorOutgroup() && cfg.getAnchorTaxon() >= targetRegistry.size()) {
+            throw new IllegalArgumentException("--anchor-taxon " + cfg.getAnchorTaxon()
+                + " is outside the filtered taxon range [0,"
+                + (targetRegistry.size() - 1) + "]");
+        }
+
+        long tg = PhaseLogger.begin("Score filter  Parse and restrict gene trees", false);
+        TaxonRegistry sourceRegistry = new TaxonRegistry();
+        List<Tree> sourceTrees = TreeParser.parseGeneTrees(
+            cfg.getInputFile(), sourceRegistry, cfg.isKeepPolytomy());
+        TreeRestrictor.GeneResult restrictedGenes = TreeRestrictor.restrictGeneTrees(
+            sourceTrees, sourceRegistry, targetRegistry);
+        List<Tree> geneTrees = restrictedGenes.trees();
+        Logging.info("Taxon restriction retained %d/%d gene tree(s); dropped %d with "
+                + "fewer than four selected taxa (zero quartet contribution)",
+            geneTrees.size(), sourceTrees.size(), restrictedGenes.droppedTreeCount());
+        PhaseLogger.end("Score filter  Parse and restrict gene trees", tg, false);
+
+        long ts = PhaseLogger.begin("Score filter  Parse and restrict species tree", false);
+        TreeParser.StandaloneTree sourceSpecies = TreeParser.parseStandaloneTree(
+            cfg.getScoreSpeciesTreeFile());
+        Tree speciesTree = TreeRestrictor.restrictSpeciesTree(
+            sourceSpecies.tree(), sourceSpecies.registry(), targetRegistry);
+        Logging.info("Restricted supplied species tree: %d leaves", speciesTree.leafCount);
+        PhaseLogger.end("Score filter  Parse and restrict species tree", ts, false);
+
+        long th = PhaseLogger.begin("Score filter  Taxon hashing", false);
+        TaxonHasher hasher = new TaxonHasher(targetRegistry.size(),
+            cfg.getNumHashSeeds(), cfg.getBaseSeed());
+        PrefixHashArrays genePref = new PrefixHashArrays(geneTrees, hasher);
+        PhaseLogger.end("Score filter  Taxon hashing", th, false);
+
+        Logging.info("Mode: SCORE-ONLY with taxa file (score supplied induced species tree; "
+            + "no species-tree inference)");
+        return scorePreparedSpeciesTree(
+            cfg, targetRegistry, geneTrees, genePref, hasher, speciesTree);
+    }
+
+    private static int intersectionSize(java.util.Set<String> a,
+                                        java.util.Set<String> b) {
+        java.util.Set<String> smaller = a.size() <= b.size() ? a : b;
+        java.util.Set<String> larger = smaller == a ? b : a;
+        int count = 0;
+        for (String name : smaller) if (larger.contains(name)) count++;
+        return count;
+    }
+
+    private static double percentage(double count, int total) {
+        return total == 0 ? 0.0 : 100.0 * count / total;
+    }
+
+    private static boolean sameNormalizedPath(String first, String second) {
+        return java.nio.file.Path.of(first).toAbsolutePath().normalize().equals(
+            java.nio.file.Path.of(second).toAbsolutePath().normalize());
+    }
+
     private static String runScoreOnly(Config cfg, TaxonRegistry registry,
                                        List<Tree> geneTrees, PrefixHashArrays genePref,
                                        TaxonHasher hasher) throws IOException {
@@ -862,8 +1042,18 @@ public class Main {
 
         long ts = PhaseLogger.begin("Score mode  Parse supplied species tree", false);
         Tree speciesTree = TreeParser.parseSpeciesTree(cfg.getScoreSpeciesTreeFile(), registry);
-        List<Tree> speciesTrees = java.util.List.of(speciesTree);
         PhaseLogger.end("Score mode  Parse supplied species tree", ts, false);
+
+        return scorePreparedSpeciesTree(
+            cfg, registry, geneTrees, genePref, hasher, speciesTree);
+    }
+
+    private static String scorePreparedSpeciesTree(Config cfg, TaxonRegistry registry,
+                                                   List<Tree> geneTrees,
+                                                   PrefixHashArrays genePref,
+                                                   TaxonHasher hasher,
+                                                   Tree speciesTree) throws IOException {
+        List<Tree> speciesTrees = java.util.List.of(speciesTree);
 
         long tp = PhaseLogger.begin("Score mode  Species-tree hashing", false);
         PrefixHashArrays speciesPref = new PrefixHashArrays(speciesTrees, hasher);
