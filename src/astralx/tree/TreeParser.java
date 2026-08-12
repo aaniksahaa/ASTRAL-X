@@ -54,11 +54,12 @@ public class TreeParser {
         Logging.info("Registered %d unique taxa", n);
 
         // Pass 2 – parse each tree.  rootingCounts[0] = #trees rooted from a 3-furcation
-        // (unrooted binary), [1] = #trees with a ≥4-furcation polytomy at the root.
+        // (unrooted binary), [1] = #trees with a ≥4-furcation polytomy at the root,
+        // and [2] = total polytomous nodes (used to tag each Tree without another scan).
         // These are tallied (not logged per-tree — that floods on large inputs) and
         // summarized once below.
         List<Tree> trees = new ArrayList<>(lines.size());
-        int[] rootingCounts = {0, 0};
+        int[] rootingCounts = {0, 0, 0};
         ProgressBar parseBar = new ProgressBar("Parsing trees", lines.size());
         for (int i = 0; i < lines.size(); i++) {
             trees.add(parseNewick(lines.get(i), i, registry, rootingCounts));
@@ -116,7 +117,7 @@ public class TreeParser {
             throw new IllegalArgumentException("Species tree file must contain exactly one Newick tree: " + inputFile);
         }
 
-        int[] rootingCounts = {0, 0};
+        int[] rootingCounts = {0, 0, 0};
         Tree tree = parseNewick(lines.get(0), 0, registry, rootingCounts);
         validateCompleteTaxonSet(tree, registry, inputFile);
         Logging.info("Parsed supplied species tree: %d leaves", tree.leafCount);
@@ -249,7 +250,9 @@ public class TreeParser {
         }
 
         // Validate arity and root unrooted trees; convert RawNode → TreeNode
+        int polytomyCountBefore = rootingCounts[2];
         TreeNode root = validateAndConvert(rawRoot, treeIdx, true, rootingCounts);
+        boolean hasPolytomy = rootingCounts[2] != polytomyCountBefore;
 
         // Assign ranges and build postorderArray in one left-to-right DFS
         int[] postorderArray = new int[reg.size()]; // upper bound; trimmed below
@@ -263,7 +266,8 @@ public class TreeParser {
         Arrays.fill(positionMap, -1);
         for (int j = 0; j < leafCount; j++) positionMap[postorderArray[j]] = j;
 
-        return new Tree(treeIdx, root, postorderArray, positionMap, leafCount, totalTaxa);
+        return new Tree(treeIdx, root, postorderArray, positionMap, leafCount, totalTaxa,
+            hasPolytomy);
     }
 
     /**
@@ -327,6 +331,7 @@ public class TreeParser {
             // left; the remaining nc-1 children form a polytomous right child whose
             // complement is exactly child[0] — recovering the full nc-way partition.
             rootingCounts[1]++;   // tallied; summarized once in parseGeneTrees (no per-tree log)
+            rootingCounts[2]++;
 
             TreeNode c0 = validateAndConvert(raw.children.get(0), treeIdx, false, rootingCounts);
 
@@ -349,6 +354,7 @@ public class TreeParser {
 
         } else {
             // nc >= 3 && !isRoot  → polytomous internal node.
+            rootingCounts[2]++;
             TreeNode node = new TreeNode();
             node.children = new TreeNode[nc];
             for (int j = 0; j < nc; j++) {

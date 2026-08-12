@@ -49,8 +49,13 @@ public class TreeCompleter {
      */
     public static List<Tree> completeAll(List<Tree> trees, double[] sim, double[] dist, int n) {
         List<Integer> incomplete = new ArrayList<>();
+        boolean hasIncompletePolytomy = false;
         for (int i = 0; i < trees.size(); i++) {
-            if (!trees.get(i).isComplete) incomplete.add(i);
+            Tree tree = trees.get(i);
+            if (!tree.isComplete) {
+                incomplete.add(i);
+                hasIncompletePolytomy |= tree.hasPolytomy;
+            }
         }
 
         if (incomplete.isEmpty()) return trees;
@@ -68,10 +73,22 @@ public class TreeCompleter {
         AtomicInteger cnt = new AtomicInteger(0);
 
         // Each tree's completion is fully independent → safe to parallelise.
-        Threading.processParallel(incomplete, idx -> {
-            result[idx] = completeTreeFourPoint(trees.get(idx), sim, sortedRows, n);
-            bar.update(cnt.incrementAndGet());
-        });
+        if (!hasIncompletePolytomy) {
+            // Keep the benchmarked binary-only hot path isolated and unchanged.
+            Threading.processParallel(incomplete, idx -> {
+                result[idx] = completeTreeFourPoint(trees.get(idx), sim, sortedRows, n);
+                bar.update(cnt.incrementAndGet());
+            });
+        } else {
+            PolyMatrix polyMatrix = new DensePolyMatrix(sim, sortedRows, n);
+            Threading.processParallel(incomplete, idx -> {
+                Tree tree = trees.get(idx);
+                result[idx] = tree.hasPolytomy
+                    ? completeTreeFourPointPolytomy(tree, polyMatrix, n)
+                    : completeTreeFourPoint(tree, sim, sortedRows, n);
+                bar.update(cnt.incrementAndGet());
+            });
+        }
         bar.done();
 
         return Arrays.asList(result);
@@ -82,8 +99,13 @@ public class TreeCompleter {
         if (!sim.isPacked()) return completeAll(trees, sim.sim, sim.dist, n);
 
         List<Integer> incomplete = new ArrayList<>();
+        boolean hasIncompletePolytomy = false;
         for (int i = 0; i < trees.size(); i++) {
-            if (!trees.get(i).isComplete) incomplete.add(i);
+            Tree tree = trees.get(i);
+            if (!tree.isComplete) {
+                incomplete.add(i);
+                hasIncompletePolytomy |= tree.hasPolytomy;
+            }
         }
         if (incomplete.isEmpty()) return trees;
 
@@ -93,10 +115,21 @@ public class TreeCompleter {
         Tree[] result = trees.toArray(new Tree[0]);
         ProgressBar bar = new ProgressBar("Completing incomplete gene trees", incomplete.size());
         AtomicInteger cnt = new AtomicInteger(0);
-        Threading.processParallel(incomplete, idx -> {
-            result[idx] = completeTreeFourPointPacked(trees.get(idx), sim, sortedRows, n);
-            bar.update(cnt.incrementAndGet());
-        });
+        if (!hasIncompletePolytomy) {
+            Threading.processParallel(incomplete, idx -> {
+                result[idx] = completeTreeFourPointPacked(trees.get(idx), sim, sortedRows, n);
+                bar.update(cnt.incrementAndGet());
+            });
+        } else {
+            PolyMatrix polyMatrix = new PackedPolyMatrix(sim, sortedRows);
+            Threading.processParallel(incomplete, idx -> {
+                Tree tree = trees.get(idx);
+                result[idx] = tree.hasPolytomy
+                    ? completeTreeFourPointPolytomy(tree, polyMatrix, n)
+                    : completeTreeFourPointPacked(tree, sim, sortedRows, n);
+                bar.update(cnt.incrementAndGet());
+            });
+        }
         bar.done();
         return Arrays.asList(result);
     }
@@ -161,6 +194,102 @@ public class TreeCompleter {
         return ascore >= bscore
             ? (ascore >= cscore ? a : c)
             : (bscore >= cscore ? b : c);
+    }
+
+    // ── Polytomous-tree completion ──────────────────────────────────────────
+
+    /**
+     * Completion path for trees containing native polytomies.  Binary trees do
+     * not enter this path, preserving their established allocation and traversal
+     * behaviour.  Child-list mutations below mirror STITree's remove/adopt/append
+     * semantics used by ASTRAL-MP's completion routine without discarding any
+     * unresolved arms.
+     */
+    private static Tree completeTreeFourPointPolytomy(Tree tree, PolyMatrix matrix, int n) {
+        boolean[] inTree = new boolean[n];
+        TreeNode[] taxonNode = new TreeNode[n];
+        TreeNode root = deepCopyNodesPolytomy(tree.root, null, taxonNode);
+        for (int i = 0; i < n; i++) if (tree.positionMap[i] != -1) inTree[i] = true;
+        root = preprocessRerootPolytomy(root, tree.leafCount);
+
+        for (int x = 0; x < n; x++) {
+            if (inTree[x]) continue;
+            int anchor = matrix.findAnchor(x, inTree);
+            TreeNode anchorLeaf = taxonNode[anchor];
+            if (anchorLeaf == null) {
+                throw new IllegalStateException("Tree " + tree.treeIndex + ": anchor taxon "
+                    + anchor + " is marked present but has no leaf node");
+            }
+            root = rerootAtEdgePolytomy(anchorLeaf, root);
+            TreeNode start = root.right;
+            int c1rep = -1, c2rep = -1;
+            TreeNode c1 = null, c2 = null;
+
+            while (!start.isLeaf()) {
+                c1 = childAt(start, 0);
+                c2 = childAt(start, 1);
+                if (c1rep == -1) c1rep = leftmostTaxon(c1);
+                if (c2rep == -1) c2rep = leftmostTaxon(c2);
+                int better = matrix.betterSide(x, anchor, c1rep, c2rep);
+                if (better == anchor) break;
+                if (better == c1rep) {
+                    start = c1;
+                    c2rep = -1;
+                } else {
+                    start = c2;
+                    c1rep = c2rep;
+                    c2rep = -1;
+                }
+            }
+
+            TreeNode newLeaf = insertTaxonPolytomy(x, start, c1, c2);
+            inTree[x] = true;
+            taxonNode[x] = newLeaf;
+        }
+        return rebuildTreePolytomy(tree.treeIndex, root, n);
+    }
+
+    private interface PolyMatrix {
+        int findAnchor(int x, boolean[] inTree);
+        int betterSide(int x, int a, int b, int c);
+    }
+
+    private static final class DensePolyMatrix implements PolyMatrix {
+        private final double[] sim;
+        private final int[] sortedRows;
+        private final int n;
+
+        DensePolyMatrix(double[] sim, int[] sortedRows, int n) {
+            this.sim = sim;
+            this.sortedRows = sortedRows;
+            this.n = n;
+        }
+
+        public int findAnchor(int x, boolean[] inTree) {
+            return TreeCompleter.findAnchor(x, inTree, sortedRows, n);
+        }
+
+        public int betterSide(int x, int a, int b, int c) {
+            return fourPointBetterSide(x, a, b, c, sim, n);
+        }
+    }
+
+    private static final class PackedPolyMatrix implements PolyMatrix {
+        private final SimilarityMatrix sim;
+        private final int[][] sortedRows;
+
+        PackedPolyMatrix(SimilarityMatrix sim, int[][] sortedRows) {
+            this.sim = sim;
+            this.sortedRows = sortedRows;
+        }
+
+        public int findAnchor(int x, boolean[] inTree) {
+            return findAnchorPacked(x, inTree, sortedRows);
+        }
+
+        public int betterSide(int x, int a, int b, int c) {
+            return fourPointBetterSidePacked(x, a, b, c, sim);
+        }
     }
 
     // ── Per-tree completion ───────────────────────────────────────────────────
@@ -422,6 +551,53 @@ public class TreeCompleter {
         return newRoot;
     }
 
+    /** Polytomy-preserving counterpart of {@link #rerootAtLeafEdge}. */
+    private static TreeNode rerootAtEdgePolytomy(TreeNode edgeNode, TreeNode oldRoot) {
+        List<TreeNode> path = new ArrayList<>();
+        TreeNode cur = edgeNode;
+        while (cur != null) {
+            path.add(cur);
+            if (cur == oldRoot) break;
+            cur = cur.parent;
+        }
+        if (path.size() < 2 || path.get(path.size() - 1) != oldRoot) {
+            throw new IllegalStateException("Cannot reroot: target node is not below the current root");
+        }
+
+        int k = path.size() - 1;
+        TreeNode newRoot = new TreeNode();
+        TreeNode p1 = path.get(1);
+        setBinaryChildren(newRoot, edgeNode, p1);
+        edgeNode.parent = newRoot;
+
+        if (k == 1) {
+            requireBinaryRoot(oldRoot);
+            TreeNode sibling = oldRoot.left == edgeNode ? oldRoot.right : oldRoot.left;
+            setBinaryChildren(newRoot, edgeNode, sibling);
+            edgeNode.parent = newRoot;
+            sibling.parent = newRoot;
+            return newRoot;
+        }
+
+        for (int i = 1; i <= k - 1; i++) {
+            TreeNode node = path.get(i);
+            TreeNode childOnPath = path.get(i - 1);
+            TreeNode parentOnPath = path.get(i + 1);
+            removeAndAppend(node, childOnPath, parentOnPath);
+            node.parent = (i == 1) ? newRoot : path.get(i - 1);
+            parentOnPath.parent = node;
+        }
+
+        TreeNode oldRootNode = path.get(k);
+        TreeNode pathKm1 = path.get(k - 1);
+        requireBinaryRoot(oldRootNode);
+        TreeNode remaining = oldRootNode.left == pathKm1
+            ? oldRootNode.right : oldRootNode.left;
+        replaceChild(pathKm1, oldRootNode, remaining);
+        remaining.parent = pathKm1;
+        return newRoot;
+    }
+
     // ── Insertion ─────────────────────────────────────────────────────────────
 
     /**
@@ -506,6 +682,48 @@ public class TreeCompleter {
         return newLeaf;
     }
 
+    /** Insert a taxon while retaining every unresolved child of a polytomy. */
+    private static TreeNode insertTaxonPolytomy(int x, TreeNode start,
+                                                TreeNode c1, TreeNode c2) {
+        TreeNode newLeaf = new TreeNode();
+        newLeaf.taxonId = x;
+
+        if (start.isLeaf()) {
+            TreeNode parent = start.parent;
+            TreeNode newInternal = new TreeNode();
+            setBinaryChildren(newInternal, start, newLeaf);
+            start.parent = newInternal;
+            newLeaf.parent = newInternal;
+            removeAndAppend(parent, start, newInternal);
+            newInternal.parent = parent;
+        } else {
+            TreeNode newInternal = new TreeNode();
+            setBinaryChildren(newInternal, c1, c2);
+            c1.parent = newInternal;
+            c2.parent = newInternal;
+
+            if (start.isPolytomous()) {
+                TreeNode[] children = start.children;
+                int out = 0;
+                for (TreeNode child : children) {
+                    if (child != c1 && child != c2) children[out++] = child;
+                }
+                children[out++] = newLeaf;
+                children[out++] = newInternal;
+                if (out != children.length) {
+                    throw new IllegalStateException(
+                        "Completion insertion could not locate both navigation children");
+                }
+                setChildren(start, children);
+            } else {
+                setBinaryChildren(start, newLeaf, newInternal);
+            }
+            newLeaf.parent = start;
+            newInternal.parent = start;
+        }
+        return newLeaf;
+    }
+
     // ── Preprocessing reroot ─────────────────────────────────────────────────
 
     /**
@@ -563,6 +781,64 @@ public class TreeCompleter {
         }
 
         return root;
+    }
+
+    /** ASTRAL-MP-compatible preprocessing over canonical n-ary child lists. */
+    private static TreeNode preprocessRerootPolytomy(TreeNode root, int leafCount) {
+        int half = leafCount / 2;
+        int[] dist = {half};
+        TreeNode[] bestNode = {null};
+        findBalancedNodePostOrderPolytomy(root, half, dist, bestNode);
+        moveLeafChildToEndPolytomy(root);
+        if (bestNode[0] != null && bestNode[0] != root) {
+            root = rerootAtEdgePolytomy(bestNode[0], root);
+        }
+        return root;
+    }
+
+    private static void findBalancedNodePostOrderPolytomy(TreeNode node, int half,
+                                                           int[] dist, TreeNode[] best) {
+        if (node.isLeaf()) return;
+        if (node.isPolytomous()) {
+            for (TreeNode child : node.children) {
+                findBalancedNodePostOrderPolytomy(child, half, dist, best);
+            }
+        } else {
+            findBalancedNodePostOrderPolytomy(node.left, half, dist, best);
+            findBalancedNodePostOrderPolytomy(node.right, half, dist, best);
+        }
+        int sub = node.rangeEnd - node.rangeStart;
+        if (Math.abs(half - sub) < dist[0]) {
+            best[0] = node;
+            dist[0] = half - sub;
+        }
+    }
+
+    private static void moveLeafChildToEndPolytomy(TreeNode node) {
+        if (node == null || node.isLeaf()) return;
+        if (!node.isPolytomous()) {
+            moveLeafChildToEndPolytomy(node.left);
+            moveLeafChildToEndPolytomy(node.right);
+            if (node.left.isLeaf()) {
+                TreeNode tmp = node.left;
+                node.left = node.right;
+                node.right = tmp;
+            }
+            return;
+        }
+        TreeNode[] children = node.children;
+        for (TreeNode child : children) moveLeafChildToEndPolytomy(child);
+        for (int i = 0; i < children.length; i++) {
+            if (children[i].isLeaf()) {
+                if (i != children.length - 1) {
+                    TreeNode leaf = children[i];
+                    System.arraycopy(children, i + 1, children, i, children.length - i - 1);
+                    children[children.length - 1] = leaf;
+                    setChildren(node, children);
+                }
+                break;
+            }
+        }
     }
 
     /**
@@ -666,6 +942,29 @@ public class TreeCompleter {
         return copy;
     }
 
+    private static TreeNode deepCopyNodesPolytomy(TreeNode src, TreeNode parent,
+                                                   TreeNode[] taxonNode) {
+        if (src == null) return null;
+        TreeNode copy = new TreeNode();
+        copy.taxonId = src.taxonId;
+        copy.rangeStart = src.rangeStart;
+        copy.rangeEnd = src.rangeEnd;
+        copy.parent = parent;
+        if (src.isLeaf()) {
+            taxonNode[copy.taxonId] = copy;
+        } else if (src.isPolytomous()) {
+            TreeNode[] children = new TreeNode[src.children.length];
+            for (int i = 0; i < children.length; i++) {
+                children[i] = deepCopyNodesPolytomy(src.children[i], copy, taxonNode);
+            }
+            setChildren(copy, children);
+        } else {
+            copy.left = deepCopyNodesPolytomy(src.left, copy, taxonNode);
+            copy.right = deepCopyNodesPolytomy(src.right, copy, taxonNode);
+        }
+        return copy;
+    }
+
     // ── Rebuild Tree ──────────────────────────────────────────────────────────
 
     /** Reconstruct a Tree object from the mutated TreeNode structure. */
@@ -683,6 +982,18 @@ public class TreeCompleter {
         return new Tree(treeIndex, root, postorderArray, positionMap, leafCount, n);
     }
 
+    private static Tree rebuildTreePolytomy(int treeIndex, TreeNode root, int n) {
+        int[] postorderArray = new int[n];
+        int[] counter = {0};
+        assignRangesAndFillPolytomy(root, postorderArray, counter);
+        int leafCount = counter[0];
+        postorderArray = Arrays.copyOf(postorderArray, leafCount);
+        int[] positionMap = new int[n];
+        Arrays.fill(positionMap, -1);
+        for (int j = 0; j < leafCount; j++) positionMap[postorderArray[j]] = j;
+        return new Tree(treeIndex, root, postorderArray, positionMap, leafCount, n, true);
+    }
+
     private static void assignRangesAndFill(TreeNode node, int[] arr, int[] counter) {
         if (node.isLeaf()) {
             node.rangeStart  = counter[0];
@@ -695,5 +1006,98 @@ public class TreeCompleter {
         assignRangesAndFill(node.right, arr, counter);
         node.rangeStart = node.left.rangeStart;
         node.rangeEnd   = node.right.rangeEnd;
+    }
+
+    private static void assignRangesAndFillPolytomy(TreeNode node, int[] arr, int[] counter) {
+        if (node.isLeaf()) {
+            node.rangeStart = counter[0];
+            node.rangeEnd = counter[0] + 1;
+            arr[counter[0]++] = node.taxonId;
+            return;
+        }
+        if (node.isPolytomous()) {
+            for (TreeNode child : node.children) {
+                assignRangesAndFillPolytomy(child, arr, counter);
+            }
+        } else {
+            assignRangesAndFillPolytomy(node.left, arr, counter);
+            assignRangesAndFillPolytomy(node.right, arr, counter);
+        }
+        node.rangeStart = node.left.rangeStart;
+        node.rangeEnd = node.right.rangeEnd;
+    }
+
+    private static TreeNode childAt(TreeNode node, int index) {
+        if (node.isPolytomous()) return node.children[index];
+        return index == 0 ? node.left : node.right;
+    }
+
+    private static void setChildren(TreeNode node, TreeNode[] children) {
+        if (children.length < 2) {
+            throw new IllegalArgumentException("Internal node must have at least two children");
+        }
+        node.left = children[0];
+        node.right = children[children.length - 1];
+        node.children = children.length > 2 ? children : null;
+    }
+
+    private static void setBinaryChildren(TreeNode node, TreeNode left, TreeNode right) {
+        node.left = left;
+        node.right = right;
+        node.children = null;
+    }
+
+    private static void removeAndAppend(TreeNode node, TreeNode remove, TreeNode append) {
+        if (!node.isPolytomous()) {
+            TreeNode other;
+            if (node.left == remove) other = node.right;
+            else if (node.right == remove) other = node.left;
+            else throw new IllegalStateException(
+                "Completion child-list mutation lost its path child");
+            node.left = other;
+            node.right = append;
+            return;
+        }
+        TreeNode[] children = node.children;
+        int out = 0;
+        boolean found = false;
+        for (TreeNode child : children) {
+            if (child == remove) {
+                found = true;
+            } else {
+                children[out++] = child;
+            }
+        }
+        if (!found || out != children.length - 1) {
+            throw new IllegalStateException("Completion child-list mutation lost its path child");
+        }
+        children[out] = append;
+        setChildren(node, children);
+    }
+
+    private static void replaceChild(TreeNode node, TreeNode remove, TreeNode replacement) {
+        if (!node.isPolytomous()) {
+            if (node.left == remove) node.left = replacement;
+            else if (node.right == remove) node.right = replacement;
+            else throw new IllegalStateException(
+                "Completion child-list mutation lost the old root");
+            return;
+        }
+        TreeNode[] children = node.children;
+        for (int i = 0; i < children.length; i++) {
+            if (children[i] == remove) {
+                children[i] = replacement;
+                setChildren(node, children);
+                return;
+            }
+        }
+        throw new IllegalStateException("Completion child-list mutation lost the old root");
+    }
+
+    private static void requireBinaryRoot(TreeNode root) {
+        if (root.isPolytomous()) {
+            throw new IllegalStateException("Completion reroot expects a binary root, found degree "
+                + root.children.length);
+        }
     }
 }

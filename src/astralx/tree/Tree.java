@@ -31,24 +31,48 @@ public class Tree {
     /** True when this tree contains all n taxa. */
     public final boolean isComplete;
 
+    /** True when at least one internal node has three or more rooted children. */
+    public final boolean hasPolytomy;
+
     public Tree(int treeIndex, TreeNode root,
                 int[] postorderArray, int[] positionMap,
                 int leafCount, int totalTaxa) {
+        this(treeIndex, root, postorderArray, positionMap, leafCount, totalTaxa, false);
+    }
+
+    public Tree(int treeIndex, TreeNode root,
+                int[] postorderArray, int[] positionMap,
+                int leafCount, int totalTaxa, boolean hasPolytomy) {
         this.treeIndex = treeIndex;
         this.root = root;
         this.postorderArray = postorderArray;
         this.positionMap = positionMap;
         this.leafCount = leafCount;
         this.isComplete = (leafCount == totalTaxa);
+        this.hasPolytomy = hasPolytomy;
     }
 
     /** Reconstruct Newick string (no branch lengths). */
     public String toNewick(TaxonRegistry reg) {
-        return nodeToNewick(root, reg) + ";";
+        return (hasPolytomy ? nodeToNewickPolytomy(root, reg) : nodeToNewick(root, reg)) + ";";
     }
 
     private String nodeToNewick(TreeNode n, TaxonRegistry reg) {
         if (n.isLeaf()) return reg.getName(n.taxonId);
         return "(" + nodeToNewick(n.left, reg) + "," + nodeToNewick(n.right, reg) + ")";
+    }
+
+    private String nodeToNewickPolytomy(TreeNode n, TaxonRegistry reg) {
+        if (n.isLeaf()) return reg.getName(n.taxonId);
+        if (!n.isPolytomous()) {
+            return "(" + nodeToNewickPolytomy(n.left, reg) + ","
+                + nodeToNewickPolytomy(n.right, reg) + ")";
+        }
+        StringBuilder out = new StringBuilder("(");
+        for (int i = 0; i < n.children.length; i++) {
+            if (i > 0) out.append(',');
+            out.append(nodeToNewickPolytomy(n.children[i], reg));
+        }
+        return out.append(')').toString();
     }
 }

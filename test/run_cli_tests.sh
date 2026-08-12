@@ -20,11 +20,24 @@ javac -cp "${ROOT}/build" -d "$TEST_CLASSES" \
   "${ROOT}/test/PackedSimilarityParityTest.java" \
   "${ROOT}/test/PackedPreflightTest.java" \
   "${ROOT}/test/astralx/completion/PackedMatrixBoundaryTest.java" \
+  "${ROOT}/test/astralx/completion/TreeCompleterPolytomyTest.java" \
   "${ROOT}/test/SimilarityArgminTest.java" \
   "${ROOT}/test/ThreadingFailureTest.java" \
   "${ROOT}/test/WideSimilarityBoundaryTest.java"
 java -cp "${ROOT}/build:${TEST_CLASSES}" astralx.CliPresetsTest
 java -cp "${ROOT}/build:${TEST_CLASSES}" astralx.completion.PackedMatrixBoundaryTest
+java -cp "${ROOT}/build:${TEST_CLASSES}" astralx.completion.TreeCompleterPolytomyTest \
+  "${ROOT}/test/input/completion/incomplete_polytomy_7taxa.tre"
+
+polytomy_completion_score() {
+  java -cp "${ROOT}/build" astralx.Main --cpu -q \
+    -i "${ROOT}/test/input/tc16_polytomy_incomplete.tre" \
+    --search-space "$1" --intersection-method I3 2>&1 |
+    sed -n 's/.*Quartet score[[:space:]]*\([0-9][0-9]*\).*/\1/p'
+}
+[[ "$(polytomy_completion_score S2)" == "794" ]]
+[[ "$(polytomy_completion_score S3)" == "798" ]]
+
 java -Xmx1g -cp "${ROOT}/build:${TEST_CLASSES}" PackedPreflightTest
 java -cp "${ROOT}/build:${TEST_CLASSES}" PackedSimilarityParityTest \
   "${ROOT}/test/input/tc5_heavy_incomplete.tre"
