@@ -73,6 +73,57 @@ public final class TreeTaxa {
             totalMissing, minMissing, maxMissing);
     }
 
+    /**
+     * Coverage scan specialized for inference allow-lists. Only selected names
+     * are retained, so memory is O(size of the allow-list) even when the input
+     * contains a much larger outside taxon universe.
+     */
+    public static SelectionScan scanSelection(String inputFile, Set<String> selected)
+            throws IOException {
+        LinkedHashSet<String> selectedUnion = new LinkedHashSet<>();
+        long totalMissing = 0L;
+        long ignoredLeafOccurrences = 0L;
+        int minMissing = Integer.MAX_VALUE;
+        int maxMissing = 0;
+        int treeCount = 0;
+
+        try (BufferedReader reader = Files.newBufferedReader(
+                Path.of(inputFile), StandardCharsets.UTF_8)) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                line = line.trim();
+                if (line.isEmpty()) continue;
+
+                LinkedHashSet<String> current = new LinkedHashSet<>();
+                long[] ignoredInTree = {0L};
+                int[] leafCount = {0};
+                TreeParser.forEachTaxonName(line, name -> {
+                    leafCount[0]++;
+                    if (selected.contains(name)) current.add(name);
+                    else ignoredInTree[0]++;
+                });
+                if (leafCount[0] == 0) {
+                    throw new IllegalArgumentException(
+                        "Tree " + treeCount + " contains no taxon names: " + inputFile);
+                }
+
+                selectedUnion.addAll(current);
+                int missing = selected.size() - current.size();
+                totalMissing += missing;
+                ignoredLeafOccurrences += ignoredInTree[0];
+                minMissing = Math.min(minMissing, missing);
+                maxMissing = Math.max(maxMissing, missing);
+                treeCount++;
+            }
+        }
+
+        if (treeCount == 0) {
+            throw new IllegalArgumentException("Tree file is empty: " + inputFile);
+        }
+        return new SelectionScan(treeCount, selectedUnion, totalMissing,
+            minMissing, maxMissing, ignoredLeafOccurrences);
+    }
+
     /** Read a taxon allow-list: one name per non-empty line, retaining file order. */
     public static TaxaList readTaxaList(String taxaFile) throws IOException {
         LinkedHashSet<String> names = new LinkedHashSet<>();
@@ -126,6 +177,17 @@ public final class TreeTaxa {
                        long totalMissing,
                        int minMissing,
                        int maxMissing) {
+        public double meanMissing() {
+            return treeCount == 0 ? 0.0 : (double) totalMissing / treeCount;
+        }
+    }
+
+    public record SelectionScan(int treeCount,
+                                LinkedHashSet<String> selectedUnion,
+                                long totalMissing,
+                                int minMissing,
+                                int maxMissing,
+                                long ignoredLeafOccurrences) {
         public double meanMissing() {
             return treeCount == 0 ? 0.0 : (double) totalMissing / treeCount;
         }

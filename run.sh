@@ -52,7 +52,7 @@ Optional:
   --log-file FILE    Save run messages to FILE (progress remains terminal-only)
   --score-species-tree, --species-tree, --score, -c
                      Score the supplied species tree and exit
-  --taxa-file FILE   Score only the listed taxa (one name per line); requires --score
+  --taxa-file FILE   Restrict inference or scoring to listed taxa (one name per line)
   --extract-taxa     Extract input taxa and exit (union by default)
   --taxa-set MODE    Taxa extraction mode: union | intersection
   --cpu              Force CPU mode

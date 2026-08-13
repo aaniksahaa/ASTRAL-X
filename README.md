@@ -88,7 +88,7 @@ Use `astralx --help` for the complete option list and `astralx --diagnose` to
 check the packaged runtime, native libraries, driver, and GPU selection without
 loading a dataset.
 
-## Taxa extraction and taxon-restricted scoring
+## Taxa extraction and taxon-restricted analysis
 
 `extract-taxa.sh` uses the same Newick leaf-token scanner as ASTRAL-X. It writes
 only taxon names, sorted deterministically with one name per line. For a file
@@ -126,8 +126,30 @@ four selected taxa are discarded because they contribute zero quartets. The run
 reports duplicate list entries, taxa absent from the gene-tree union or species
 tree, ignored outside taxa, and the mean/minimum/maximum number of listed taxa
 missing per gene tree. Missing taxa are never inserted or assigned an arbitrary
-placement. Without `--taxa-file`, the established strict score-only and inference
-paths are unchanged.
+placement.
+
+The same allow-list can restrict species-tree inference:
+
+```bash
+./run.sh \
+  --input /path/to/gene_trees.nwk \
+  --taxa-file /path/to/taxa.txt \
+  --output /path/to/species_tree.nwk \
+  --intersection-method I3 \
+  --auto
+```
+
+For inference, the effective universe is the listed taxa that occur in at least
+one gene tree. Listed taxa absent from every gene tree are ignored, as are all
+unlisted leaves. Each gene tree is induced onto that universe while it is parsed:
+excluded leaves and resulting unary nodes are removed before compact tree arrays,
+hashes, clusters, partitions, matrices, or GPU inputs are built. Induced trees
+with two or three leaves remain available to the candidate search, while trees
+with fewer than two selected leaves are discarded. The inferred species tree and
+its reported quartet score therefore contain and score only effective taxa.
+
+Without `--taxa-file`, the established strict score-only and inference paths are
+unchanged.
 
 ## Running ASTRAL-X on Biological Datasets
 

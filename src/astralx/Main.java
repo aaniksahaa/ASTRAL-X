@@ -89,9 +89,18 @@ public class Main {
 
             // ── Phase 1: Parse gene trees ─────────────────────────────────────
             long t1 = PhaseLogger.begin("Phase 1  Parse gene trees", false);
-            TaxonRegistry registry = new TaxonRegistry();
-            List<Tree> trees = TreeParser.parseGeneTrees(
-                cfg.getInputFile(), registry, cfg.isKeepPolytomy());
+            TaxonRegistry registry;
+            List<Tree> trees;
+            if (cfg.getTaxaFile() == null) {
+                registry = new TaxonRegistry();
+                trees = TreeParser.parseGeneTrees(
+                    cfg.getInputFile(), registry, cfg.isKeepPolytomy());
+            } else {
+                RestrictedInferenceInput restricted =
+                    parseTaxonRestrictedInferenceInput(cfg);
+                registry = restricted.registry();
+                trees = restricted.trees();
+            }
             PhaseLogger.end("Phase 1  Parse gene trees", t1, false);
 
             if (cfg.isVerifyParse()) {
@@ -615,8 +624,12 @@ public class Main {
             System.err.println("--extract-taxa cannot be combined with --score-species-tree");
             return false;
         }
-        if (cfg.getTaxaFile() != null && !cfg.isScoreOnly()) {
-            System.err.println("--taxa-file is currently valid only with --score-species-tree");
+        if (cfg.isExtractTaxa() && cfg.getTaxaFile() != null) {
+            System.err.println("--extract-taxa cannot be combined with --taxa-file");
+            return false;
+        }
+        if (cfg.isDiagnose() && cfg.getTaxaFile() != null) {
+            System.err.println("--taxa-file requires a gene-tree analysis input");
             return false;
         }
         return true;
@@ -827,8 +840,9 @@ public class Main {
               -o, --output FILE                Output species tree (stdout when omitted)
               --log-file FILE                  Save run messages to FILE (progress remains terminal-only)
               -c, --score-species-tree FILE    Score one supplied species tree and exit
-              --taxa-file FILE                 In score-only mode, restrict both inputs to
-                                                 these taxa (one name per non-empty line)
+              --taxa-file FILE                 Restrict inference to these gene-tree taxa,
+                                                 or both inputs in score-only mode
+                                                 (one name per non-empty line)
               --extract-taxa                   Write input taxa, one name per line, and exit
               --taxa-set union|intersection    Multi-tree extraction operation (default: union)
               -t, -T, --threads, --num-threads N
@@ -907,6 +921,76 @@ public class Main {
         Logging.info("Extracted %d taxa by %s across the input trees; written to %s",
             count, cfg.getTaxaSetMode().name().toLowerCase(), destination);
     }
+
+    /**
+     * Build the inference universe from the allow-list and parse only its
+     * induced gene-tree leaves. The initial token scan determines which listed
+     * names actually occur; absent names are intentionally never registered.
+     */
+    private static RestrictedInferenceInput parseTaxonRestrictedInferenceInput(
+            Config cfg) throws IOException {
+        if (cfg.getOutputFile() != null
+                && sameNormalizedPath(cfg.getTaxaFile(), cfg.getOutputFile())) {
+            throw new IllegalArgumentException(
+                "Species-tree output file must differ from --taxa-file");
+        }
+
+        TreeTaxa.TaxaList taxaList = TreeTaxa.readTaxaList(cfg.getTaxaFile());
+        java.util.LinkedHashSet<String> requested = taxaList.names();
+        TreeTaxa.SelectionScan coverage =
+            TreeTaxa.scanSelection(cfg.getInputFile(), requested);
+        java.util.LinkedHashSet<String> effective = new java.util.LinkedHashSet<>();
+        for (String name : requested) {
+            if (coverage.selectedUnion().contains(name)) effective.add(name);
+        }
+
+        int requestedCount = requested.size();
+        int presentCount = coverage.selectedUnion().size();
+        int absent = requestedCount - presentCount;
+
+        Logging.info("Taxon filter report:");
+        Logging.info("  Taxa file: %d unique name(s)%s", requestedCount,
+            taxaList.duplicateLines() == 0 ? ""
+                : String.format(" (%d duplicate line(s) ignored)",
+                    taxaList.duplicateLines()));
+        Logging.info("  Gene trees: %d tree(s); listed taxa missing per tree "
+                + "mean=%.2f (%.3f%%), min=%d, max=%d",
+            coverage.treeCount(), coverage.meanMissing(),
+            percentage(coverage.meanMissing(), requestedCount),
+            coverage.minMissing(), coverage.maxMissing());
+        Logging.info("  Listed taxa absent from every gene tree: %d (%.3f%%)",
+            absent, percentage(absent, requestedCount));
+        Logging.info("  Ignored unlisted leaf occurrences: %d",
+            coverage.ignoredLeafOccurrences());
+        Logging.info("  Effective inference universe: %d taxa", effective.size());
+        if (absent > 0) {
+            Logging.warn("The inference universe excludes listed taxa absent from every "
+                + "gene tree; no placement is invented for them");
+        }
+        if (effective.size() < 4) {
+            throw new IllegalArgumentException("Fewer than four taxa from --taxa-file "
+                + "occur in the gene-tree union");
+        }
+
+        TaxonRegistry registry = new TaxonRegistry();
+        for (String name : effective) registry.register(name);
+        registry.lock();
+        if (cfg.isAnchorOutgroup() && cfg.getAnchorTaxon() >= registry.size()) {
+            throw new IllegalArgumentException("--anchor-taxon " + cfg.getAnchorTaxon()
+                + " is outside the filtered taxon range [0,"
+                + (registry.size() - 1) + "]");
+        }
+
+        TreeParser.RestrictedGeneTrees parsed = TreeParser.parseRestrictedGeneTrees(
+            cfg.getInputFile(), registry, cfg.isKeepPolytomy());
+        Logging.info("Taxon restriction retained %d/%d induced gene tree(s); discarded "
+                + "%d with fewer than two selected taxa",
+            parsed.trees().size(), parsed.sourceTreeCount(), parsed.droppedTreeCount());
+        Logging.info("Mode: INFERENCE with taxa file (outside and globally absent taxa ignored)");
+        return new RestrictedInferenceInput(registry, parsed.trees());
+    }
+
+    private record RestrictedInferenceInput(TaxonRegistry registry, List<Tree> trees) {}
 
     /**
      * Opt-in fixed-tree scoring on a named taxon subset.  This path is kept

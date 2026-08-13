@@ -213,10 +213,69 @@ FILTER_REPORT="$(NO_COLOR=1 java -cp "${ROOT}/build" astralx.Main --cpu \
 [[ "$FILTER_REPORT" == *"Ignored outside taxa: gene-tree union=1, species tree=1"* ]]
 [[ "$FILTER_REPORT" == *"Effective common scoring universe: 4 taxa"* ]]
 
+# Taxon-restricted inference must be identical to inference from manually
+# induced gene trees. This covers outside taxa, an absent listed taxon, a
+# duplicate allow-list line, unary suppression, retention of two/three-leaf trees,
+# dropping of zero/one-leaf trees, and restriction before binary refinement.
+for method in I1 I2 I3 I4; do
+  manual_tree="${TEST_CLASSES}/taxa-inference-manual-${method}.tre"
+  filtered_tree="${TEST_CLASSES}/taxa-inference-filtered-${method}.tre"
+  java -cp "${ROOT}/build" astralx.Main --cpu -q \
+    -i "${ROOT}/test/input/taxa_filter_inference_manual.tre" \
+    -o "$manual_tree" --im "$method" >/dev/null 2>&1
+  java -cp "${ROOT}/build" astralx.Main --cpu -q \
+    -i "${ROOT}/test/input/taxa_filter_inference_genes.tre" \
+    --taxa-file "${ROOT}/test/input/taxa_filter_list.txt" \
+    -o "$filtered_tree" --im "$method" >/dev/null 2>&1
+  cmp "$manual_tree" "$filtered_tree"
+  if grep -Eq '(^|[(,])(X|Y|Z)([),;]|$)' "$filtered_tree"; then
+    echo "taxon-restricted inference emitted an excluded/absent taxon" >&2
+    exit 1
+  fi
+done
+
+# Completion/consensus presets must consume only the induced universe too.
+for preset in S2 S3; do
+  manual_tree="${TEST_CLASSES}/taxa-inference-manual-${preset}.tre"
+  filtered_tree="${TEST_CLASSES}/taxa-inference-filtered-${preset}.tre"
+  java -cp "${ROOT}/build" astralx.Main --cpu -q \
+    -i "${ROOT}/test/input/taxa_filter_inference_manual.tre" \
+    -o "$manual_tree" --search-space "$preset" --im I3 >/dev/null 2>&1
+  java -cp "${ROOT}/build" astralx.Main --cpu -q \
+    -i "${ROOT}/test/input/taxa_filter_inference_genes.tre" \
+    --taxa-file "${ROOT}/test/input/taxa_filter_list.txt" \
+    -o "$filtered_tree" --search-space "$preset" --im I3 >/dev/null 2>&1
+  cmp "$manual_tree" "$filtered_tree"
+done
+
+# Native-polytomy inference follows the same induced-tree semantics.
+manual_poly_tree="${TEST_CLASSES}/taxa-inference-polytomy-manual.tre"
+filtered_poly_tree="${TEST_CLASSES}/taxa-inference-polytomy-filtered.tre"
+java -cp "${ROOT}/build" astralx.Main --cpu -q \
+  -i "${ROOT}/test/input/taxa_filter_polytomy_genes_manual.tre" \
+  -o "$manual_poly_tree" --keep-polytomy --search-mode full --im I2 \
+  >/dev/null 2>&1
+java -cp "${ROOT}/build" astralx.Main --cpu -q \
+  -i "${ROOT}/test/input/taxa_filter_polytomy_genes.tre" \
+  --taxa-file "${ROOT}/test/input/taxa_filter_polytomy_list.txt" \
+  -o "$filtered_poly_tree" --keep-polytomy --search-mode full --im I2 \
+  >/dev/null 2>&1
+cmp "$manual_poly_tree" "$filtered_poly_tree"
+
+INFERENCE_FILTER_REPORT="$(NO_COLOR=1 java -cp "${ROOT}/build" astralx.Main --cpu \
+  -i "${ROOT}/test/input/taxa_filter_inference_genes.tre" \
+  --taxa-file "${ROOT}/test/input/taxa_filter_list.txt" --im I2 2>&1)"
+[[ "$INFERENCE_FILTER_REPORT" == *"Effective inference universe: 4 taxa"* ]]
+[[ "$INFERENCE_FILTER_REPORT" == *"Listed taxa absent from every gene tree: 1 (20.000%)"* ]]
+[[ "$INFERENCE_FILTER_REPORT" == *"Ignored unlisted leaf occurrences: 9"* ]]
+[[ "$INFERENCE_FILTER_REPORT" == *"retained 6/8 induced gene tree(s)"* ]]
+[[ "$INFERENCE_FILTER_REPORT" == *"optimal quartet score ="* ]]
+
 if java -cp "${ROOT}/build" astralx.Main --cpu -q \
-    -i "${ROOT}/test/input/taxa_filter_genes.tre" \
-    --taxa-file "${ROOT}/test/input/taxa_filter_list.txt" >/dev/null 2>&1; then
-  echo "--taxa-file without score-only mode was unexpectedly accepted" >&2
+    -i "${ROOT}/test/input/taxa_filter_inference_genes.tre" \
+    --taxa-file "${ROOT}/test/input/taxa_filter_list.txt" \
+    -o "${ROOT}/test/input/taxa_filter_list.txt" >/dev/null 2>&1; then
+  echo "taxa-file/output collision was unexpectedly accepted for inference" >&2
   exit 1
 fi
 

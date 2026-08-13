@@ -32,6 +32,12 @@ public class TaxonRegistry {
         return id;
     }
 
+    /** Return a registered ID, or -1 when the name is outside this registry. */
+    public int findId(String name) {
+        Integer id = nameToId.get(name);
+        return id == null ? -1 : id;
+    }
+
     public String getName(int id) { return idToName[id]; }
     public int size()             { return nameToId.size(); }
     public boolean isLocked()     { return locked; }

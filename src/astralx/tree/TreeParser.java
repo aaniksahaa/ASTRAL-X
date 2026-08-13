@@ -78,12 +78,14 @@ public class TreeParser {
         AtomicInteger completed = new AtomicInteger(0);
         if (lines.size() > 1 && Threading.isStarted() && Threading.getNumThreads() > 1) {
             Threading.processRangeParallel(lines.size(), i -> {
-                parsed[i] = parseNewick(lines.get(i), i, registry, perTreeCounts[i], keepPolytomy);
+                parsed[i] = parseNewick(lines.get(i), i, registry, perTreeCounts[i],
+                    keepPolytomy);
                 parseBar.update(completed.incrementAndGet());
             });
         } else {
             for (int i = 0; i < lines.size(); i++) {
-                parsed[i] = parseNewick(lines.get(i), i, registry, perTreeCounts[i], keepPolytomy);
+                parsed[i] = parseNewick(lines.get(i), i, registry, perTreeCounts[i],
+                    keepPolytomy);
                 parseBar.update(i + 1);
             }
         }
@@ -136,6 +138,105 @@ public class TreeParser {
 
         return trees;
     }
+
+    /**
+     * Parse induced gene trees directly against a precomputed, locked taxon
+     * registry. Leaves outside the registry are discarded while the temporary
+     * Newick topology is assembled, before TreeNode objects or compact arrays
+     * are created. Unary nodes produced by filtering are suppressed.
+     *
+     * Trees retaining zero or one selected taxon are discarded because they
+     * cannot contribute a bipartition. Two- and three-taxon trees are retained:
+     * although they contain no quartet, their induced bipartitions can still be
+     * part of the inference candidate set.
+     */
+    public static RestrictedGeneTrees parseRestrictedGeneTrees(
+            String inputFile, TaxonRegistry registry, boolean keepPolytomy)
+            throws IOException {
+        if (!registry.isLocked()) {
+            throw new IllegalArgumentException(
+                "Restricted gene-tree parsing requires a locked taxon registry");
+        }
+
+        long t0 = System.nanoTime();
+        List<String> lines = readNonEmptyLines(inputFile);
+        if (lines.isEmpty()) {
+            throw new IllegalArgumentException("Tree file is empty: " + inputFile);
+        }
+        Logging.info("Read %d lines from %s", lines.size(), inputFile);
+        Logging.info("Registered %d selected taxa", registry.size());
+
+        Tree[] parsed = new Tree[lines.size()];
+        int[][] perTreeCounts = new int[lines.size()][6];
+        ProgressBar parseBar = new ProgressBar("Parsing filtered trees", lines.size());
+        AtomicInteger completed = new AtomicInteger(0);
+        if (lines.size() > 1 && Threading.isStarted() && Threading.getNumThreads() > 1) {
+            Threading.processRangeParallel(lines.size(), i -> {
+                parsed[i] = parseNewickRestricted(lines.get(i), i, registry,
+                    perTreeCounts[i], keepPolytomy);
+                parseBar.update(completed.incrementAndGet());
+            });
+        } else {
+            for (int i = 0; i < lines.size(); i++) {
+                parsed[i] = parseNewickRestricted(lines.get(i), i, registry,
+                    perTreeCounts[i], keepPolytomy);
+                parseBar.update(i + 1);
+            }
+        }
+        parseBar.done();
+
+        List<Tree> trees = new ArrayList<>(lines.size());
+        int dropped = 0;
+        for (Tree tree : parsed) {
+            if (tree == null) {
+                dropped++;
+                continue;
+            }
+            int treeIndex = trees.size();
+            trees.add(tree.treeIndex == treeIndex ? tree
+                : new Tree(treeIndex, tree.root, tree.postorderArray, tree.positionMap,
+                    tree.leafCount, registry.size(), tree.hasPolytomy));
+        }
+        if (trees.isEmpty()) {
+            throw new IllegalArgumentException(
+                "No gene tree retains at least two taxa after applying the taxa file");
+        }
+
+        int[] totals = new int[6];
+        for (int[] counts : perTreeCounts) {
+            for (int j = 0; j < totals.length; j++) totals[j] += counts[j];
+        }
+        long ms = (System.nanoTime() - t0) / 1_000_000;
+        Logging.info("Parsed %d induced gene trees in %d ms; discarded %d tree(s) "
+                + "with fewer than two selected taxa",
+            trees.size(), ms, dropped);
+        if (keepPolytomy) {
+            Logging.info("Filtered input polytomies: keeping %d node(s)", totals[4]);
+        } else if (totals[3] > 0) {
+            Logging.info("Filtered input binary refinement: resolved %d induced "
+                    + "multifurcation(s) after taxon restriction",
+                totals[3]);
+        }
+
+        if (Logging.isDebug()) {
+            int cap = Math.min(5, trees.size());
+            for (int i = 0; i < cap; i++) {
+                Tree tree = trees.get(i);
+                Logging.debug("  Induced tree %d: %d leaves, complete=%b  postorder=%s",
+                    i, tree.leafCount, tree.isComplete,
+                    Logging.isTrace() ? Arrays.toString(tree.postorderArray)
+                        : "(use -vvv to see)");
+            }
+            if (trees.size() > cap) {
+                Logging.debug("  ... (%d more trees not shown)", trees.size() - cap);
+            }
+        }
+        return new RestrictedGeneTrees(trees, lines.size(), dropped);
+    }
+
+    public record RestrictedGeneTrees(List<Tree> trees,
+                                      int sourceTreeCount,
+                                      int droppedTreeCount) {}
 
     /**
      * Parse one supplied species tree against an already-locked gene-tree taxon
@@ -280,9 +381,10 @@ public class TreeParser {
     /** Sentinel object pushed onto the stack to mark an open parenthesis. */
     private static final Object SENTINEL = new Object();
 
+    /** Established unfiltered parser; kept free of allow-list branches. */
     private static Tree parseNewick(String s, int treeIdx, TaxonRegistry reg,
                                     int[] rootingCounts, boolean keepPolytomy) {
-        int n = s.length(), totalTaxa = reg.size();
+        int n = s.length();
         Deque<Object> stack = new ArrayDeque<>();   // contains RawNode or SENTINEL
         int i = 0;
 
@@ -301,7 +403,6 @@ public class TreeParser {
 
                 // children were pushed left-to-right, popped right-to-left; restore order
                 Collections.reverse(children);
-
                 RawNode node = new RawNode();
                 node.children.addAll(children);
                 stack.push(node);
@@ -342,6 +443,86 @@ public class TreeParser {
         if (rawRoot.isLeaf()) {
             throw new RuntimeException("Tree " + treeIdx + ": root is a leaf");
         }
+
+        return buildTree(rawRoot, treeIdx, reg, rootingCounts, keepPolytomy);
+    }
+
+    /**
+     * Allow-list parser. Unknown leaves disappear at tokenization time and
+     * empty/unary clades are removed before the retained RawNode is converted.
+     */
+    private static Tree parseNewickRestricted(String s, int treeIdx,
+                                              TaxonRegistry reg,
+                                              int[] rootingCounts,
+                                              boolean keepPolytomy) {
+        int n = s.length();
+        Deque<Object> stack = new ArrayDeque<>();
+        int i = 0;
+
+        while (i < n) {
+            char c = s.charAt(i);
+            if (c == '(') {
+                stack.push(SENTINEL);
+                i++;
+            } else if (c == ')') {
+                List<RawNode> children = new ArrayList<>();
+                while (stack.peek() != SENTINEL) children.add((RawNode) stack.pop());
+                stack.pop();
+                Collections.reverse(children);
+
+                if (children.size() == 1) {
+                    stack.push(children.get(0));
+                } else if (children.size() > 1) {
+                    RawNode node = new RawNode();
+                    node.children.addAll(children);
+                    stack.push(node);
+                }
+
+                i++;
+                i = skipLabelAndBranchLen(s, i, n);
+            } else if (c == ',') {
+                i++;
+            } else if (c == ';') {
+                break;
+            } else if (c == ':') {
+                i = skipBranchLen(s, i + 1, n);
+            } else {
+                int start = i;
+                while (i < n && !isDelim(s.charAt(i))) i++;
+                String name = s.substring(start, i).trim();
+                int taxonId = name.isEmpty() ? -1 : reg.findId(name);
+                if (taxonId >= 0) {
+                    RawNode leaf = new RawNode();
+                    leaf.taxonId = taxonId;
+                    stack.push(leaf);
+                }
+                i = skipBranchLen(s, i, n);
+            }
+        }
+
+        if (stack.isEmpty()) return null;
+        if (stack.size() != 1) {
+            throw new RuntimeException("Tree " + treeIdx
+                + ": malformed Newick after taxon restriction, stack size=" + stack.size());
+        }
+        RawNode rawRoot = (RawNode) stack.pop();
+        if (rawRoot.isLeaf()) return null;
+
+        Tree tree = buildTree(rawRoot, treeIdx, reg, rootingCounts, keepPolytomy);
+        boolean[] seen = new boolean[reg.size()];
+        for (int taxonId : tree.postorderArray) {
+            if (seen[taxonId]) {
+                throw new IllegalArgumentException("Tree " + treeIdx
+                    + " contains duplicate selected taxon: " + reg.getName(taxonId));
+            }
+            seen[taxonId] = true;
+        }
+        return tree;
+    }
+
+    private static Tree buildTree(RawNode rawRoot, int treeIdx, TaxonRegistry reg,
+                                  int[] rootingCounts, boolean keepPolytomy) {
+        int totalTaxa = reg.size();
 
         // Validate arity and root unrooted trees; convert RawNode → TreeNode
         int polytomyCountBefore = rootingCounts[2];

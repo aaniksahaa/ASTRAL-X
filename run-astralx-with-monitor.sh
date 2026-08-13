@@ -47,7 +47,7 @@ Optional:
   --intersection-method I1..I4
                          Intersection method preset
   --keep-polytomy        Keep input polytomies for native unresolved-quartet scoring
-  --taxa-file FILE       Restrict score-only inputs to listed taxa (one per line)
+  --taxa-file FILE       Restrict inference or scoring to listed taxa (one per line)
   --log-file FILE        Save run messages to FILE (progress remains terminal-only)
   --no-time-monitor     Disable time monitoring
   --no-gpu-monitor      Disable GPU monitoring

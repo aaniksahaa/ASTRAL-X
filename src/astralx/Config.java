@@ -65,7 +65,7 @@ public class Config {
     private String outputFile;
     private String logFile;
     private String scoreSpeciesTreeFile;
-    /** Optional score-only taxon allow-list (one taxon name per non-empty line). */
+    /** Optional inference/scoring taxon allow-list (one name per non-empty line). */
     private String taxaFile;
     /** Parser-backed utility mode: write taxa from the input tree file and exit. */
     private boolean extractTaxa = false;

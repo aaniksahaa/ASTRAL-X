@@ -153,7 +153,7 @@ public class Banner {
             out.println("    " + row("Terminal log", c(WHT, logPath)));
         }
         if (cfg.getTaxaFile() != null) {
-            out.println("    " + row("Scoring taxa file", c(WHT, cfg.getTaxaFile())));
+            out.println("    " + row("Taxon allow-list", c(WHT, cfg.getTaxaFile())));
         }
         out.println();
 
