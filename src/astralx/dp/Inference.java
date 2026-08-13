@@ -5,6 +5,7 @@ import astralx.cluster.Cluster;
 import astralx.cluster.ClusterHash;
 import astralx.cluster.ClusterTable;
 import astralx.partition.PartitionTable;
+import astralx.hash.TaxonHasher;
 import astralx.taxon.TaxonRegistry;
 import astralx.tree.Tree;
 import astralx.util.Int128;
@@ -29,6 +30,9 @@ public class Inference {
     private final Map<ClusterHash, Int128>           dpMemoI    = new HashMap<>();   // INT128 score path
     private final Map<ClusterHash, BipartitionSplit> bestSplits = new HashMap<>();
     private String lastQuartetScore;
+    /** Exact inverse for every size-one cluster hash in the analysis universe. */
+    private Map<ClusterHash, Integer> singletonTaxa = Collections.emptyMap();
+    private TaxonHasher reconstructionHasher;
 
     // -------------------------------------------------------------------------
 
@@ -37,15 +41,18 @@ public class Inference {
      *
      * @param dpTable       DP search space (transitions)
      * @param weightTable   precomputed split scores
-     * @param clusterTable  for taxon-name lookups
+     * @param clusterTable  cluster exemplars used to recover split membership
      * @param trees         gene trees (for exemplar access)
      * @param registry      taxon ID ↔ name
+     * @param hasher        per-taxon hashes used to validate reconstruction
      * @return Newick string ending with ";"
      */
     public String run(DPTable dpTable, WeightTable weightTable,
                       ClusterTable clusterTable, List<Tree> trees,
-                      TaxonRegistry registry) {
+                      TaxonRegistry registry, TaxonHasher hasher) {
         long t0 = System.nanoTime();
+        reconstructionHasher = hasher;
+        indexSingletonTaxa(registry, hasher);
 
         ClusterHash root = dpTable.getRootHash();
 
@@ -74,8 +81,33 @@ public class Inference {
                 + "[long]  (%d ms)", totalScore, ms);
         }
 
-        String newick = buildNewick(root, dpTable, clusterTable, trees, registry) + ";";
+        BitSet rootMembers = new BitSet(registry.size());
+        rootMembers.set(0, registry.size());
+        validateMembers(root, rootMembers);
+        String newick = buildNewick(
+            root, clusterTable, trees, registry, rootMembers) + ";";
         return newick;
+    }
+
+    private void indexSingletonTaxa(TaxonRegistry registry, TaxonHasher hasher) {
+        if (hasher.numTaxa() != registry.size()) {
+            throw new IllegalArgumentException("Taxon hasher/registry size mismatch during "
+                + "species-tree reconstruction");
+        }
+        Map<ClusterHash, Integer> indexed = new HashMap<>(
+            Math.max(16, registry.size() * 2));
+        int m = hasher.numSeeds();
+        for (int taxonId = 0; taxonId < registry.size(); taxonId++) {
+            long[] sums = new long[m];
+            long[] xors = new long[m];
+            for (int seed = 0; seed < m; seed++) {
+                long value = hasher.get(seed, taxonId);
+                sums[seed] = value;
+                xors[seed] = value;
+            }
+            indexed.put(new ClusterHash(sums, xors, 1, m), taxonId);
+        }
+        singletonTaxa = indexed;
     }
 
     /** Raw quartet score from the most recent successful inference run. */
@@ -242,71 +274,170 @@ public class Inference {
     // Newick reconstruction
     // -------------------------------------------------------------------------
 
-    private String buildNewick(ClusterHash ch, DPTable dpTable,
-                                ClusterTable clusterTable,
-                                List<Tree> trees, TaxonRegistry registry) {
+    private String buildNewick(ClusterHash ch, ClusterTable clusterTable,
+                               List<Tree> trees, TaxonRegistry registry,
+                               BitSet members) {
+        if (members.cardinality() != ch.size) {
+            throw new IllegalStateException("Reconstructed cluster has "
+                + members.cardinality() + " taxa, expected " + ch.size);
+        }
+
         // Singleton
         if (ch.size == 1) {
-            return taxonName(ch, clusterTable, trees, registry);
+            return taxonName(ch, registry, members);
         }
 
         BipartitionSplit split = bestSplits.get(ch);
         if (split == null) {
-            // No split found: output polytomy with all taxa in this cluster
-            return polytomy(ch, clusterTable, trees, registry);
+            // No chosen resolution: emit exactly the membership inherited from
+            // the parent split.  This also covers valid DP residual clusters that
+            // have no ClusterTable exemplar (common with incomplete gene trees).
+            return polytomy(ch, registry, members);
         }
 
-        String left  = buildNewick(split.lo, dpTable, clusterTable, trees, registry);
-        String right = buildNewick(split.hi, dpTable, clusterTable, trees, registry);
+        BitSet[] childMembers = partitionMembers(
+            ch, members, split, clusterTable, trees, registry.size());
+        String left = buildNewick(
+            split.lo, clusterTable, trees, registry, childMembers[0]);
+        String right = buildNewick(
+            split.hi, clusterTable, trees, registry, childMembers[1]);
         return "(" + left + "," + right + ")";
     }
 
     /** Get the taxon name for a singleton cluster. */
-    private String taxonName(ClusterHash ch, ClusterTable ct,
-                              List<Tree> trees, TaxonRegistry registry) {
-        ClusterTable.Entry entry = ct.get(ch);
-        if (entry == null) return "?";
-        Cluster ex = entry.exemplar;
-        Tree t = trees.get(ex.treeIndex);
-        if (!ex.complement) {
-            return registry.getName(t.postorderArray[ex.left]);
-        } else {
-            // Complement singleton: find the one taxon NOT in [left, right)
-            for (int i = 0; i < t.leafCount; i++) {
-                if (i < ex.left || i >= ex.right)
-                    return registry.getName(t.postorderArray[i]);
-            }
-            return "?";
+    private String taxonName(ClusterHash ch, TaxonRegistry registry,
+                             BitSet members) {
+        int inheritedId = members.nextSetBit(0);
+        if (inheritedId >= 0 && members.nextSetBit(inheritedId + 1) < 0) {
+            return registry.getName(inheritedId);
         }
+        Integer taxonId = singletonTaxa.get(ch);
+        if (taxonId == null) {
+            throw new IllegalStateException(
+                "Cannot resolve singleton cluster to a taxon: " + ch);
+        }
+        return registry.getName(taxonId);
     }
 
-    /**
-     * Fallback for clusters with no split: emit a star (polytomy) by listing
-     * all taxa. Gets taxa from the exemplar cluster.
-     */
-    private String polytomy(ClusterHash ch, ClusterTable ct,
-                             List<Tree> trees, TaxonRegistry registry) {
-        ClusterTable.Entry entry = ct.get(ch);
-        if (entry == null) return "?";
-        Cluster ex = entry.exemplar;
-        Tree t = trees.get(ex.treeIndex);
+    /** Emit an unresolved cluster from its exact inherited membership. */
+    private String polytomy(ClusterHash ch, TaxonRegistry registry,
+                             BitSet members) {
         StringBuilder sb = new StringBuilder("(");
         boolean first = true;
-        if (!ex.complement) {
-            for (int i = ex.left; i < ex.right; i++) {
-                if (!first) sb.append(','); first = false;
-                sb.append(registry.getName(t.postorderArray[i]));
-            }
-        } else {
-            for (int i = 0; i < t.leafCount; i++) {
-                if (i >= ex.left && i < ex.right) continue;
-                if (!first) sb.append(','); first = false;
-                sb.append(registry.getName(t.postorderArray[i]));
-            }
+        for (int taxonId = members.nextSetBit(0); taxonId >= 0;
+                taxonId = members.nextSetBit(taxonId + 1)) {
+            if (!first) sb.append(',');
+            first = false;
+            sb.append(registry.getName(taxonId));
         }
         sb.append(')');
         return sb.toString();
     }
+
+    /**
+     * Recover one child from a concrete exemplar, then derive its sibling as the
+     * exact difference from the already-known parent membership.  This avoids
+     * requiring every valid DP residual cluster to have its own exemplar.
+     */
+    private BitSet[] partitionMembers(ClusterHash parentHash, BitSet parent,
+                                      BipartitionSplit split,
+                                      ClusterTable ct, List<Tree> trees,
+                                      int numTaxa) {
+        boolean tryLoFirst = split.lo.size <= split.hi.size;
+        ClusterHash firstHash = tryLoFirst ? split.lo : split.hi;
+        ClusterHash secondHash = tryLoFirst ? split.hi : split.lo;
+
+        BitSet first = explicitMembers(firstHash, ct, trees, numTaxa);
+        if (first == null || !isSubset(first, parent) || !matchesHash(first, firstHash)) {
+            firstHash = secondHash;
+            first = explicitMembers(firstHash, ct, trees, numTaxa);
+        }
+        if (first == null || !isSubset(first, parent) || !matchesHash(first, firstHash)) {
+            throw new IllegalStateException("Cannot recover either child membership for "
+                + "inferred split " + split + " within parent " + parent.cardinality());
+        }
+
+        BitSet second = (BitSet) parent.clone();
+        second.andNot(first);
+        ClusterHash derivedHash = firstHash.equals(split.lo) ? split.hi : split.lo;
+        ClusterHash algebraicResidual = ClusterHash.residual(parentHash, firstHash);
+        if (second.cardinality() != derivedHash.size
+                || !algebraicResidual.equals(derivedHash)) {
+            throw new IllegalStateException("Inferred split membership is inconsistent "
+                + "with its parent: " + split);
+        }
+
+        if (firstHash.equals(split.lo)) return new BitSet[] { first, second };
+        return new BitSet[] { second, first };
+    }
+
+    /** Materialize a cluster when it has a singleton identity or table exemplar. */
+    private BitSet explicitMembers(ClusterHash ch, ClusterTable ct,
+                                   List<Tree> trees, int numTaxa) {
+        if (ch.size == 1) {
+            Integer taxonId = singletonTaxa.get(ch);
+            if (taxonId == null) return null;
+            BitSet singleton = new BitSet(numTaxa);
+            singleton.set(taxonId);
+            return singleton;
+        }
+
+        ClusterTable.Entry entry = ct.get(ch);
+        if (entry == null) return null;
+        Cluster ex = entry.exemplar;
+        Tree tree = trees.get(ex.treeIndex);
+        BitSet explicit = new BitSet(numTaxa);
+        if (ex.complement) explicit.set(0, numTaxa);
+
+        if (ex.isMultiRange()) {
+            for (int range = 0; range < ex.los.length; range++) {
+                for (int pos = ex.los[range]; pos < ex.his[range]; pos++) {
+                    int taxonId = tree.postorderArray[pos];
+                    if (ex.complement) explicit.clear(taxonId);
+                    else explicit.set(taxonId);
+                }
+            }
+        } else {
+            for (int pos = ex.left; pos < ex.right; pos++) {
+                int taxonId = tree.postorderArray[pos];
+                if (ex.complement) explicit.clear(taxonId);
+                else explicit.set(taxonId);
+            }
+        }
+        return explicit;
+    }
+
+    private static boolean isSubset(BitSet candidate, BitSet parent) {
+        BitSet outside = (BitSet) candidate.clone();
+        outside.andNot(parent);
+        return outside.isEmpty();
+    }
+
+    private void validateMembers(ClusterHash expected, BitSet members) {
+        if (members.cardinality() != expected.size || !matchesHash(members, expected)) {
+            throw new IllegalStateException("Reconstructed cluster membership does not "
+                + "match its hash: expected " + expected + ", recovered "
+                + members.cardinality() + " taxa");
+        }
+    }
+
+    private boolean matchesHash(BitSet members, ClusterHash expected) {
+        int m = reconstructionHasher.numSeeds();
+        if (expected.sums.length != m) return false;
+        long[] sums = new long[m];
+        long[] xors = new long[m];
+        for (int taxonId = members.nextSetBit(0); taxonId >= 0;
+                taxonId = members.nextSetBit(taxonId + 1)) {
+            for (int seed = 0; seed < m; seed++) {
+                long value = reconstructionHasher.get(seed, taxonId);
+                sums[seed] += value;
+                xors[seed] ^= value;
+            }
+        }
+        return Arrays.equals(sums, expected.sums)
+            && Arrays.equals(xors, expected.xors);
+    }
+
 
     // -------------------------------------------------------------------------
     // Accessors for external use (e.g. scoring statistics)

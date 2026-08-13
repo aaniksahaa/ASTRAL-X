@@ -53,6 +53,20 @@ POLY_NATIVE_OUTPUT="$(NO_COLOR=1 java -cp "${ROOT}/build" astralx.Main --cpu -q 
 [[ "$POLY_DEFAULT_OUTPUT" == *"Phase 8  Final quartet scoring against unresolved input"* ]]
 [[ "$POLY_NATIVE_OUTPUT" != *"Phase 8  Final quartet scoring against unresolved input"* ]]
 
+# Incomplete-tree residual clusters need not have their own ClusterTable exemplar.
+# Reconstruction must inherit their exact parent membership instead of emitting
+# the historical "?" placeholder, and Phase 8 must accept the resulting tree.
+RECONSTRUCTION_OUTPUT="$(NO_COLOR=1 java -cp "${ROOT}/build" astralx.Main --cpu -q \
+  -i "${ROOT}/test/input/reconstruction_incomplete_polytomy.tre" \
+  --taxa-file "${ROOT}/test/input/reconstruction_incomplete_taxa.txt" \
+  --search-space S1 --intersection-method I3 2>&1)"
+RECONSTRUCTION_TREE="$(grep ';' <<<"$RECONSTRUCTION_OUTPUT" | tail -n1)"
+[[ -n "$RECONSTRUCTION_TREE" && "$RECONSTRUCTION_TREE" != *'?'* ]]
+for taxon in A B C D E F G H I J; do
+  [[ "$RECONSTRUCTION_TREE" == *"$taxon"* ]]
+done
+[[ "$RECONSTRUCTION_OUTPUT" == *"Phase 8  Final quartet scoring against unresolved input"* ]]
+
 java -Xmx1g -cp "${ROOT}/build:${TEST_CLASSES}" PackedPreflightTest
 java -cp "${ROOT}/build:${TEST_CLASSES}" PackedSimilarityParityTest \
   "${ROOT}/test/input/tc5_heavy_incomplete.tre"

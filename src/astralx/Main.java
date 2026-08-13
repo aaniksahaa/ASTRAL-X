@@ -436,9 +436,23 @@ public class Main {
             // ── Phase 7: Inference DP + tree reconstruction ───────────────────
             long t7 = PhaseLogger.begin("Phase 7  Inference", false);
             Inference inference = new Inference();
-            String speciesTree = inference.run(dpTable, weightTable, clusterTable, trees, registry);
+            String speciesTree = inference.run(
+                dpTable, weightTable, clusterTable, trees, registry, hasher);
             finalQuartetScore = inference.getLastQuartetScore();
             PhaseLogger.end("Phase 7  Inference", t7, false);
+
+            // Persist the inferred topology before the independent final scoring
+            // pass.  If scoring encounters an environmental/runtime failure, the
+            // expensive inference result remains available for a score-only retry.
+            if (cfg.getOutputFile() != null) {
+                try (java.io.PrintStream out = new java.io.PrintStream(
+                        new java.io.FileOutputStream(cfg.getOutputFile()))) {
+                    out.println(speciesTree);
+                }
+                Logging.info("Species tree written to %s", cfg.getOutputFile());
+            } else {
+                System.out.println(speciesTree);
+            }
 
             boolean recomputeFinalScore = inferenceInputHasPolytomy
                 && !cfg.isKeepPolytomyDuringInference();
@@ -480,16 +494,6 @@ public class Main {
                     finalQuartetScore, reason);
             }
 
-            // Write or print the species tree
-            if (cfg.getOutputFile() != null) {
-                try (java.io.PrintStream out = new java.io.PrintStream(
-                        new java.io.FileOutputStream(cfg.getOutputFile()))) {
-                    out.println(speciesTree);
-                }
-                Logging.info("Species tree written to %s", cfg.getOutputFile());
-            } else {
-                System.out.println(speciesTree);
-            }
             analysisCompleted = true;
 
         } finally {
