@@ -38,10 +38,20 @@ polytomy_completion_score() {
     --search-space "$1" --intersection-method I3 "${@:2}" 2>&1 |
     sed -n 's/.*Quartet score[[:space:]]*\([0-9][0-9]*\).*/\1/p'
 }
-[[ "$(polytomy_completion_score S2)" == "998" ]]
-[[ "$(polytomy_completion_score S3)" == "998" ]]
-[[ "$(polytomy_completion_score S2 --keep-polytomy)" == "794" ]]
-[[ "$(polytomy_completion_score S3 --keep-polytomy)" == "798" ]]
+[[ "$(polytomy_completion_score S2)" == "784" ]]
+[[ "$(polytomy_completion_score S3)" == "784" ]]
+[[ "$(polytomy_completion_score S2 --keep-polytomy-during-inference)" == "794" ]]
+[[ "$(polytomy_completion_score S3 --keep-polytomy-during-inference)" == "798" ]]
+
+POLY_DEFAULT_OUTPUT="$(NO_COLOR=1 java -cp "${ROOT}/build" astralx.Main --cpu -q \
+  -i "${ROOT}/test/input/tc16_polytomy_incomplete.tre" \
+  --search-space S2 --intersection-method I3 2>&1)"
+POLY_NATIVE_OUTPUT="$(NO_COLOR=1 java -cp "${ROOT}/build" astralx.Main --cpu -q \
+  -i "${ROOT}/test/input/tc16_polytomy_incomplete.tre" \
+  --search-space S2 --intersection-method I3 \
+  --keep-polytomy-during-inference 2>&1)"
+[[ "$POLY_DEFAULT_OUTPUT" == *"Phase 8  Final quartet scoring against unresolved input"* ]]
+[[ "$POLY_NATIVE_OUTPUT" != *"Phase 8  Final quartet scoring against unresolved input"* ]]
 
 java -Xmx1g -cp "${ROOT}/build:${TEST_CLASSES}" PackedPreflightTest
 java -cp "${ROOT}/build:${TEST_CLASSES}" PackedSimilarityParityTest \
@@ -66,8 +76,14 @@ HELP_TEXT="$(NO_COLOR=1 java -cp "${ROOT}/build" astralx.Main --help 2>&1)"
 [[ "$HELP_TEXT" == *"ASTRAL-X  v1.0.0"* ]]
 [[ "$HELP_TEXT" == *"Usage:"* ]]
 [[ "$HELP_TEXT" == *"--log-file FILE"* ]]
-[[ "$HELP_TEXT" == *"--keep-polytomy"* ]]
+[[ "$HELP_TEXT" == *"--keep-polytomy-during-inference"* ]]
 [[ "$(NO_COLOR=1 java -cp "${ROOT}/build" astralx.Main -h 2>&1)" == "$HELP_TEXT" ]]
+if java -cp "${ROOT}/build" astralx.Main --cpu -q \
+    -i "${ROOT}/test/input/tc1_complete_only.tre" --keep-polytomy \
+    >/dev/null 2>&1; then
+  echo "removed --keep-polytomy option was unexpectedly accepted" >&2
+  exit 1
+fi
 
 run_score() {
   java -cp "${ROOT}/build" astralx.Main --cpu -q \
@@ -116,6 +132,7 @@ SUMMARY_OUTPUT="$(java -cp "${ROOT}/build" astralx.Main --cpu -q \
 [[ "$SUMMARY_OUTPUT" == *"Max CPU RAM"* ]]
 [[ "$SUMMARY_OUTPUT" == *"Max GPU VRAM"* ]]
 [[ "$SUMMARY_OUTPUT" == *"N/A (CPU execution)"* ]]
+[[ "$SUMMARY_OUTPUT" != *"Phase 8  Final quartet scoring against unresolved input"* ]]
 
 LOG_TREE="${TEST_CLASSES}/logged-tree.tre"
 LOG_FILE="${TEST_CLASSES}/nested/astralx.log"
@@ -193,12 +210,12 @@ for method in I1 I2 I3 I4; do
   manual_score="$(java -cp "${ROOT}/build" astralx.Main --cpu -q \
     -i "${ROOT}/test/input/taxa_filter_polytomy_genes_manual.tre" \
     --score-species-tree "${ROOT}/test/input/taxa_filter_polytomy_species_manual.tre" \
-    --keep-polytomy --im "$method" 2>&1 | score_value)"
+    --im "$method" 2>&1 | score_value)"
   filtered_score="$(java -cp "${ROOT}/build" astralx.Main --cpu -q \
     -i "${ROOT}/test/input/taxa_filter_polytomy_genes.tre" \
     --score-species-tree "${ROOT}/test/input/taxa_filter_polytomy_species.tre" \
     --taxa-file "${ROOT}/test/input/taxa_filter_polytomy_list.txt" \
-    --keep-polytomy --im "$method" 2>&1 | score_value)"
+    --im "$method" 2>&1 | score_value)"
   [[ -n "$manual_score" && "$filtered_score" == "$manual_score" ]]
 done
 
@@ -253,14 +270,37 @@ manual_poly_tree="${TEST_CLASSES}/taxa-inference-polytomy-manual.tre"
 filtered_poly_tree="${TEST_CLASSES}/taxa-inference-polytomy-filtered.tre"
 java -cp "${ROOT}/build" astralx.Main --cpu -q \
   -i "${ROOT}/test/input/taxa_filter_polytomy_genes_manual.tre" \
-  -o "$manual_poly_tree" --keep-polytomy --search-mode full --im I2 \
+  -o "$manual_poly_tree" --keep-polytomy-during-inference --search-mode full --im I2 \
   >/dev/null 2>&1
 java -cp "${ROOT}/build" astralx.Main --cpu -q \
   -i "${ROOT}/test/input/taxa_filter_polytomy_genes.tre" \
   --taxa-file "${ROOT}/test/input/taxa_filter_polytomy_list.txt" \
-  -o "$filtered_poly_tree" --keep-polytomy --search-mode full --im I2 \
+  -o "$filtered_poly_tree" --keep-polytomy-during-inference --search-mode full --im I2 \
   >/dev/null 2>&1
 cmp "$manual_poly_tree" "$filtered_poly_tree"
+
+# With default refinement, both runs must re-score the inferred topology against
+# unresolved gene trees, and the taxa-file run must use only its induced universe.
+manual_poly_default_tree="${TEST_CLASSES}/taxa-inference-polytomy-manual-default.tre"
+filtered_poly_default_tree="${TEST_CLASSES}/taxa-inference-polytomy-filtered-default.tre"
+manual_poly_default_output="$(java -cp "${ROOT}/build" astralx.Main --cpu -q \
+  -i "${ROOT}/test/input/taxa_filter_polytomy_genes_manual.tre" \
+  -o "$manual_poly_default_tree" --search-mode full --im I2 2>&1)"
+filtered_poly_default_output="$(java -cp "${ROOT}/build" astralx.Main --cpu -q \
+  -i "${ROOT}/test/input/taxa_filter_polytomy_genes.tre" \
+  --taxa-file "${ROOT}/test/input/taxa_filter_polytomy_list.txt" \
+  -o "$filtered_poly_default_tree" --search-mode full --im I2 2>&1)"
+cmp "$manual_poly_default_tree" "$filtered_poly_default_tree"
+manual_poly_final_score="$(sed -n \
+  's/.*Quartet score[[:space:]]*\([0-9][0-9]*\).*/\1/p' \
+  <<<"$manual_poly_default_output" | tail -n1)"
+filtered_poly_final_score="$(sed -n \
+  's/.*Quartet score[[:space:]]*\([0-9][0-9]*\).*/\1/p' \
+  <<<"$filtered_poly_default_output" | tail -n1)"
+[[ "$manual_poly_final_score" == "16" ]]
+[[ "$filtered_poly_final_score" == "$manual_poly_final_score" ]]
+[[ "$filtered_poly_default_output" == \
+   *"Phase 8  Final quartet scoring against unresolved input"* ]]
 
 INFERENCE_FILTER_REPORT="$(NO_COLOR=1 java -cp "${ROOT}/build" astralx.Main --cpu \
   -i "${ROOT}/test/input/taxa_filter_inference_genes.tre" \
@@ -269,7 +309,7 @@ INFERENCE_FILTER_REPORT="$(NO_COLOR=1 java -cp "${ROOT}/build" astralx.Main --cp
 [[ "$INFERENCE_FILTER_REPORT" == *"Listed taxa absent from every gene tree: 1 (20.000%)"* ]]
 [[ "$INFERENCE_FILTER_REPORT" == *"Ignored unlisted leaf occurrences: 9"* ]]
 [[ "$INFERENCE_FILTER_REPORT" == *"retained 6/8 induced gene tree(s)"* ]]
-[[ "$INFERENCE_FILTER_REPORT" == *"optimal quartet score ="* ]]
+[[ "$INFERENCE_FILTER_REPORT" == *"Final quartet score ="* ]]
 
 if java -cp "${ROOT}/build" astralx.Main --cpu -q \
     -i "${ROOT}/test/input/taxa_filter_inference_genes.tre" \

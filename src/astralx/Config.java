@@ -80,8 +80,11 @@ public class Config {
     private long baseSeed = 0xDEADBEEFCAFEL;
     private int verbosity = 1; // 0=quiet 1=INFO 2=DEBUG 3=TRACE
     private boolean treatAsUnrooted = true;
-    /** Default false: deterministically refine input multifurcations to binary trees. */
-    private boolean keepPolytomy = false;
+    /**
+     * Inference-only input policy.  Final quartet scoring always preserves genuine
+     * input multifurcations, independently of this setting.
+     */
+    private boolean keepPolytomyDuringInference = false;
     private SearchMode searchMode = SearchMode.LOCAL;
     private WeightIntersectionMethod weightIntersectionMethod = WeightIntersectionMethod.PREFIX_SUM;
     private LargeScoreType largeScoreType = LargeScoreType.INT128;
@@ -262,8 +265,12 @@ public class Config {
     public void setVerbosity(int v)           { this.verbosity = v; }
     public boolean getTreatAsUnrooted()       { return treatAsUnrooted; }
     public void setTreatAsUnrooted(boolean u) { this.treatAsUnrooted = u; }
-    public boolean isKeepPolytomy()            { return keepPolytomy; }
-    public void setKeepPolytomy(boolean keep)  { this.keepPolytomy = keep; }
+    public boolean isKeepPolytomyDuringInference() {
+        return keepPolytomyDuringInference;
+    }
+    public void setKeepPolytomyDuringInference(boolean keep) {
+        this.keepPolytomyDuringInference = keep;
+    }
     public SearchMode getSearchMode()          { return searchMode; }
     public void setSearchMode(SearchMode s)   { this.searchMode = s; }
     public WeightIntersectionMethod getWeightIntersectionMethod()        { return weightIntersectionMethod; }

@@ -25,7 +25,7 @@ import java.util.function.Consumer;
  *   Root node with 3 children → unrooted binary tree; arbitrarily rooted here
  *                                (ASTRAL is rooting-agnostic, so any choice is fine).
  *   Default                            → deterministic first-pair binary refinement.
- *   --keep-polytomy internal degree≥3 → native polytomous node.
+ *   keepPolytomy=true internal degree≥3 → native polytomous node.
  *
  * After parsing every node has a half-open range [rangeStart, rangeEnd) that indexes
  * into the tree's postorderArray (left-to-right leaf ordering).
@@ -50,6 +50,18 @@ public class TreeParser {
     public static List<Tree> parseGeneTrees(String inputFile,
                                              TaxonRegistry registry,
                                              boolean keepPolytomy) throws IOException {
+        return parseGeneTreesDetailed(inputFile, registry, keepPolytomy).trees();
+    }
+
+    /**
+     * Parse gene trees and retain whether genuine unresolved multifurcations were
+     * observed before any deterministic refinement.  A three-child unrooted root
+     * is a binary unrooted representation and is intentionally not counted.
+     */
+    public static ParsedGeneTrees parseGeneTreesDetailed(String inputFile,
+                                                          TaxonRegistry registry,
+                                                          boolean keepPolytomy)
+            throws IOException {
         long t0 = System.nanoTime();
 
         // Read all non-empty lines
@@ -136,8 +148,11 @@ public class TreeParser {
                 Logging.debug("  ... (%d more trees not shown)", trees.size() - cap);
         }
 
-        return trees;
+        return new ParsedGeneTrees(trees, totals[4]);
     }
+
+    public record ParsedGeneTrees(List<Tree> trees,
+                                  int detectedPolytomyNodeCount) {}
 
     /**
      * Parse induced gene trees directly against a precomputed, locked taxon
@@ -231,12 +246,13 @@ public class TreeParser {
                 Logging.debug("  ... (%d more trees not shown)", trees.size() - cap);
             }
         }
-        return new RestrictedGeneTrees(trees, lines.size(), dropped);
+        return new RestrictedGeneTrees(trees, lines.size(), dropped, totals[4]);
     }
 
     public record RestrictedGeneTrees(List<Tree> trees,
                                       int sourceTreeCount,
-                                      int droppedTreeCount) {}
+                                      int droppedTreeCount,
+                                      int detectedPolytomyNodeCount) {}
 
     /**
      * Parse one supplied species tree against an already-locked gene-tree taxon
@@ -273,6 +289,23 @@ public class TreeParser {
                 + "(%d binary 3-furcation, %d polytomy root).",
                 rootingCounts[0], rootingCounts[1]);
         }
+        return tree;
+    }
+
+    /** Parse an in-memory inferred species-tree Newick against a locked registry. */
+    public static Tree parseSpeciesTreeNewick(String newick,
+                                              TaxonRegistry registry) {
+        if (!registry.isLocked()) {
+            throw new IllegalArgumentException(
+                "Species-tree parsing requires a locked taxon registry");
+        }
+        if (newick == null || newick.isBlank()) {
+            throw new IllegalArgumentException("Species-tree Newick is empty");
+        }
+
+        int[] rootingCounts = new int[6];
+        Tree tree = parseNewick(newick.trim(), 0, registry, rootingCounts, true);
+        validateCompleteTaxonSet(tree, registry, "inferred species tree");
         return tree;
     }
 

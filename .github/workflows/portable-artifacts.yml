@@ -86,7 +86,7 @@ jobs:
           output="$("$launcher" --gpu-strict --search-mode full \
             --weight-intersection-method simple-tree-walk \
             -i test/input/tc1_complete_only.tre -o cuda-smoke.tre -vv 2>&1)"
-          grep -q 'optimal quartet score = 10' <<<"$output"
+          grep -q 'Final quartet score = 10' <<<"$output"
 
       - name: Validate real CUDA execution
         if: matrix.cuda && matrix.family == 'windows'
@@ -98,7 +98,7 @@ jobs:
           $output = (& $launcher.FullName --gpu-strict --search-mode full `
             --weight-intersection-method simple-tree-walk `
             -i test/input/tc1_complete_only.tre -o cuda-smoke.tre -vv 2>&1 | Out-String)
-          if ($LASTEXITCODE -ne 0 -or $output -notmatch 'optimal quartet score = 10') {
+          if ($LASTEXITCODE -ne 0 -or $output -notmatch 'Final quartet score = 10') {
             throw "Packaged CUDA inference did not produce the exact oracle score."
           }
 

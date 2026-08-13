@@ -35,7 +35,8 @@ public final class PolytomyPreprocessingTest {
 
         Parsed kept = parse(args[0], true);
         for (Tree tree : kept.trees) {
-            check(tree.hasPolytomy, "--keep-polytomy lost native node in tree " + tree.treeIndex);
+            check(tree.hasPolytomy,
+                "polytomy-preserving parse lost native node in tree " + tree.treeIndex);
             check(!tree.isComplete, "keep-path fixture tree must remain incomplete");
         }
         System.out.println("Polytomy preprocessing/clean.py parity: PASS");

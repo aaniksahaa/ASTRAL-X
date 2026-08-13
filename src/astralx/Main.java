@@ -79,6 +79,7 @@ public class Main {
         long t0 = System.nanoTime();
         String finalQuartetScore = null;
         boolean analysisCompleted = false;
+        boolean inferenceInputHasPolytomy = false;
 
         try {
             if (cfg.isScoreOnly() && cfg.getTaxaFile() != null) {
@@ -93,13 +94,18 @@ public class Main {
             List<Tree> trees;
             if (cfg.getTaxaFile() == null) {
                 registry = new TaxonRegistry();
-                trees = TreeParser.parseGeneTrees(
-                    cfg.getInputFile(), registry, cfg.isKeepPolytomy());
+                boolean keepPolytomy = cfg.isScoreOnly()
+                    || cfg.isKeepPolytomyDuringInference();
+                TreeParser.ParsedGeneTrees parsed = TreeParser.parseGeneTreesDetailed(
+                    cfg.getInputFile(), registry, keepPolytomy);
+                trees = parsed.trees();
+                inferenceInputHasPolytomy = parsed.detectedPolytomyNodeCount() > 0;
             } else {
                 RestrictedInferenceInput restricted =
                     parseTaxonRestrictedInferenceInput(cfg);
                 registry = restricted.registry();
                 trees = restricted.trees();
+                inferenceInputHasPolytomy = restricted.hasPolytomy();
             }
             PhaseLogger.end("Phase 1  Parse gene trees", t1, false);
 
@@ -434,6 +440,46 @@ public class Main {
             finalQuartetScore = inference.getLastQuartetScore();
             PhaseLogger.end("Phase 7  Inference", t7, false);
 
+            boolean recomputeFinalScore = inferenceInputHasPolytomy
+                && !cfg.isKeepPolytomyDuringInference();
+            if (recomputeFinalScore) {
+                // The inference state can be enormous.  Drop all topology/weight
+                // references before re-reading unresolved gene trees so the final
+                // fixed-tree pass does not require both full working sets at once.
+                weightTable = null;
+                partTable = null;
+                dpTable = null;
+                clusterTable = null;
+                weightClusterTrees = null;
+                trees = null;
+                originalTrees = null;
+                hasher = null;
+                System.gc();
+
+                long t8 = PhaseLogger.begin(
+                    "Phase 8  Final quartet scoring against unresolved input", false);
+                FinalScoringInput scoringInput = parseFinalScoringInput(cfg, registry);
+                Tree scoredSpeciesTree = TreeParser.parseSpeciesTreeNewick(
+                    speciesTree, scoringInput.registry());
+                TaxonHasher scoringHasher = new TaxonHasher(
+                    scoringInput.registry().size(), cfg.getNumHashSeeds(), cfg.getBaseSeed());
+                PrefixHashArrays scoringPref = new PrefixHashArrays(
+                    scoringInput.trees(), scoringHasher);
+                finalQuartetScore = calculateFixedTreeScore(
+                    cfg, scoringInput.registry(), scoringInput.trees(), scoringPref,
+                    scoringHasher, scoredSpeciesTree, "Final score", "Final scoring");
+                PhaseLogger.end(
+                    "Phase 8  Final quartet scoring against unresolved input", t8, false);
+                Logging.info("Final quartet score = %s  [recomputed from native input "
+                    + "polytomies]", finalQuartetScore);
+            } else {
+                String reason = cfg.isKeepPolytomyDuringInference()
+                    ? "inference preserved native input polytomies"
+                    : "no unresolved input polytomies detected";
+                Logging.info("Final quartet score = %s  [reused inference DP score; %s]",
+                    finalQuartetScore, reason);
+            }
+
             // Write or print the species tree
             if (cfg.getOutputFile() != null) {
                 try (java.io.PrintStream out = new java.io.PrintStream(
@@ -563,7 +609,8 @@ public class Main {
                 case "-m","--seeds"    -> { if (++i>=args.length) return false; cfg.setNumHashSeeds(Integer.parseInt(args[i])); }
                 case "--rooted"        -> cfg.setTreatAsUnrooted(false);
                 case "--unrooted"      -> cfg.setTreatAsUnrooted(true);
-                case "--keep-polytomy", "--keep-polytomies" -> cfg.setKeepPolytomy(true);
+                case "--keep-polytomy-during-inference" ->
+                    cfg.setKeepPolytomyDuringInference(true);
                 case "--no-gpu-batch"    -> cfg.setGpuBatch(false);
                 case "--gpu-batch-size"  -> { if (++i>=args.length) return false; cfg.setGpuBatchSize(Integer.parseInt(args[i])); }
                 case "--gpu-batches"     -> { if (++i>=args.length) return false; cfg.setGpuNumBatches(Integer.parseInt(args[i])); }
@@ -869,7 +916,8 @@ public class Main {
               --anchor-taxon ID                 Anchor taxon ID (default: 0)
               --no-prune-search-space           Disable reachability pruning
               --rooted | --unrooted             Input treatment (default: unrooted)
-              --keep-polytomy                    Keep input polytomies for native scoring
+              --keep-polytomy-during-inference   Preserve input polytomies while inferring;
+                                                  final scoring always preserves them
                                                  (default: deterministic binary refinement)
               -m, --seeds N                     Number of cluster-hash seeds
 
@@ -982,15 +1030,41 @@ public class Main {
         }
 
         TreeParser.RestrictedGeneTrees parsed = TreeParser.parseRestrictedGeneTrees(
-            cfg.getInputFile(), registry, cfg.isKeepPolytomy());
+            cfg.getInputFile(), registry, cfg.isKeepPolytomyDuringInference());
         Logging.info("Taxon restriction retained %d/%d induced gene tree(s); discarded "
                 + "%d with fewer than two selected taxa",
             parsed.trees().size(), parsed.sourceTreeCount(), parsed.droppedTreeCount());
         Logging.info("Mode: INFERENCE with taxa file (outside and globally absent taxa ignored)");
-        return new RestrictedInferenceInput(registry, parsed.trees());
+        return new RestrictedInferenceInput(registry, parsed.trees(),
+            parsed.detectedPolytomyNodeCount() > 0);
     }
 
-    private record RestrictedInferenceInput(TaxonRegistry registry, List<Tree> trees) {}
+    private record RestrictedInferenceInput(TaxonRegistry registry, List<Tree> trees,
+                                            boolean hasPolytomy) {}
+
+    /**
+     * Re-read exactly the scoring universe while retaining native input
+     * multifurcations.  The inference registry is reused for a taxa-file run so
+     * globally absent listed names remain excluded exactly as they were during
+     * inference.
+     */
+    private static FinalScoringInput parseFinalScoringInput(
+            Config cfg, TaxonRegistry inferenceRegistry) throws IOException {
+        if (cfg.getTaxaFile() == null) {
+            TaxonRegistry scoringRegistry = new TaxonRegistry();
+            List<Tree> scoringTrees = TreeParser.parseGeneTrees(
+                cfg.getInputFile(), scoringRegistry, true);
+            return new FinalScoringInput(scoringRegistry, scoringTrees);
+        }
+
+        TreeParser.RestrictedGeneTrees parsed = TreeParser.parseRestrictedGeneTrees(
+            cfg.getInputFile(), inferenceRegistry, true);
+        Logging.info("Final scoring retained %d/%d taxa-restricted gene tree(s)",
+            parsed.trees().size(), parsed.sourceTreeCount());
+        return new FinalScoringInput(inferenceRegistry, parsed.trees());
+    }
+
+    private record FinalScoringInput(TaxonRegistry registry, List<Tree> trees) {}
 
     /**
      * Opt-in fixed-tree scoring on a named taxon subset.  This path is kept
@@ -1069,7 +1143,7 @@ public class Main {
         long tg = PhaseLogger.begin("Score filter  Parse and restrict gene trees", false);
         TaxonRegistry sourceRegistry = new TaxonRegistry();
         List<Tree> sourceTrees = TreeParser.parseGeneTrees(
-            cfg.getInputFile(), sourceRegistry, cfg.isKeepPolytomy());
+            cfg.getInputFile(), sourceRegistry, true);
         TreeRestrictor.GeneResult restrictedGenes = TreeRestrictor.restrictGeneTrees(
             sourceTrees, sourceRegistry, targetRegistry);
         List<Tree> geneTrees = restrictedGenes.trees();
@@ -1137,46 +1211,9 @@ public class Main {
                                                    PrefixHashArrays genePref,
                                                    TaxonHasher hasher,
                                                    Tree speciesTree) throws IOException {
-        List<Tree> speciesTrees = java.util.List.of(speciesTree);
-
-        long tp = PhaseLogger.begin("Score mode  Species-tree hashing", false);
-        PrefixHashArrays speciesPref = new PrefixHashArrays(speciesTrees, hasher);
-        PhaseLogger.end("Score mode  Species-tree hashing", tp, false);
-
-        long tc = PhaseLogger.begin("Score mode  Species-tree clusters", false);
-        ClusterTable speciesClusters = new ClusterTable(speciesTrees, speciesPref, registry.size());
-        PhaseLogger.end("Score mode  Species-tree clusters", tc, false);
-
-        long tg = PhaseLogger.begin("Score mode  Gene-tree tripartitions", false);
-        // Simple tree-walk consumes the original gene-tree topology directly; it
-        // never reads PartitionTable.  Avoid materialising that very large table
-        // in score-only mode (notably, the 9,524-taxon angiosperm data otherwise
-        // needs tens of GiB merely to reach the weight kernel).
-        PartitionTable genePartitions = null;
-        if (cfg.getWeightIntersectionMethod()
-                != Config.WeightIntersectionMethod.SIMPLE_TREE_WALK) {
-            genePartitions = new PartitionTable(geneTrees, genePref);
-        } else {
-            Logging.info("Score-only tree-walk: skipped unused gene-tree PartitionTable");
-        }
-        PhaseLogger.end("Score mode  Gene-tree tripartitions", tg, false);
-
-        long td = PhaseLogger.begin("Score mode  Fixed-tree DP transitions", false);
-        DPTable speciesDP = new DPTable(speciesTrees, speciesPref, speciesClusters);
-        if (cfg.isAnchorOutgroup()) {
-            speciesDP.applyAnchoredRoot(speciesClusters.getAnchorHash());
-        }
-        PhaseLogger.end("Score mode  Fixed-tree DP transitions", td, false);
-
-        boolean gpuWeight = cfg.getComputeMode() == Config.ComputeMode.GPU
-                            && GPUWeightCalculator.isLoaded();
-        long tw = PhaseLogger.begin("Score mode  Weight calculation", gpuWeight);
-        WeightTable weightTable = new WeightTable(speciesDP, genePartitions, speciesClusters,
-                                                  speciesTrees, geneTrees);
-        PhaseLogger.end("Score mode  Weight calculation", tw, gpuWeight);
-
-        Inference scorer = new Inference();
-        String score = scorer.scoreFixedTree(speciesDP, weightTable);
+        String score = calculateFixedTreeScore(
+            cfg, registry, geneTrees, genePref, hasher, speciesTree,
+            "Score mode", "Score-only");
         String line = "QUARTET_SCORE: " + score;
         System.out.println(line);
         if (cfg.getOutputFile() != null) {
@@ -1186,5 +1223,56 @@ public class Main {
             Logging.info("Quartet score written to %s", cfg.getOutputFile());
         }
         return score;
+    }
+
+    private static String calculateFixedTreeScore(Config cfg,
+                                                   TaxonRegistry registry,
+                                                   List<Tree> geneTrees,
+                                                   PrefixHashArrays genePref,
+                                                   TaxonHasher hasher,
+                                                   Tree speciesTree,
+                                                   String phasePrefix,
+                                                   String scoreLogLabel) {
+        List<Tree> speciesTrees = java.util.List.of(speciesTree);
+
+        long tp = PhaseLogger.begin(phasePrefix + "  Species-tree hashing", false);
+        PrefixHashArrays speciesPref = new PrefixHashArrays(speciesTrees, hasher);
+        PhaseLogger.end(phasePrefix + "  Species-tree hashing", tp, false);
+
+        long tc = PhaseLogger.begin(phasePrefix + "  Species-tree clusters", false);
+        ClusterTable speciesClusters = new ClusterTable(speciesTrees, speciesPref, registry.size());
+        PhaseLogger.end(phasePrefix + "  Species-tree clusters", tc, false);
+
+        long tg = PhaseLogger.begin(phasePrefix + "  Gene-tree tripartitions", false);
+        // Simple tree-walk consumes the original gene-tree topology directly; it
+        // never reads PartitionTable.  Avoid materialising that very large table
+        // in score-only mode (notably, the 9,524-taxon angiosperm data otherwise
+        // needs tens of GiB merely to reach the weight kernel).
+        PartitionTable genePartitions = null;
+        if (cfg.getWeightIntersectionMethod()
+                != Config.WeightIntersectionMethod.SIMPLE_TREE_WALK) {
+            genePartitions = new PartitionTable(geneTrees, genePref);
+        } else {
+            Logging.info("%s tree-walk: skipped unused gene-tree PartitionTable",
+                scoreLogLabel);
+        }
+        PhaseLogger.end(phasePrefix + "  Gene-tree tripartitions", tg, false);
+
+        long td = PhaseLogger.begin(phasePrefix + "  Fixed-tree DP transitions", false);
+        DPTable speciesDP = new DPTable(speciesTrees, speciesPref, speciesClusters);
+        if (cfg.isAnchorOutgroup()) {
+            speciesDP.applyAnchoredRoot(speciesClusters.getAnchorHash());
+        }
+        PhaseLogger.end(phasePrefix + "  Fixed-tree DP transitions", td, false);
+
+        boolean gpuWeight = cfg.getComputeMode() == Config.ComputeMode.GPU
+                            && GPUWeightCalculator.isLoaded();
+        long tw = PhaseLogger.begin(phasePrefix + "  Weight calculation", gpuWeight);
+        WeightTable weightTable = new WeightTable(speciesDP, genePartitions, speciesClusters,
+                                                  speciesTrees, geneTrees);
+        PhaseLogger.end(phasePrefix + "  Weight calculation", tw, gpuWeight);
+
+        Inference scorer = new Inference();
+        return scorer.scoreFixedTree(speciesDP, weightTable, scoreLogLabel);
     }
 }

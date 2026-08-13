@@ -46,7 +46,9 @@ Optional:
   --search-space S1..S3  Search-space preset
   --intersection-method I1..I4
                          Intersection method preset
-  --keep-polytomy        Keep input polytomies for native unresolved-quartet scoring
+  --keep-polytomy-during-inference
+                         Preserve input polytomies during inference; final scoring
+                         always preserves the input topology
   --taxa-file FILE       Restrict inference or scoring to listed taxa (one per line)
   --log-file FILE        Save run messages to FILE (progress remains terminal-only)
   --no-time-monitor     Disable time monitoring
@@ -74,7 +76,7 @@ while [[ $# -gt 0 ]]; do
     --no-notify|-nn) NO_NOTIFY=true; shift ;;
     --debug) DEBUG=1; shift ;;
     --help|-h) print_help; exit 0 ;;
-    --auto|--cpu|--gpu|--gpu-strict|--rooted|--unrooted|--keep-polytomy|--keep-polytomies|--anchor-outgroup|--anchor|--no-anchor-outgroup|--no-anchor|--no-prune-search-space|--no-gpu-batch|--consensus-experimental|--stepb-fast-restriction|--stepb-quadratic-nn-balls|--stepb-random-leftover-resolution|--stepb-process-large-polytomies|--resolve-input-gene-tree-polytomies|--verify-parse|--verify-hash|--verify-clusters|--verify-partitions|--verify-dp|--verify-weights|--verify-distance-matrix|--verify-similarity-matrix|--verify-upgma|--verify-greedy-consensus|--autocomplete-incomplete-gene-trees|-v|-vv|-vvv|-q|--quiet)
+    --auto|--cpu|--gpu|--gpu-strict|--rooted|--unrooted|--keep-polytomy-during-inference|--anchor-outgroup|--anchor|--no-anchor-outgroup|--no-anchor|--no-prune-search-space|--no-gpu-batch|--consensus-experimental|--stepb-fast-restriction|--stepb-quadratic-nn-balls|--stepb-random-leftover-resolution|--stepb-process-large-polytomies|--resolve-input-gene-tree-polytomies|--verify-parse|--verify-hash|--verify-clusters|--verify-partitions|--verify-dp|--verify-weights|--verify-distance-matrix|--verify-similarity-matrix|--verify-upgma|--verify-greedy-consensus|--autocomplete-incomplete-gene-trees|-v|-vv|-vvv|-q|--quiet)
       ASTRALX_ARGS+=("$1")
       shift
       ;;
@@ -269,9 +271,19 @@ fi
 
 OPTIMAL_QUARTET_SCORE="NA"
 if [[ -f "$TIME_TMP" ]]; then
-  SCORE_LINE=$(grep -i "optimal quartet score" "$TIME_TMP" 2>/dev/null | tail -n1 || true)
+  SCORE_LINE=$(grep -i "final quartet score" "$TIME_TMP" 2>/dev/null | tail -n1 || true)
   if [[ -n "$SCORE_LINE" ]]; then
     OPTIMAL_QUARTET_SCORE=$(echo "$SCORE_LINE" | awk -F'=' '{print $2}' | awk '{print $1}' | tr -d ' ' || echo "NA")
+  else
+    SCORE_LINE=$(grep -E "Quartet score[[:space:]]+[0-9]+" "$TIME_TMP" 2>/dev/null | tail -n1 || true)
+    if [[ -n "$SCORE_LINE" ]]; then
+      OPTIMAL_QUARTET_SCORE=$(echo "$SCORE_LINE" | awk '{print $NF}' || echo "NA")
+    else
+      SCORE_LINE=$(grep -i "optimal quartet score" "$TIME_TMP" 2>/dev/null | tail -n1 || true)
+      if [[ -n "$SCORE_LINE" ]]; then
+        OPTIMAL_QUARTET_SCORE=$(echo "$SCORE_LINE" | awk -F'=' '{print $2}' | awk '{print $1}' | tr -d ' ' || echo "NA")
+      fi
+    fi
   fi
 fi
 

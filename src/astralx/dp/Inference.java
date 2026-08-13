@@ -56,19 +56,22 @@ public class Inference {
             Int128 totalScore = solveI(root, dpTable, weightTable);
             lastQuartetScore = totalScore.toString();
             long ms = (System.nanoTime() - t0) / 1_000_000;
-            Logging.info("Inference DP: optimal quartet score = %s  [int128]  (%d ms)", totalScore, ms);
+            Logging.info("Inference DP: optimization-objective quartet score = %s  "
+                + "[int128]  (%d ms)", totalScore, ms);
         } else if (weightTable.isDouble()) {
             double totalScore = solveD(root, dpTable, weightTable);
             lastQuartetScore = String.format(java.util.Locale.ROOT, "%.0f", totalScore);
             long ms = (System.nanoTime() - t0) / 1_000_000;
             // %.0f keeps it a plain (huge) number for log parsers; the [double]
             // tag makes the active numeric type explicit in the logs.
-            Logging.info("Inference DP: optimal quartet score = %.0f  [double]  (%d ms)", totalScore, ms);
+            Logging.info("Inference DP: optimization-objective quartet score = %.0f  "
+                + "[double]  (%d ms)", totalScore, ms);
         } else {
             long totalScore = solve(root, dpTable, weightTable);
             lastQuartetScore = Long.toString(totalScore);
             long ms = (System.nanoTime() - t0) / 1_000_000;
-            Logging.info("Inference DP: optimal quartet score = %d  [long]  (%d ms)", totalScore, ms);
+            Logging.info("Inference DP: optimization-objective quartet score = %d  "
+                + "[long]  (%d ms)", totalScore, ms);
         }
 
         String newick = buildNewick(root, dpTable, clusterTable, trees, registry) + ";";
@@ -85,23 +88,32 @@ public class Inference {
      * @return formatted raw quartet score
      */
     public String scoreFixedTree(DPTable dpTable, WeightTable weightTable) {
+        return scoreFixedTree(dpTable, weightTable, "Score-only");
+    }
+
+    /** Score a fixed tree with a caller-supplied log label. */
+    public String scoreFixedTree(DPTable dpTable, WeightTable weightTable,
+                                 String logLabel) {
         long t0 = System.nanoTime();
         ClusterHash root = dpTable.getRootHash();
 
         if (weightTable.isInt128()) {
             Int128 totalScore = solveI(root, dpTable, weightTable);
             long ms = (System.nanoTime() - t0) / 1_000_000;
-            Logging.info("Score-only: quartet score = %s  [int128]  (%d ms)", totalScore, ms);
+            Logging.info("%s: quartet score = %s  [int128]  (%d ms)",
+                logLabel, totalScore, ms);
             return totalScore.toString();
         } else if (weightTable.isDouble()) {
             double totalScore = solveD(root, dpTable, weightTable);
             long ms = (System.nanoTime() - t0) / 1_000_000;
-            Logging.info("Score-only: quartet score = %.0f  [double]  (%d ms)", totalScore, ms);
+            Logging.info("%s: quartet score = %.0f  [double]  (%d ms)",
+                logLabel, totalScore, ms);
             return String.format("%.0f", totalScore);
         } else {
             long totalScore = solve(root, dpTable, weightTable);
             long ms = (System.nanoTime() - t0) / 1_000_000;
-            Logging.info("Score-only: quartet score = %d  [long]  (%d ms)", totalScore, ms);
+            Logging.info("%s: quartet score = %d  [long]  (%d ms)",
+                logLabel, totalScore, ms);
             return Long.toString(totalScore);
         }
     }

@@ -93,7 +93,7 @@ run_tc () {
     # The independent oracle scores unresolved quartets. Keep native polytomies
     # for these fixtures; default CLI refinement is covered separately.
     if [[ "$name" == *polytomy* ]]; then
-        cmd+=(--keep-polytomy)
+        cmd+=(--keep-polytomy-during-inference)
     fi
     local astralx_out actual_score astralx_tree
     if ! astralx_out="$("${cmd[@]}" -i "$input" 2>&1)"; then
@@ -102,7 +102,7 @@ run_tc () {
         ((fail++)) || true
         return 0
     fi
-    actual_score=$(echo "$astralx_out" | grep -oP 'optimal quartet score = \K[0-9]+' || true)
+    actual_score=$(echo "$astralx_out" | grep -oP 'Final quartet score = \K[0-9]+' || true)
     astralx_tree=$(echo "$astralx_out" | grep -v '^\[' | grep -v '^[[:space:]]' | grep ';' | tail -1 || true)
 
     if [[ -z "$actual_score" ]]; then

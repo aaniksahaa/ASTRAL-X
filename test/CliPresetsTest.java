@@ -13,10 +13,12 @@ public final class CliPresetsTest {
 
     public static void main(String[] args) {
         Config cfg = Config.getInstance();
-        check(!cfg.isKeepPolytomy(), "default input polytomy refinement");
-        cfg.setKeepPolytomy(true);
-        check(cfg.isKeepPolytomy(), "keep-polytomy config");
-        cfg.setKeepPolytomy(false);
+        check(!cfg.isKeepPolytomyDuringInference(),
+            "default inference polytomy refinement");
+        cfg.setKeepPolytomyDuringInference(true);
+        check(cfg.isKeepPolytomyDuringInference(),
+            "keep-polytomy-during-inference config");
+        cfg.setKeepPolytomyDuringInference(false);
         SearchExpected[] expected = {
             new SearchExpected(Config.SearchMode.LOCAL, false, false, false, false, false, false),
             new SearchExpected(Config.SearchMode.FULL,  true,  false, false, false, false, false),

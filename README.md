@@ -73,8 +73,10 @@ The defaults are `--auto`, `--search-space S1`, and
 uses the smallest search space, and uses prefix-sum intersections.
 
 Every successful analysis ends with a built-in summary of the quartet score,
-running time, maximum CPU RAM, and maximum GPU VRAM. No monitoring wrapper is
-required for these core statistics.
+running time, maximum CPU RAM, and maximum GPU VRAM. The reported quartet score
+always uses the native input gene-tree topology, including unresolved
+multifurcations, and respects `--taxa-file` when supplied. No monitoring wrapper
+is required for these core statistics.
 
 For a broader search on incomplete gene trees using cross-tree recombined
 transitions as well as tree-local ones:
@@ -268,18 +270,23 @@ Moving from S1 to S3 progressively broadens the candidate topology set. A
 larger preset can increase runtime and memory substantially and is not
 guaranteed to change the inferred tree.
 
-By default, input polytomies are detected during parsing and refined to binary
-trees with the deterministic first-pair algorithm used by
+By default, inference detects input polytomies and refines them to binary trees
+with the deterministic first-pair algorithm used by
 `clean.py --deterministic`. This preprocessing is parallel when multiple CPU
 threads are configured and is reproducible regardless of worker scheduling.
-Use `--keep-polytomy` to retain unresolved input nodes and activate ASTRAL-X's
-native polytomy-aware partition and quartet-weight paths instead. An unrooted
-three-way Newick root is normalized during default refinement but does not
-represent a biological polytomy; its unrooted topology is unchanged.
-Because binary refinement turns unresolved input relationships into arbitrary
-resolved quartets, it can change quartet scores and inferred trees. Use
-`--keep-polytomy` when unresolved relationships must remain scientifically
-unresolved rather than matching the existing `clean.py` preprocessing workflow.
+Use `--keep-polytomy-during-inference` to retain unresolved input nodes in the
+inference search and weight calculation instead. An unrooted three-way Newick
+root is normalized during default refinement but does not represent a biological
+polytomy; its unrooted topology is unchanged.
+
+This inference choice never changes the scoring definition. Score-only mode and
+the final score reported after inference always preserve native input
+polytomies. When default inference had to refine a genuine multifurcation,
+ASTRAL-X re-reads the original gene trees and scores the inferred topology on
+their unresolved quartets. If the input has no genuine polytomy, or
+`--keep-polytomy-during-inference` was used, the equivalent inference DP score is
+reused without an additional scoring pass. A taxa allow-list is applied to both
+inference and final scoring.
 
 Most analyses only need one search-space preset. Individual search controls are
 also available for specialized workflows; `astralx --help` lists them. When

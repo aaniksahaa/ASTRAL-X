@@ -47,7 +47,7 @@ score_of() {
     shift
     local output score
     output="$("${BASE_CMD[@]}" "$@" -i "$input" 2>&1)"
-    score="$(sed -n 's/.*optimal quartet score = \([0-9][0-9]*\).*/\1/p' <<<"$output" | tail -1)"
+    score="$(sed -n 's/.*Final quartet score = \([0-9][0-9]*\).*/\1/p' <<<"$output" | tail -1)"
     if [[ -z "$score" ]]; then
         echo "ERROR: no score for $input" >&2
         echo "$output" | tail -8 >&2

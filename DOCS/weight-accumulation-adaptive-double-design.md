@@ -99,7 +99,7 @@ Stated explicitly at multiple points:
    (DOUBLE and LONG produce analogous lines.)
 2. **Native kernel line** (`stderr`): `[ASTRAL-X GPU] weight accumulator: INT128 …` / `DOUBLE …` / `LONG …`.
 3. **Weight-table summary**: `… splits scored [INT128] …` / `[DOUBLE]` / `[LONG]`.
-4. **Inference score line**: `Inference DP: optimal quartet score = … [int128]` / `[double]` / `[long]`.
+4. **Inference objective line**: `Inference DP: optimization-objective quartet score = … [int128]` / `[double]` / `[long]`.
 
 ## Implementation map
 
