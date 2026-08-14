@@ -42,17 +42,19 @@ public class Inference {
      * @param dpTable       DP search space (transitions)
      * @param weightTable   precomputed split scores
      * @param clusterTable  cluster exemplars used to recover split membership
-     * @param trees         gene trees (for exemplar access)
+     * @param exemplarTrees all trees referenced by ClusterTable exemplars,
+     *                      including S3 consensus-emission snapshots
      * @param registry      taxon ID ↔ name
      * @param hasher        per-taxon hashes used to validate reconstruction
      * @return Newick string ending with ";"
      */
     public String run(DPTable dpTable, WeightTable weightTable,
-                      ClusterTable clusterTable, List<Tree> trees,
+                      ClusterTable clusterTable, List<Tree> exemplarTrees,
                       TaxonRegistry registry, TaxonHasher hasher) {
         long t0 = System.nanoTime();
         reconstructionHasher = hasher;
         indexSingletonTaxa(registry, hasher);
+        validateExemplarCoverage(clusterTable, exemplarTrees);
 
         ClusterHash root = dpTable.getRootHash();
 
@@ -85,7 +87,7 @@ public class Inference {
         rootMembers.set(0, registry.size());
         validateMembers(root, rootMembers);
         String newick = buildNewick(
-            root, clusterTable, trees, registry, rootMembers) + ";";
+            root, clusterTable, exemplarTrees, registry, rootMembers) + ";";
         return newick;
     }
 
@@ -108,6 +110,19 @@ public class Inference {
             indexed.put(new ClusterHash(sums, xors, 1, m), taxonId);
         }
         singletonTaxa = indexed;
+    }
+
+    private static void validateExemplarCoverage(ClusterTable clusterTable,
+                                                 List<Tree> exemplarTrees) {
+        int maxTreeIndex = -1;
+        for (ClusterTable.Entry entry : clusterTable.entries()) {
+            maxTreeIndex = Math.max(maxTreeIndex, entry.exemplar.treeIndex);
+        }
+        if (maxTreeIndex >= exemplarTrees.size()) {
+            throw new IllegalStateException("Cluster table references exemplar tree index "
+                + maxTreeIndex + ", but reconstruction received only "
+                + exemplarTrees.size() + " exemplar tree(s)");
+        }
     }
 
     /** Raw quartet score from the most recent successful inference run. */
@@ -385,6 +400,11 @@ public class Inference {
         ClusterTable.Entry entry = ct.get(ch);
         if (entry == null) return null;
         Cluster ex = entry.exemplar;
+        if (ex.treeIndex < 0 || ex.treeIndex >= trees.size()) {
+            throw new IllegalStateException("Cluster exemplar references tree index "
+                + ex.treeIndex + ", but reconstruction received only " + trees.size()
+                + " exemplar tree(s)");
+        }
         Tree tree = trees.get(ex.treeIndex);
         BitSet explicit = new BitSet(numTaxa);
         if (ex.complement) explicit.set(0, numTaxa);

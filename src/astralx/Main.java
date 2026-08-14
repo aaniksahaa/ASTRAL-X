@@ -437,7 +437,8 @@ public class Main {
             long t7 = PhaseLogger.begin("Phase 7  Inference", false);
             Inference inference = new Inference();
             String speciesTree = inference.run(
-                dpTable, weightTable, clusterTable, trees, registry, hasher);
+                dpTable, weightTable, clusterTable, weightClusterTrees,
+                registry, hasher);
             finalQuartetScore = inference.getLastQuartetScore();
             PhaseLogger.end("Phase 7  Inference", t7, false);
 
