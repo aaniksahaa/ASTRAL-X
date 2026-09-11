@@ -78,6 +78,7 @@ java -cp "${ROOT}/build:${TEST_CLASSES}" SimilarityArgminTest \
 bash "${ROOT}/test/test_simulated_success_detection.sh"
 bash "${ROOT}/test/test_simulated_outputs_mirror.sh"
 bash "${ROOT}/test/test_phylogeny_data_dir.sh"
+bash "${ROOT}/test/test_bulk_simulated_exclusions.sh"
 
 VERSION_TEXT="$(NO_COLOR=1 java -cp "${ROOT}/build" astralx.Main --version)"
 [[ "$VERSION_TEXT" == *"ASTRAL-X  v1.0.0"* ]]

@@ -213,6 +213,10 @@ git commit.
   command record contents, and uploader planning and refusals.
 - `test/test_simulated_success_detection.sh` asserts the mirror leaf equals the
   results leaf and that the collected CSV carries the quartet score.
+- `test/test_bulk_simulated_exclusions.sh` pins the configured
+  `EXCLUDED_SIMULATED_CONFIGS` tuples, checks that no exclusion leaks into a
+  neighbouring taxa/gene-tree/sb/spmax setting, and drives the skip branch used
+  by the replicate loops with a dummy tuple.
 - `test/test_phylogeny_data_dir.sh` covers the data-root resolution order
   (environment default, explicit override, repository fallback, error cases)
   and checks that `sim.sh`, `sim_incomplete.sh`, the stats collector, and the
@@ -231,6 +235,11 @@ to change: sync and upload discover `<method>_outputs` directories generically.
 
 - 2026-09-12: ported the reference implementation to ASTRAL-X. Mirror root is
   `outputs/simphy`; the older `simphy/outputs` location is not read.
+- 2026-09-12: adopted the reference repository's `EXCLUDED_SIMULATED_CONFIGS`
+  list verbatim: 31 per-replicate entries, 30 distinct (the tuple
+  `1000,25000,0.000001,100000,200000,R3` is listed twice there and kept as-is so
+  the two repositories stay diff-clean). Covered by
+  `test/test_bulk_simulated_exclusions.sh`.
 - 2026-09-12: every SimPhy-data-touching script now resolves the data root
   through `astralx_resolve_simphy_data_dir`, so `sim.sh`, `sim_incomplete.sh`,
   `collect-stats-simulated.sh`, `download-bulk-simulated.sh` and
