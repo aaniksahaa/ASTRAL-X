@@ -11,6 +11,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+source "${ROOT}/scripts/phylogeny-data-dir.sh"
 VERBOSE=""
 
 while [[ $# -gt 0 ]]; do
@@ -41,7 +42,7 @@ run_one() {
 }
 
 # Simulated incomplete datasets — skip very large ones (t>=1000) that OOM ASTRAL-MP locally
-SIMPHY_DATA="$ROOT/simphy/data"
+SIMPHY_DATA="$(astralx_resolve_simphy_data_dir "" "$ROOT/simphy/data")"
 for d in "$SIMPHY_DATA"/*_incomplete; do
     [[ -d "$d" ]] || continue
     # Extract t= value from directory name and skip if >= 1000

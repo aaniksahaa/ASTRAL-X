@@ -76,6 +76,8 @@ java -cp "${ROOT}/build:${TEST_CLASSES}" SimilarityArgminTest \
   "${ROOT}/test/input/tc10_unrooted_8taxa.tre" \
   "${ROOT}/test/input/tc14_polytomy_6taxa.tre"
 bash "${ROOT}/test/test_simulated_success_detection.sh"
+bash "${ROOT}/test/test_simulated_outputs_mirror.sh"
+bash "${ROOT}/test/test_phylogeny_data_dir.sh"
 
 VERSION_TEXT="$(NO_COLOR=1 java -cp "${ROOT}/build" astralx.Main --version)"
 [[ "$VERSION_TEXT" == *"ASTRAL-X  v1.0.0"* ]]

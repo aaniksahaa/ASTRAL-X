@@ -7,6 +7,7 @@
 set -euo pipefail
 
 ASTRALX_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${ASTRALX_ROOT}/scripts/phylogeny-data-dir.sh"
 
 # Defaults
 TAXA_NUM=""
@@ -18,7 +19,6 @@ BASE_DIR_SET=false
 SIMPHY_DIR=""
 SIMPHY_DIR_SET=false
 SIMPHY_DATA_DIR=""
-SIMPHY_DATA_DIR_SET=false
 FRESH=false
 
 # Defaults that match run_simulator.sh
@@ -40,7 +40,8 @@ Optional:
   --base-dir, -b     Directory containing an ASTRAL-X checkout
                      (default: parent of this repository)
   --simphy-dir       Path to simphy dir (overrides --base-dir)
-  --simphy-data-dir  Custom directory for simphy data storage
+  --simphy-data-dir  SimPhy data root
+                     (default: \$PHYLOGENY_DATA_DIR/simphy/data, else <simphy-dir>/data)
   --sb               Substitution/birthrate parameter (default: ${SB})
   --spmin            Population size minimum (default: ${SPMIN})
   --spmax            Population size maximum (default: ${SPMAX})
@@ -62,7 +63,7 @@ while [[ $# -gt 0 ]]; do
     --replicates|-rs) REPLICATES="$2"; shift 2 ;;
     --base-dir|-b) BASE_DIR="$2"; BASE_DIR_SET=true; shift 2 ;;
     --simphy-dir) SIMPHY_DIR="$2"; SIMPHY_DIR_SET=true; shift 2 ;;
-    --simphy-data-dir) SIMPHY_DATA_DIR="$2"; SIMPHY_DATA_DIR_SET=true; shift 2 ;;
+    --simphy-data-dir) SIMPHY_DATA_DIR="$2"; shift 2 ;;
     --sb) SB="$2"; shift 2 ;;
     --spmin) SPMIN="$2"; shift 2 ;;
     --spmax) SPMAX="$2"; shift 2 ;;
@@ -88,8 +89,12 @@ if [[ "$SIMPHY_DIR_SET" = false ]]; then
 fi
 SIMPHY_DIR="$(realpath "$SIMPHY_DIR")"
 
+# One shared data root for every script: an explicit --simphy-data-dir wins,
+# then $PHYLOGENY_DATA_DIR/simphy/data, then this checkout's simphy/data.
+SIMPHY_DATA_DIR="$(astralx_resolve_simphy_data_dir "$SIMPHY_DATA_DIR" "${SIMPHY_DIR%/}/data")"
+
 # Construct expected output paths early (will be updated after simulation)
-OUT_DIR_TEMP="${SIMPHY_DIR%/}/data/t_${TAXA_NUM}_g_${GENE_TREES}_sb_${SB}_spmin_${SPMIN}_spmax_${SPMAX}"
+OUT_DIR_TEMP="${SIMPHY_DATA_DIR%/}/t_${TAXA_NUM}_g_${GENE_TREES}_sb_${SB}_spmin_${SPMIN}_spmax_${SPMAX}"
 REPL_DIR_TEMP="${OUT_DIR_TEMP%/}/${REPLICATE}"
 CSV_FILE="${REPL_DIR_TEMP%/}/stat-sim.csv"
 
@@ -130,26 +135,13 @@ echo "==> Running run_simulator.sh in $SIMPHY_DIR"
 # Build command with optional data directory
 RUN_CMD=("$RUN_SCRIPT" -t "$TAXA_NUM" -g "$GENE_TREES" --replicates "$REPLICATES" --sb "$SB" --spmin "$SPMIN" --spmax "$SPMAX")
 
-# Add data directory option if specified
-if [[ "$SIMPHY_DATA_DIR_SET" = true ]]; then
-  # Ensure the data directory is created
-  mkdir -p "$SIMPHY_DATA_DIR"
-  RUN_CMD+=(--data_dir "$SIMPHY_DATA_DIR")
-  echo "Using custom simphy data directory: $SIMPHY_DATA_DIR"
-else
-  RUN_CMD+=(--data_dir "${SIMPHY_DIR}/data")
-fi
+RUN_CMD+=(--data_dir "$SIMPHY_DATA_DIR")
+echo "Using simphy data directory: $SIMPHY_DATA_DIR"
 
 "${RUN_CMD[@]}"
 
 # Construct expected out_dir the same way run_simulator.sh does
-if [[ "$SIMPHY_DATA_DIR_SET" = true ]]; then
-  # If custom data directory is used, construct path accordingly
-  OUT_DIR="${SIMPHY_DATA_DIR%/}/t_${TAXA_NUM}_g_${GENE_TREES}_sb_${SB}_spmin_${SPMIN}_spmax_${SPMAX}"
-else
-  # Default behavior: data directory inside SIMPHY_DIR
-  OUT_DIR="${SIMPHY_DIR%/}/data/t_${TAXA_NUM}_g_${GENE_TREES}_sb_${SB}_spmin_${SPMIN}_spmax_${SPMAX}"
-fi
+OUT_DIR="${SIMPHY_DATA_DIR%/}/t_${TAXA_NUM}_g_${GENE_TREES}_sb_${SB}_spmin_${SPMIN}_spmax_${SPMAX}"
 
 echo
 echo "Checking generated replicate directories..."

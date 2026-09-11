@@ -7,8 +7,8 @@
 # The incomplete trees are stored alongside the complete ones, in a directory
 # whose name is the standard sim directory name with "_incomplete" appended:
 #
-#   complete:   simphy/data/t_N_g_K_sb_S_spmin_A_spmax_B/Ri/all_gt.tre
-#   incomplete: simphy/data/t_N_g_K_sb_S_spmin_A_spmax_B_incomplete/Ri/all_gt.tre
+#   complete:   $PHYLOGENY_DATA_DIR/simphy/data/t_N_g_K_sb_S_spmin_A_spmax_B/Ri/all_gt.tre
+#   incomplete: $PHYLOGENY_DATA_DIR/simphy/data/t_N_g_K_sb_S_spmin_A_spmax_B_incomplete/Ri/all_gt.tre
 #
 # The true species tree (s_tree.trees) is copied into each incomplete replicate
 # directory so that test-astralx-simulated.sh --incomplete can compute RF distance.
@@ -27,6 +27,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/scripts/phylogeny-data-dir.sh"
 PYTHON_BIN="${ASTRALX_PYTHON:-${SCRIPT_DIR}/.venv/bin/python}"
 [[ -x "$PYTHON_BIN" ]] || PYTHON_BIN="python3"
 
@@ -46,7 +47,6 @@ BASE_DIR_SET=false
 SIMPHY_DIR=""
 SIMPHY_DIR_SET=false
 SIMPHY_DATA_DIR=""
-SIMPHY_DATA_DIR_SET=false
 SB="0.000001"
 SPMIN="500000"
 SPMAX="1500000"
@@ -63,6 +63,8 @@ Accepts all sim.sh options, plus:
   --fraction F     Fraction of taxa to remove per tree (default: 0.30)
   --seed N         Random seed for gen_incomplete.py (default: 42)
   --min-keep N     Minimum taxa to keep per tree (default: 4)
+  --simphy-data-dir PATH  SimPhy data root
+                   (default: \$PHYLOGENY_DATA_DIR/simphy/data, else <simphy-dir>/data)
   --fresh-inc      Re-generate incomplete trees even if they already exist
 
 Incomplete trees are stored in:
@@ -90,7 +92,7 @@ while [[ $# -gt 0 ]]; do
     --replicates|-rs)    REPLICATES="$2"; SIM_ARGS+=("$1" "$2"); shift 2 ;;
     --base-dir|-b)       BASE_DIR="$2"; BASE_DIR_SET=true; SIM_ARGS+=("$1" "$2"); shift 2 ;;
     --simphy-dir)        SIMPHY_DIR="$2"; SIMPHY_DIR_SET=true; SIM_ARGS+=("$1" "$2"); shift 2 ;;
-    --simphy-data-dir)   SIMPHY_DATA_DIR="$2"; SIMPHY_DATA_DIR_SET=true; SIM_ARGS+=("$1" "$2"); shift 2 ;;
+    --simphy-data-dir)   SIMPHY_DATA_DIR="$2"; shift 2 ;;
     --sb)                SB="$2";    SIM_ARGS+=("$1" "$2"); shift 2 ;;
     --spmin)             SPMIN="$2"; SIM_ARGS+=("$1" "$2"); shift 2 ;;
     --spmax)             SPMAX="$2"; SIM_ARGS+=("$1" "$2"); shift 2 ;;
@@ -117,13 +119,13 @@ if [[ "$SIMPHY_DIR_SET" == false ]]; then
 fi
 SIMPHY_DIR="$(realpath "$SIMPHY_DIR")"
 
+# ── Resolve the data root exactly as sim.sh does, and pass it on explicitly ──
+SIMPHY_DATA_DIR="$(astralx_resolve_simphy_data_dir "$SIMPHY_DATA_DIR" "${SIMPHY_DIR%/}/data")"
+SIM_ARGS+=(--simphy-data-dir "$SIMPHY_DATA_DIR")
+
 # ── Derive complete output dir (same logic as sim.sh) ────────────────────────
 DATASET_NAME="t_${TAXA_NUM}_g_${GENE_TREES}_sb_${SB}_spmin_${SPMIN}_spmax_${SPMAX}"
-if [[ "$SIMPHY_DATA_DIR_SET" == true ]]; then
-  COMPLETE_DIR="${SIMPHY_DATA_DIR%/}/${DATASET_NAME}"
-else
-  COMPLETE_DIR="${SIMPHY_DIR%/}/data/${DATASET_NAME}"
-fi
+COMPLETE_DIR="${SIMPHY_DATA_DIR%/}/${DATASET_NAME}"
 
 INCOMPLETE_DIR="${COMPLETE_DIR}_incomplete"
 
@@ -178,6 +180,23 @@ for i in $(seq 1 "${REPLICATES}"); do
 
   echo "  [R${i}] Done → ${DST_FILE}"
 done
+
+# Record how the incomplete variant was derived, next to the generated data, so
+# the outputs mirror and any upload carry the full reproducibility fingerprint.
+if [[ -d "$INCOMPLETE_DIR" ]]; then
+  INCOMPLETE_COMMAND_FILE="${INCOMPLETE_DIR}/${DATASET_NAME}_incomplete.command"
+  INCOMPLETE_COMMAND_TMP="${INCOMPLETE_COMMAND_FILE}.tmp.$$"
+  {
+    printf '# Incomplete gene-tree variant derived from %s\n' "$DATASET_NAME"
+    printf '# Base SimPhy command: %s\n' "${COMPLETE_DIR}/${DATASET_NAME}.command"
+    printf '%q -t %q -g %q -rs %q --sb %q --spmin %q --spmax %q --fraction %q --seed %q --min-keep %q\n' \
+      "${SCRIPT_DIR}/sim_incomplete.sh" "$TAXA_NUM" "$GENE_TREES" "$REPLICATES" \
+      "$SB" "$SPMIN" "$SPMAX" "$FRACTION" "$SEED" "$MIN_KEEP"
+    printf '# Per replicate: %q <complete>/<R>/all_gt.tre <incomplete>/<R>/all_gt.tre --fraction %q --seed %q --min-keep %q --stats\n' \
+      "$GEN_SCRIPT" "$FRACTION" "$SEED" "$MIN_KEEP"
+  } > "$INCOMPLETE_COMMAND_TMP"
+  mv -f "$INCOMPLETE_COMMAND_TMP" "$INCOMPLETE_COMMAND_FILE"
+fi
 
 echo
 echo "=== Incomplete simulation complete ==="

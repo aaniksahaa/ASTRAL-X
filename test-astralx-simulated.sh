@@ -6,12 +6,17 @@
 set -euo pipefail
 
 SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_ROOT}/scripts/phylogeny-data-dir.sh"
+source "${SCRIPT_ROOT}/scripts/simphy-outputs-dir.sh"
 
 # Propagate terminal color preference to Java subprocesses even when stderr is
 # piped through tee further down the call chain.
 [[ -t 1 || -t 2 ]] && export FORCE_COLOR=1
 
 NTFY_CHANNEL_NAME="${NTFY_CHANNEL_NAME:-anik-phylo-asx}"
+
+# Exact invocation of this script, appended to the run's command record.
+SCRIPT_ARGV=("$0" "$@")
 
 TAXA_NUM=""
 GENE_TREES=""
@@ -21,7 +26,8 @@ BASE_DIR_SET=false
 SIMPHY_DIR=""
 SIMPHY_DIR_SET=false
 SIMPHY_DATA_DIR=""
-SIMPHY_DATA_DIR_SET=false
+SIMPHY_OUTPUTS_DIR=""
+OUTPUTS_MIRROR=true
 ASTRALX_ROOT=""
 ASTRALX_ROOT_SET=false
 SB="0.000001"
@@ -85,6 +91,10 @@ Optional:
   --base-dir, -b       Base directory (default: ${BASE_DIR})
   --simphy-dir         Path to simphy dir
   --simphy-data-dir    Custom path to simphy/data root
+  --simphy-outputs-dir Reproducibility mirror root for the small run outputs
+                       (default: derived from the resolved SimPhy data root;
+                        ".../simphy/data" mirrors into ".../outputs/simphy")
+  --no-outputs-mirror  Do not copy results into the outputs mirror
   --astralx-root       Path to ASTRAL-X root
   --stelar-root        Compatibility alias for --astralx-root
   --opts, --alg-opts   Extra args for the selected algorithm run (default: "${ASTRALX_OPTS}")
@@ -100,6 +110,9 @@ Optional:
   If the expected simulated dataset is missing, this script will first invoke
   ./sim.sh with matching parameters to generate the required replicate.
   --fresh              Force rerun even if stat-astralx.csv exists
+  Results remain in <data>/<dataset>/<replicate>/astralx_outputs/<setting>
+  and are also mirrored with the dataset's SimPhy .command/.params files to
+  <outputs>/astralx_outputs/<dataset>/<replicate>/<setting>.
   --no-time-monitor    Disable time monitoring
   --no-gpu-monitor     Disable GPU monitoring
   --no-notify, -nn     Disable ntfy notifications
@@ -119,7 +132,9 @@ while [[ $# -gt 0 ]]; do
     --gene_trees|-g) GENE_TREES="$2"; shift 2 ;;
     --replicate|-r) REPLICATE="$2"; shift 2 ;;
     --simphy-dir) SIMPHY_DIR="$2"; SIMPHY_DIR_SET=true; shift 2 ;;
-    --simphy-data-dir) SIMPHY_DATA_DIR="$2"; SIMPHY_DATA_DIR_SET=true; shift 2 ;;
+    --simphy-data-dir) SIMPHY_DATA_DIR="$2"; shift 2 ;;
+    --simphy-outputs-dir) SIMPHY_OUTPUTS_DIR="$2"; shift 2 ;;
+    --no-outputs-mirror) OUTPUTS_MIRROR=false; shift ;;
     --astralx-root|--stelar-root) ASTRALX_ROOT="$2"; ASTRALX_ROOT_SET=true; shift 2 ;;
     --opts|--alg-opts|--astralx-opts|--stelar-opts) ASTRALX_OPTS="$2"; shift 2 ;;
     --base-dir|-b) BASE_DIR="$2"; BASE_DIR_SET=true; shift 2 ;;
@@ -154,26 +169,37 @@ if [[ "$ASTRALX_ROOT_SET" == false ]]; then
   ASTRALX_ROOT="$SCRIPT_ROOT"
 fi
 SIMPHY_DIR="$(realpath "$SIMPHY_DIR")"
+SIMPHY_DATA_DIR="$(astralx_resolve_simphy_data_dir "$SIMPHY_DATA_DIR" "${SIMPHY_DIR%/}/data")"
+if [[ "$OUTPUTS_MIRROR" == true ]]; then
+  SIMPHY_OUTPUTS_DIR="$(astralx_prepare_simphy_outputs_dir "$SIMPHY_OUTPUTS_DIR" "$SIMPHY_DATA_DIR")"
+else
+  SIMPHY_OUTPUTS_DIR="(disabled)"
+fi
 ASTRALX_ROOT="$(realpath "$ASTRALX_ROOT")"
 PYTHON_BIN="${ASTRALX_PYTHON:-${ASTRALX_ROOT}/.venv/bin/python}"
 [[ -x "$PYTHON_BIN" ]] || PYTHON_BIN="python3"
+
+# Copy the current results directory into the reproducibility mirror. A mirror
+# problem is reported loudly but never changes the run's own exit status.
+mirror_results_dir() {
+  local mirrored
+  [[ "$OUTPUTS_MIRROR" == true ]] || return 0
+  [[ -d "$RESULTS_DIR" ]] || return 0
+  if mirrored="$(astralx_mirror_simulated_results "$SIMPHY_DATA_DIR" "$SIMPHY_OUTPUTS_DIR" "$RESULTS_DIR")"; then
+    echo "Mirrored outputs to: $mirrored"
+  else
+    echo "WARNING: outputs mirror was not updated for $RESULTS_DIR" >&2
+  fi
+}
 
 SETTING_NAME="$(build_setting_name_from_opts "$ASTRALX_OPTS")"
 WEIGHT_METHOD="$(extract_weight_method_from_opts "$ASTRALX_OPTS")"
 
 PAIR="${TAXA_NUM}_${GENE_TREES}"
-if [[ "$SIMPHY_DATA_DIR_SET" == true ]]; then
-  if [[ "$USE_LEGACY_LAYOUT" == true ]]; then
-    SIMPHY_RUN_DIR="${SIMPHY_DATA_DIR%/}/${PAIR}/${REPLICATE}"
-  else
-    SIMPHY_RUN_DIR="${SIMPHY_DATA_DIR%/}/t_${TAXA_NUM}_g_${GENE_TREES}_sb_${SB}_spmin_${SPMIN}_spmax_${SPMAX}/${REPLICATE}"
-  fi
+if [[ "$USE_LEGACY_LAYOUT" == true ]]; then
+  SIMPHY_RUN_DIR="${SIMPHY_DATA_DIR%/}/${PAIR}/${REPLICATE}"
 else
-  if [[ "$USE_LEGACY_LAYOUT" == true ]]; then
-    SIMPHY_RUN_DIR="${SIMPHY_DIR%/}/data/${PAIR}/${REPLICATE}"
-  else
-    SIMPHY_RUN_DIR="${SIMPHY_DIR%/}/data/t_${TAXA_NUM}_g_${GENE_TREES}_sb_${SB}_spmin_${SPMIN}_spmax_${SPMAX}/${REPLICATE}"
-  fi
+  SIMPHY_RUN_DIR="${SIMPHY_DATA_DIR%/}/t_${TAXA_NUM}_g_${GENE_TREES}_sb_${SB}_spmin_${SPMIN}_spmax_${SPMAX}/${REPLICATE}"
 fi
 
 # When --incomplete is set, the dataset lives in the _incomplete variant directory.
@@ -205,6 +231,8 @@ if [[ "$FRESH" == false && -f "$STAT_FILE" ]]; then
   fi
   if [[ -f "$OUT_ASTRALX" && ( -f "$SUCCESS_FILE" || "$PREVIOUS_EXIT" == "0" ) ]]; then
     echo "SKIPPING: successful output already exists at ${OUT_ASTRALX}. Use --fresh to force rerun."
+    # Keep the reproducibility mirror complete even for runs finished earlier.
+    mirror_results_dir
     exit 0
   fi
   echo "Previous statistics exist but no successful output was recorded; rerunning."
@@ -228,7 +256,7 @@ if [[ ! -f "$ALL_GT_FILE" ]]; then
 
     SIM_INC_CMD=("${ASTRALX_ROOT}/sim_incomplete.sh" -t "$TAXA_NUM" -g "$GENE_TREES" -rs "$REPLICATE_COUNT" --sb "$SB" --spmin "$SPMIN" --spmax "$SPMAX")
     if [[ "$SIMPHY_DIR_SET" == true ]];      then SIM_INC_CMD+=(--simphy-dir      "$SIMPHY_DIR");      fi
-    if [[ "$SIMPHY_DATA_DIR_SET" == true ]]; then SIM_INC_CMD+=(--simphy-data-dir "$SIMPHY_DATA_DIR"); fi
+    SIM_INC_CMD+=(--simphy-data-dir "$SIMPHY_DATA_DIR")
     if [[ "$FRESH" == true ]];               then SIM_INC_CMD+=(--fresh-inc);                          fi
 
     "${SIM_INC_CMD[@]}"
@@ -261,7 +289,7 @@ if [[ ! -f "$ALL_GT_FILE" ]]; then
 
     SIM_CMD=("${ASTRALX_ROOT}/sim.sh" -t "$TAXA_NUM" -g "$GENE_TREES" -r "$REPLICATE" -rs "$REPLICATE_COUNT" --sb "$SB" --spmin "$SPMIN" --spmax "$SPMAX")
     if [[ "$SIMPHY_DIR_SET" == true ]];      then SIM_CMD+=(--simphy-dir      "$SIMPHY_DIR");      fi
-    if [[ "$SIMPHY_DATA_DIR_SET" == true ]]; then SIM_CMD+=(--simphy-data-dir "$SIMPHY_DATA_DIR"); fi
+    SIM_CMD+=(--simphy-data-dir "$SIMPHY_DATA_DIR")
     if [[ "$FRESH" == true ]];               then SIM_CMD+=(--fresh);                              fi
 
     "${SIM_CMD[@]}"
@@ -284,6 +312,7 @@ echo "  replicate:      $REPLICATE"
 echo "  setting:        $SETTING_NAME"
 echo "  simphy run dir: $SIMPHY_RUN_DIR"
 echo "  results dir:    $RESULTS_DIR"
+echo "  outputs mirror: $SIMPHY_OUTPUTS_DIR"
 echo "  output tree:    $OUT_ASTRALX"
 echo "  stat file:      $STAT_FILE"
 echo
@@ -334,6 +363,26 @@ else
   printf 'exit_code=0\noutput=%s\n' "$OUT_ASTRALX" > "$SUCCESS_TMP"
   mv -f "$SUCCESS_TMP" "$SUCCESS_FILE"
 fi
+
+# Complete the command record (out-astralx.command, written by the wrapper with
+# the exact run.sh invocation) with the outer commands that produced this run.
+COMMAND_FILE="${OUT_ASTRALX%.*}.command"
+{
+  echo "# --- simulated-run context (test-astralx-simulated.sh) ---"
+  echo "# dataset:      $(basename "$(dirname "$SIMPHY_RUN_DIR")")"
+  echo "# replicate:    $REPLICATE"
+  echo "# setting:      $SETTING_NAME"
+  echo "# true tree:    $TRUE_SPECIES_TREE"
+  echo "# rf_rate:      $RF_RATE"
+  printf '# invoked as:  '
+  printf ' %q' "${SCRIPT_ARGV[@]}"
+  printf '\n'
+  printf '# wrapper cmd: '
+  printf ' %q' "${CMD[@]}"
+  printf '\n'
+} >> "$COMMAND_FILE" 2>/dev/null || echo "Warning: could not append to command record $COMMAND_FILE" >&2
+
+mirror_results_dir
 
 echo
 echo "ASTRAL-X finished in ${RUNNING_TIME}s (exit code ${ASTRALX_EXIT_CODE})"

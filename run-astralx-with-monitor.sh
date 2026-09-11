@@ -59,6 +59,10 @@ Optional:
 EOF
 }
 
+# Exact wrapper invocation, kept for the reproducibility record written next to
+# the output tree (see write_command_record below).
+WRAPPER_ARGV=("$0" "$@")
+
 POSITIONAL=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -124,6 +128,9 @@ NC='\033[0m'
 INPUT_FILE="$(realpath "$INPUT_FILE")"
 OUTPUT_FILE="$(realpath -m "$OUTPUT_FILE")"
 ASTRALX_ROOT="$(realpath "$ASTRALX_ROOT")"
+if [[ -n "$REFERENCE_SPECIES_TREE" ]]; then
+  REFERENCE_SPECIES_TREE="$(realpath -m "$REFERENCE_SPECIES_TREE")"
+fi
 PYTHON_BIN="${ASTRALX_PYTHON:-${ASTRALX_ROOT}/.venv/bin/python}"
 [[ -x "$PYTHON_BIN" ]] || PYTHON_BIN="python3"
 
@@ -222,6 +229,44 @@ echo "GPU monitor:    $GPU_MONITOR"
 echo "Notifications:  $(if [[ "$NO_NOTIFY" == true ]]; then echo "disabled"; else echo "enabled"; fi)"
 echo
 
+# Reproducibility record: the exact ASTRAL-X command (absolute paths, every
+# flag) plus the code revision and the wrapper invocation, saved beside the
+# output tree as <output>.command. Written before the run so it survives a
+# crash; the exit code is appended afterwards.
+COMMAND_FILE="${OUTPUT_FILE%.*}.command"
+quote_command() {
+  local out="" arg
+  for arg in "$@"; do
+    out+="$(printf '%q' "$arg") "
+  done
+  printf '%s' "${out% }"
+}
+write_command_record() {
+  local git_commit="unavailable"
+  if git -C "$ASTRALX_ROOT" rev-parse --short HEAD >/dev/null 2>&1; then
+    git_commit="$(git -C "$ASTRALX_ROOT" rev-parse --short HEAD 2>/dev/null)"
+    if [[ -n "$(git -C "$ASTRALX_ROOT" status --porcelain --untracked-files=no 2>/dev/null)" ]]; then
+      git_commit+=" (with uncommitted changes)"
+    fi
+  fi
+  {
+    echo "# ASTRAL-X run command (written by run-astralx-with-monitor.sh)"
+    echo "# date:         $(date '+%Y-%m-%dT%H:%M:%S%z')"
+    echo "# host:         $(hostname 2>/dev/null || echo unknown)"
+    echo "# astralx_root: $ASTRALX_ROOT"
+    echo "# git_commit:   $git_commit"
+    echo "# input:        $INPUT_FILE"
+    echo "# output:       $OUTPUT_FILE"
+    if [[ -n "$REFERENCE_SPECIES_TREE" ]]; then
+      echo "# reference:    $REFERENCE_SPECIES_TREE"
+    fi
+    echo "# wrapper:      $(quote_command "${WRAPPER_ARGV[@]}")"
+    echo "# exact ASTRAL-X invocation (run from astralx_root):"
+    echo "cd $(printf '%q' "$ASTRALX_ROOT") && $(quote_command ./run.sh --input "$INPUT_FILE" --output "$OUTPUT_FILE" "${ASTRALX_ARGS[@]}")"
+  } > "$COMMAND_FILE" 2>/dev/null || echo -e "${YELLOW}Warning: could not write command record to $COMMAND_FILE${NC}"
+}
+write_command_record
+
 START_NS=$(date +%s%N)
 
 ASTRALX_PID=""
@@ -289,7 +334,6 @@ fi
 
 RF_RATE="NA"
 if [[ -n "$REFERENCE_SPECIES_TREE" && -f "$OUTPUT_FILE" ]]; then
-  REFERENCE_SPECIES_TREE="$(realpath "$REFERENCE_SPECIES_TREE")"
   if [[ -f "$REFERENCE_SPECIES_TREE" ]]; then
     rf_output=$(cd "$ASTRALX_ROOT" && "$PYTHON_BIN" rf.py "$OUTPUT_FILE" "$REFERENCE_SPECIES_TREE" 2>&1) || true
     rf_line=$(echo "$rf_output" | grep -i "Robinson-Foulds distance" | tail -n1 || true)
@@ -317,6 +361,13 @@ STATS_FILE="${OUTPUT_FILE%.*}_stats.csv"
 echo "algorithm,input_file,output_file,running_time_s,max_cpu_mb,max_gpu_mb,optimal_quartet_score,rf_rate,exit_code" > "$STATS_FILE"
 echo "astral-x,$(basename "$INPUT_FILE"),$(basename "$OUTPUT_FILE"),${RUNNING_TIME},${MAX_CPU_MB},${MAX_GPU_MB},${OPTIMAL_QUARTET_SCORE},${RF_RATE},${ASTRALX_EXIT_CODE}" >> "$STATS_FILE"
 echo "Stats saved to: $STATS_FILE"
+if [[ -f "$COMMAND_FILE" ]]; then
+  {
+    echo "# exit_code:    ${ASTRALX_EXIT_CODE}"
+    echo "# running_time: ${RUNNING_TIME}s"
+  } >> "$COMMAND_FILE" 2>/dev/null || true
+  echo "Command saved to: $COMMAND_FILE"
+fi
 
 if [[ "$NO_NOTIFY" == false ]] && command -v curl >/dev/null 2>&1; then
   STATUS_EMOJI=$(if [[ $ASTRALX_EXIT_CODE -eq 0 ]]; then echo "✅"; else echo "❌"; fi)

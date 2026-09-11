@@ -7,6 +7,7 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/scripts/phylogeny-data-dir.sh"
 
 # --------------------------------
 # Parameter lists (edit as needed)
@@ -20,7 +21,7 @@ SPMAX_LIST=(200000)
 REPO_ID="imAniksahA/blab"
 REPO_TYPE="dataset"
 REMOTE_DIR="ph/d/simulated/astralx-datasets/raw"
-LOCAL_DATA_DIR="${SCRIPT_DIR}/simphy/data"
+LOCAL_DATA_DIR=""   # resolved below: $PHYLOGENY_DATA_DIR/simphy/data, else <repo>/simphy/data
 DOWNLOAD_SCRIPT="${HOME}/utils/hf-data-transfer/hf_download.sh"
 
 DOWNLOAD_ONLY=false
@@ -43,7 +44,7 @@ Options:
   --repo-id ID              Hugging Face repository (default: ${REPO_ID})
   --repo-type TYPE          dataset, model, or space (default: ${REPO_TYPE})
   --local-dir PATH          Local simphy data directory
-                            (default: ${LOCAL_DATA_DIR})
+                            (default: \$PHYLOGENY_DATA_DIR/simphy/data)
   --download-script PATH    Path to hf_download.sh
                             (default: ${DOWNLOAD_SCRIPT})
   --download-only           Download and validate ZIPs without extracting them
@@ -115,9 +116,9 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-LOCAL_DATA_DIR="$(expand_home "$LOCAL_DATA_DIR")"
 DOWNLOAD_SCRIPT="$(expand_home "$DOWNLOAD_SCRIPT")"
-LOCAL_DATA_DIR="$(realpath -m "$LOCAL_DATA_DIR")"
+# Download into the same tree the runs read from.
+LOCAL_DATA_DIR="$(astralx_resolve_simphy_data_dir "$(expand_home "$LOCAL_DATA_DIR")" "${SCRIPT_DIR}/simphy/data")" || exit 2
 REMOTE_DIR="${REMOTE_DIR%/}"
 
 validate_integer_list() {

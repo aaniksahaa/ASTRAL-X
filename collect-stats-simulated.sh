@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # collect-stats-simulated.sh (multi-algorithm version)
-# Merges stat-*.csv files under simphy/data into one combined CSV file
+# Merges stat-*.csv files under the SimPhy data tree into one combined CSV file
 # and appends gt-gt,gt-st from a stat-sim.csv in the same directory (if present).
 # Handles header mismatches by taking the union of columns, filling missing ones with empty values.
-# Outputs columns in the prescribed order: alg,setting,num-taxa,gene-trees,replicate,sb,spmin,spmax,rf-rate,running-time-s,max-cpu-mb,max-gpu-mb,gt-gt,gt-st
+# Outputs columns in the prescribed order: alg,setting,num-taxa,gene-trees,replicate,sb,spmin,spmax,rf-rate,optimal-quartet-score,running-time-s,max-cpu-mb,max-gpu-mb,gt-gt,gt-st
 #
 # Usage:
 #   ./collect-stats-simulated.sh
@@ -13,6 +13,7 @@
 set -euo pipefail
 
 SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_ROOT}/scripts/phylogeny-data-dir.sh"
 
 # Algorithm configuration - modify this to select which algorithms to collect
 ALGORITHMS=("astralx")
@@ -20,6 +21,7 @@ ALGORITHMS=("astralx")
 BASE_DIR="$(dirname "$SCRIPT_ROOT")"
 BASE_DIR_SET=false
 SIMPHY_DIR=""
+SIMPHY_DATA_DIR=""
 OUT_FILE="./perf-combined.csv"
 
 print_help() {
@@ -35,6 +37,8 @@ Configured algorithms: ${ALGORITHMS[*]}
 Options:
   --base-dir, -b    Base directory (default: ${BASE_DIR})
   --simphy-dir      Path to simphy dir (overrides --base-dir)
+  --simphy-data-dir SimPhy data root
+                    (default: \$PHYLOGENY_DATA_DIR/simphy/data, else <simphy-dir>/data)
   --out, -o         Output CSV path (default: ${OUT_FILE})
   --help, -h        Show this message
 EOF
@@ -45,6 +49,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --base-dir|-b) BASE_DIR="$2"; BASE_DIR_SET=true; shift 2 ;;
     --simphy-dir) SIMPHY_DIR="$2"; shift 2 ;;
+    --simphy-data-dir) SIMPHY_DATA_DIR="$2"; shift 2 ;;
     --out|-o) OUT_FILE="$2"; shift 2 ;;
     --help|-h) print_help; exit 0 ;;
     *) echo "Unknown option: $1"; print_help; exit 1 ;;
@@ -59,15 +64,12 @@ if [[ -z "$SIMPHY_DIR" ]]; then
   fi
 fi
 
-SIMPHY_DATA_DIR="${SIMPHY_DIR%/}/data"
-
-if [[ ! -d "$SIMPHY_DATA_DIR" ]]; then
-  echo "Error: simphy data directory not found at: $SIMPHY_DATA_DIR" >&2
-  exit 2
-fi
+# Read the same tree the runs write to: an explicit path wins, then
+# $PHYLOGENY_DATA_DIR/simphy/data, then this checkout's simphy/data.
+SIMPHY_DATA_DIR="$(astralx_resolve_simphy_data_dir "$SIMPHY_DATA_DIR" "${SIMPHY_DIR%/}/data")" || exit 2
 
 # find stat files for all configured algorithms (only if lock file exists)
-declare -a all_stat_files
+declare -a all_stat_files=()
 total_files=0
 skipped_no_lock=0
 
@@ -114,7 +116,7 @@ norm_line() {
 }
 
 # Define the prescribed header order
-PRESCRIBED_HEADER="alg,setting,num-taxa,gene-trees,replicate,sb,spmin,spmax,rf-rate,running-time-s,max-cpu-mb,max-gpu-mb,gt-gt,gt-st"
+PRESCRIBED_HEADER="alg,setting,num-taxa,gene-trees,replicate,sb,spmin,spmax,rf-rate,optimal-quartet-score,running-time-s,max-cpu-mb,max-gpu-mb,gt-gt,gt-st"
 
 # Write prescribed header to output
 printf "%s\n" "$PRESCRIBED_HEADER" > "$OUT_FILE"

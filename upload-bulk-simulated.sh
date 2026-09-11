@@ -4,13 +4,15 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/scripts/phylogeny-data-dir.sh"
+source "${SCRIPT_DIR}/scripts/hf-python.sh"
 
-DATA_DIR="${SCRIPT_DIR}/simphy/data"
+DATA_DIR=""   # resolved below: $PHYLOGENY_DATA_DIR/simphy/data, else <repo>/simphy/data
 REPO_ID="imAniksahA/blab"
 REPO_TYPE="dataset"
 REMOTE_DIR="ph/d/simulated/astralx-datasets/raw"
 UPLOADER="${HOME}/utils/hf-data-transfer/hf_upload.py"
-PYTHON_BIN="python3"
+PYTHON_BIN=""
 MIN_TAXA=1000
 MIN_GENE_TREES=1000
 DRY_RUN=false
@@ -26,7 +28,7 @@ datasets are uploaded. The complete plan is shown before one confirmation.
 
 Options:
   --data-dir PATH          Directory containing datasets and ZIPs
-                            (default: ${DATA_DIR})
+                            (default: \$PHYLOGENY_DATA_DIR/simphy/data)
   --min-taxa N             Minimum taxon count (default: ${MIN_TAXA})
   --min-gene-trees N       Minimum gene-tree count (default: ${MIN_GENE_TREES})
   --all                    Select all positive taxa/gene-tree counts
@@ -35,7 +37,8 @@ Options:
   --remote-dir PATH        Destination directory inside the repository
                             (default: ${REMOTE_DIR})
   --uploader PATH          Path to hf_upload.py (default: ${UPLOADER})
-  --python COMMAND         Python interpreter (default: ${PYTHON_BIN})
+  --python COMMAND         Python interpreter with huggingface_hub (default: the
+                           first of python3, python, conda base python that has it)
   --dry-run                Validate and print commands without uploading
   --yes, -y                Do not ask for confirmation
   --help, -h               Show this message
@@ -111,14 +114,11 @@ done
 require_positive_integer "--min-taxa" "$MIN_TAXA"
 require_positive_integer "--min-gene-trees" "$MIN_GENE_TREES"
 
-DATA_DIR="$(realpath -m "$(expand_home "$DATA_DIR")")"
+# Upload from the same tree the runs write to.
+DATA_DIR="$(astralx_resolve_simphy_data_dir "$(expand_home "$DATA_DIR")" "${SCRIPT_DIR}/simphy/data")" || exit 2
 UPLOADER="$(realpath -m "$(expand_home "$UPLOADER")")"
 REMOTE_DIR="${REMOTE_DIR%/}"
 
-if [[ ! -d "$DATA_DIR" ]]; then
-  echo "Error: data directory does not exist: $DATA_DIR" >&2
-  exit 2
-fi
 if [[ ! "$REPO_ID" =~ ^[^/[:space:]]+/[^/[:space:]]+$ ]]; then
   echo "Error: invalid --repo-id '$REPO_ID'; expected owner/repository." >&2
   exit 2
@@ -143,15 +143,7 @@ if [[ ! -f "$UPLOADER" ]]; then
   echo "Error: uploader was not found: $UPLOADER" >&2
   exit 2
 fi
-if [[ "$PYTHON_BIN" == */* ]]; then
-  if [[ ! -x "$PYTHON_BIN" ]]; then
-    echo "Error: Python interpreter is not executable: $PYTHON_BIN" >&2
-    exit 2
-  fi
-elif ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
-  echo "Error: Python command was not found: $PYTHON_BIN" >&2
-  exit 2
-fi
+PYTHON_BIN="$(astralx_find_hf_python "$PYTHON_BIN")" || exit 2
 
 dataset_name_is_valid() {
   local name="$1"
@@ -299,6 +291,7 @@ echo "ASTRAL-X simulated dataset uploader"
 echo "Data directory: $DATA_DIR"
 echo "Repository:     $REPO_ID ($REPO_TYPE)"
 echo "Remote path:    $REMOTE_DIR/"
+echo "Python:         $PYTHON_BIN"
 echo "Selection:      taxa >= $MIN_TAXA, gene trees >= $MIN_GENE_TREES"
 [[ "$DRY_RUN" == true ]] && echo "Dry run:        yes"
 echo

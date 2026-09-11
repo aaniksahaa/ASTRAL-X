@@ -481,9 +481,17 @@ For a controlled parameter sweep, pass all experiment sizes explicitly:
 ```
 
 The bulk script intentionally defaults to one small 10-taxon, 10-gene run. Use
-`--fresh` only when existing simulation outputs should be regenerated. A custom
-simulation location can be supplied to the individual scripts with
-`--simphy-data-dir`.
+`--fresh` only when existing simulation outputs should be regenerated.
+
+Every script that touches the simulated data tree — `sim.sh`,
+`sim_incomplete.sh`, `run-bulk-simulated.sh`, `test-astralx-simulated.sh`,
+`collect-stats-simulated.sh`, `download-bulk-simulated.sh`,
+`upload-bulk-simulated.sh`, and the mirror tools — resolves its location the
+same way, so they never disagree about where the datasets live:
+
+1. an explicit `--simphy-data-dir` (or `--local-dir` / `--data-dir`) argument,
+2. otherwise `$PHYLOGENY_DATA_DIR/simphy/data`,
+3. otherwise this checkout's own `simphy/data`.
 
 Experiment output directories and CSV rows derive their `setting` name from the
 meaningful algorithm options. For example,
@@ -491,6 +499,24 @@ meaningful algorithm options. For example,
 `search-space_S1__intersection-method_I2`; verbosity flags are omitted, while
 additional options are appended using the same `option_value` format. Legacy
 intersection-method names are normalized to their compact `I1`-`I4` names.
+
+Each simulated run also maintains a compact reproducibility mirror containing
+only result artifacts and the SimPhy `.command`/`.params` files. For the normal
+`simphy/data` tree it is written to `outputs/simphy`, organized as
+`astralx_outputs/<dataset>/<replicate>/<setting>`. Simulated gene trees, true
+trees, databases, ZIPs, and `stat-sim.csv` are explicitly refused.
+
+```bash
+./sync-simulated-outputs.sh --dry-run       # preview a back-fill
+./sync-simulated-outputs.sh                 # mirror older results
+./upload-bulk-simulated-outputs.sh --dry-run
+./upload-bulk-simulated-outputs.sh --sync   # refresh, confirm, then publish
+```
+
+Use `--simphy-outputs-dir` to override the mirror root or
+`--no-outputs-mirror` for an individual/bulk run. See
+[`DOCS/simulated-outputs-reproducibility.md`](DOCS/simulated-outputs-reproducibility.md)
+for the layout, safeguards, and reproduction procedure.
 
 ## Standard-dataset experiments
 
