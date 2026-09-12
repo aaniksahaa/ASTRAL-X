@@ -27,7 +27,9 @@ REPO_TYPE="dataset"
 REMOTE_DIR="ph/d/simulated/outputs"
 UPLOADER="${HOME}/utils/hf-data-transfer/hf_upload.py"
 PYTHON_BIN=""
+DEFAULT_METHODS="astralx"   # this repo's own runs; --all-methods lifts the filter
 METHODS_RAW=""
+ALL_METHODS=false
 MIN_TAXA=1
 MIN_GENE_TREES=1
 INCLUDE_INCOMPLETE=true
@@ -55,9 +57,12 @@ Options:
                            reflects every result in the data tree
   --data-dir PATH          Data tree used by --sync
                             (default: \$PHYLOGENY_DATA_DIR/simphy/data)
-  --method, -m METHOD      Only upload this method (e.g. "astralx"); repeatable
+  --method, -m METHOD      Only upload this method (e.g. "aster"); repeatable
   --methods LIST           Only upload these methods, comma/space separated
-                            (e.g. "astralx,aster"; default: all)
+                            (e.g. "astralx,aster")
+  --all-methods            Upload every <method>_outputs directory found
+                           (by default only ${DEFAULT_METHODS}_outputs is uploaded,
+                           since this is the ASTRAL-X repository)
   --min-taxa N             Minimum taxon count (default: ${MIN_TAXA})
   --min-gene-trees N       Minimum gene-tree count (default: ${MIN_GENE_TREES})
   --exclude-incomplete     Skip "<dataset>_incomplete" datasets
@@ -78,10 +83,10 @@ Re-running is cheap: files already present on the Hub are skipped by the
 uploader, so this doubles as an incremental sync of the outputs mirror.
 
 Examples:
-  ./upload-bulk-simulated-outputs.sh --dry-run
+  ./upload-bulk-simulated-outputs.sh --dry-run          # astralx only
   ./upload-bulk-simulated-outputs.sh --sync
-  ./upload-bulk-simulated-outputs.sh --method astralx
-  ./upload-bulk-simulated-outputs.sh --methods astralx --min-taxa 1000
+  ./upload-bulk-simulated-outputs.sh --method aster     # a different method
+  ./upload-bulk-simulated-outputs.sh --all-methods      # everything in the mirror
 EOF
 }
 
@@ -123,6 +128,7 @@ while [[ $# -gt 0 ]]; do
     --methods=*) METHODS_RAW="${1#*=}"; shift ;;
     --method|-m) METHODS_RAW="${METHODS_RAW:+$METHODS_RAW,}$2"; shift 2 ;;
     --method=*) METHODS_RAW="${METHODS_RAW:+$METHODS_RAW,}${1#*=}"; shift ;;
+    --all-methods) ALL_METHODS=true; shift ;;
     --min-taxa) MIN_TAXA="$2"; shift 2 ;;
     --min-taxa=*) MIN_TAXA="${1#*=}"; shift ;;
     --min-gene-trees) MIN_GENE_TREES="$2"; shift 2 ;;
@@ -149,6 +155,15 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+if [[ "$ALL_METHODS" == true ]]; then
+  if [[ -n "$METHODS_RAW" ]]; then
+    echo "Error: --all-methods cannot be combined with --method/--methods." >&2
+    exit 2
+  fi
+elif [[ -z "$METHODS_RAW" ]]; then
+  METHODS_RAW="$DEFAULT_METHODS"
+fi
 
 require_positive_integer "--min-taxa" "$MIN_TAXA"
 require_positive_integer "--min-gene-trees" "$MIN_GENE_TREES"
@@ -292,6 +307,9 @@ fi
 
 if [[ ${#SELECTED[@]} -eq 0 ]]; then
   echo "No <method>_outputs/<dataset> directories matched the selection under $OUTPUTS_DIR."
+  if [[ "$ALL_METHODS" == false ]]; then
+    echo "Only ${METHODS_RAW} is selected; pass --all-methods (or --method NAME) to widen the search."
+  fi
   echo "Run ./sync-simulated-outputs.sh (or this tool with --sync) to populate the mirror."
   exit 0
 fi
