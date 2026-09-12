@@ -55,6 +55,7 @@ Options:
                            reflects every result in the data tree
   --data-dir PATH          Data tree used by --sync
                             (default: \$PHYLOGENY_DATA_DIR/simphy/data)
+  --method, -m METHOD      Only upload this method (e.g. "astralx"); repeatable
   --methods LIST           Only upload these methods, comma/space separated
                             (e.g. "astralx,aster"; default: all)
   --min-taxa N             Minimum taxon count (default: ${MIN_TAXA})
@@ -79,6 +80,7 @@ uploader, so this doubles as an incremental sync of the outputs mirror.
 Examples:
   ./upload-bulk-simulated-outputs.sh --dry-run
   ./upload-bulk-simulated-outputs.sh --sync
+  ./upload-bulk-simulated-outputs.sh --method astralx
   ./upload-bulk-simulated-outputs.sh --methods astralx --min-taxa 1000
 EOF
 }
@@ -102,7 +104,7 @@ require_positive_integer() {
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --outputs-dir|--simphy-outputs-dir|--data-dir|--simphy-data-dir|--methods|\
+    --outputs-dir|--simphy-outputs-dir|--data-dir|--simphy-data-dir|--methods|--method|-m|\
     --min-taxa|--min-gene-trees|--repo-id|--repo-type|--remote-dir|--uploader|--python)
       if [[ $# -lt 2 ]]; then
         echo "Error: option '$1' requires a value." >&2
@@ -119,6 +121,8 @@ while [[ $# -gt 0 ]]; do
     --sync) SYNC_FIRST=true; shift ;;
     --methods) METHODS_RAW="$2"; shift 2 ;;
     --methods=*) METHODS_RAW="${1#*=}"; shift ;;
+    --method|-m) METHODS_RAW="${METHODS_RAW:+$METHODS_RAW,}$2"; shift 2 ;;
+    --method=*) METHODS_RAW="${METHODS_RAW:+$METHODS_RAW,}${1#*=}"; shift ;;
     --min-taxa) MIN_TAXA="$2"; shift 2 ;;
     --min-taxa=*) MIN_TAXA="${1#*=}"; shift ;;
     --min-gene-trees) MIN_GENE_TREES="$2"; shift 2 ;;

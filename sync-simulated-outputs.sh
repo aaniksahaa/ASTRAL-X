@@ -38,6 +38,7 @@ Options:
   --simphy-data-dir PATH     Data tree to read (default: \$PHYLOGENY_DATA_DIR/simphy/data)
   --simphy-outputs-dir PATH  Mirror root to write (default: \$PHYLOGENY_DATA_DIR/outputs/simphy,
                              i.e. ".../simphy/data" mirrors into ".../outputs/simphy")
+  --method, -m METHOD        Only mirror this method (e.g. "astralx"); repeatable
   --methods LIST             Only mirror these methods, comma/space separated
                              (e.g. "astralx" or "astralx_outputs"; default: all)
   --dry-run                  Show what would be mirrored without writing
@@ -47,13 +48,13 @@ Options:
 Examples:
   ./sync-simulated-outputs.sh --dry-run
   ./sync-simulated-outputs.sh
-  ./sync-simulated-outputs.sh --methods astralx
+  ./sync-simulated-outputs.sh --method astralx
 EOF
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --simphy-data-dir|--data-dir|--simphy-outputs-dir|--outputs-dir|--methods)
+    --simphy-data-dir|--data-dir|--simphy-outputs-dir|--outputs-dir|--methods|--method|-m)
       if [[ $# -lt 2 ]]; then
         echo "Error: option '$1' requires a value." >&2
         exit 2
@@ -67,6 +68,8 @@ while [[ $# -gt 0 ]]; do
     --simphy-outputs-dir=*|--outputs-dir=*) OUTPUTS_DIR="${1#*=}"; shift ;;
     --methods) METHODS_RAW="$2"; shift 2 ;;
     --methods=*) METHODS_RAW="${1#*=}"; shift ;;
+    --method|-m) METHODS_RAW="${METHODS_RAW:+$METHODS_RAW,}$2"; shift 2 ;;
+    --method=*) METHODS_RAW="${METHODS_RAW:+$METHODS_RAW,}${1#*=}"; shift ;;
     --dry-run) DRY_RUN=true; shift ;;
     --quiet|-q) QUIET=true; shift ;;
     --help|-h) print_help; exit 0 ;;
