@@ -793,7 +793,28 @@ done
 # A10K stats collection
 ###############################################################################
 
+# also copies the merged CSV into outputs/10k-astral-dataset/
 ./collect-scores-a10k.sh --data-dir data/10k-astral-dataset --start-rep 1 --end-rep 20
+
+
+###############################################################################
+# A10K reproducibility mirror (outputs/10k-astral-dataset)
+###############################################################################
+# run-a10k.sh mirrors every result automatically to
+#   outputs/10k-astral-dataset/astralx_outputs/10k-simphy/<R>/<tree_type>/<setting>/
+# (tree, CSVs, out-astralx.command, .astralx_run.log; never gene/species trees)
+
+# back-fill results produced before the mirror existed
+./sync-a10k-outputs.sh --data-dir data/10k-astral-dataset --dry-run
+./sync-a10k-outputs.sh --data-dir data/10k-astral-dataset
+
+# publish to Hugging Face (ph/d/a10k/outputs/)
+./upload-a10k-outputs.sh --data-dir data/10k-astral-dataset --dry-run
+./upload-a10k-outputs.sh --data-dir data/10k-astral-dataset --sync
+
+# clear results but keep the mirror (default) / remove the mirror too
+./clear-a10k.sh --data-dir data/10k-astral-dataset --yes
+./clear-a10k.sh --data-dir data/10k-astral-dataset --yes --include-mirror
 
 
 ###############################################################################
@@ -809,6 +830,10 @@ simphy/data/t_100_g_100_sb_0.000001_spmin_100000_spmax_200000/R1/astralx_outputs
 # A10K
 data/10k-astral-dataset/10k-simphy/R1/astralx_outputs/estimated/search-mode_full/stat-astralx.csv
 data/10k-astral-dataset/10k-simphy/R1/astralx_outputs/estimated/search-mode_local/stat-astralx.csv
+# A10K mirror
+outputs/10k-astral-dataset/astralx_outputs/10k-simphy/R1/estimated/search-mode_full/out-astralx.command
+outputs/10k-astral-dataset/astralx_outputs/10k-simphy/R1/estimatedgenetrees.rooted.command
+outputs/10k-astral-dataset/a10k_astralx_scores_merged.csv
 
 
 

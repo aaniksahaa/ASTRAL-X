@@ -215,6 +215,45 @@ astralx_simphy_results_components() {
   printf '%s\n%s\n%s\n%s\n' "$dataset" "$replicate" "$method_dir" "$setting"
 }
 
+# Replace MIRROR_LEAF with an exact copy of SOURCE_DIR, atomically.
+#   astralx_mirror_directory_atomic SOURCE_DIR MIRROR_LEAF
+# The copy is built in a temporary sibling directory and swapped in with a
+# rename, so the leaf always equals the source and stale files never survive.
+# Shared by the SimPhy mirror and the A10K mirror (scripts/a10k-outputs-dir.sh).
+astralx_mirror_directory_atomic() {
+  local source_dir="${1%/}" mirror_leaf="${2%/}"
+  local mirror_parent leaf_name temp_new temp_old
+
+  mirror_parent="$(dirname -- "$mirror_leaf")"
+  leaf_name="$(basename -- "$mirror_leaf")"
+  mkdir -p -- "$mirror_parent" || return 1
+
+  temp_new="$(mktemp -d -- "${mirror_parent}/.${leaf_name}.mirror.XXXXXX")" || return 1
+  if ! cp -a -- "${source_dir}/." "${temp_new}/"; then
+    rm -rf -- "$temp_new"
+    astralx__outputs_error "could not copy results into the outputs mirror: $source_dir"
+    return 1
+  fi
+
+  temp_old=""
+  if [[ -e "$mirror_leaf" ]]; then
+    temp_old="$(mktemp -d -u -- "${mirror_parent}/.${leaf_name}.previous.XXXXXX")"
+    if ! mv -- "$mirror_leaf" "$temp_old"; then
+      rm -rf -- "$temp_new"
+      astralx__outputs_error "could not replace the existing mirror: $mirror_leaf"
+      return 1
+    fi
+  fi
+  if ! mv -- "$temp_new" "$mirror_leaf"; then
+    [[ -n "$temp_old" && -d "$temp_old" ]] && mv -- "$temp_old" "$mirror_leaf" 2>/dev/null
+    rm -rf -- "$temp_new"
+    astralx__outputs_error "could not install the outputs mirror: $mirror_leaf"
+    return 1
+  fi
+  [[ -n "$temp_old" ]] && rm -rf -- "$temp_old"
+  return 0
+}
+
 # Mirror one results directory into the outputs tree.
 #   astralx_mirror_simulated_results DATA_DIR OUTPUTS_ROOT RESULTS_DIR
 # The mirror leaf is replaced atomically so it always equals the source leaf.
@@ -223,7 +262,7 @@ astralx_mirror_simulated_results() {
   local data_dir="${1%/}" outputs_root="${2%/}" results_dir="${3%/}"
   local -a parts=()
   local dataset replicate method_dir setting
-  local mirror_dataset_dir mirror_leaf mirror_parent temp_new temp_old forbidden
+  local mirror_dataset_dir mirror_leaf forbidden
 
   if [[ ! -d "$results_dir" ]]; then
     astralx__outputs_error "results directory does not exist: $results_dir"
@@ -240,38 +279,14 @@ astralx_mirror_simulated_results() {
   fi
 
   mirror_dataset_dir="${outputs_root}/${method_dir}/${dataset}"
-  mirror_parent="${mirror_dataset_dir}/${replicate}"
-  mirror_leaf="${mirror_parent}/${setting}"
+  mirror_leaf="${mirror_dataset_dir}/${replicate}/${setting}"
 
-  mkdir -p -- "$mirror_parent" || return 1
+  mkdir -p -- "${mirror_dataset_dir}/${replicate}" || return 1
   if ! astralx_mirror_simphy_dataset_commands "$data_dir" "$mirror_dataset_dir" "$dataset"; then
     echo "Warning: no SimPhy .command file found for dataset '$dataset'; the mirror lacks its simulation command." >&2
   fi
 
-  temp_new="$(mktemp -d -- "${mirror_parent}/.${setting}.mirror.XXXXXX")" || return 1
-  if ! cp -a -- "${results_dir}/." "${temp_new}/"; then
-    rm -rf -- "$temp_new"
-    astralx__outputs_error "could not copy results into the outputs mirror: $results_dir"
-    return 1
-  fi
-
-  temp_old=""
-  if [[ -e "$mirror_leaf" ]]; then
-    temp_old="$(mktemp -d -u -- "${mirror_parent}/.${setting}.previous.XXXXXX")"
-    if ! mv -- "$mirror_leaf" "$temp_old"; then
-      rm -rf -- "$temp_new"
-      astralx__outputs_error "could not replace the existing mirror: $mirror_leaf"
-      return 1
-    fi
-  fi
-  if ! mv -- "$temp_new" "$mirror_leaf"; then
-    [[ -n "$temp_old" && -d "$temp_old" ]] && mv -- "$temp_old" "$mirror_leaf" 2>/dev/null
-    rm -rf -- "$temp_new"
-    astralx__outputs_error "could not install the outputs mirror: $mirror_leaf"
-    return 1
-  fi
-  [[ -n "$temp_old" ]] && rm -rf -- "$temp_old"
-
+  astralx_mirror_directory_atomic "$results_dir" "$mirror_leaf" || return 1
   printf '%s\n' "$mirror_leaf"
 }
 

@@ -204,8 +204,10 @@ grep -q "Run plan (2 dataset(s), 2 replicate(s), 2 setting(s))" "${TMP}/plan.out
 grep -q "Dry run; nothing was simulated or executed" "${TMP}/plan.out" || fail "bulk dry run did not stop before execution"
 
 # ------------------------------------------------------- uploader dry run ---
+# The uploader defaults to astralx_outputs only; --all-methods covers the
+# second synthetic method as well.
 UP="${ROOT}/upload-bulk-simulated-outputs.sh"
-PHYLOGENY_DATA_DIR="$BASE" "$UP" --dry-run --uploader /bin/true --python /bin/true >"${TMP}/up.out" 2>&1 || \
+PHYLOGENY_DATA_DIR="$BASE" "$UP" --all-methods --dry-run --uploader /bin/true --python /bin/true >"${TMP}/up.out" 2>&1 || \
   fail "uploader dry run failed: $(cat "${TMP}/up.out")"
 grep -q "Plan: upload 3 dataset" "${TMP}/up.out" || fail "uploader did not plan 3 dataset uploads: $(cat "${TMP}/up.out")"
 grep -Fq -- "--path-in-repo ph/d/simulated/outputs/astralx_outputs/${DS} " "${TMP}/up.out" || \
@@ -219,24 +221,24 @@ grep -q "nothing was uploaded" "${TMP}/up.out" || fail "dry run did not state th
 
 PHYLOGENY_DATA_DIR="$BASE" "$UP" --dry-run --uploader /bin/true --python /bin/true --methods aster >"${TMP}/up-m.out" 2>&1
 grep -q "Plan: upload 1 dataset" "${TMP}/up-m.out" || fail "--methods filter did not narrow the plan"
-PHYLOGENY_DATA_DIR="$BASE" "$UP" --dry-run --uploader /bin/true --python /bin/true --exclude-incomplete >"${TMP}/up-i.out" 2>&1
+PHYLOGENY_DATA_DIR="$BASE" "$UP" --all-methods --dry-run --uploader /bin/true --python /bin/true --exclude-incomplete >"${TMP}/up-i.out" 2>&1
 grep -q "Plan: upload 2 dataset" "${TMP}/up-i.out" || fail "--exclude-incomplete did not drop the incomplete dataset"
-PHYLOGENY_DATA_DIR="$BASE" "$UP" --dry-run --uploader /bin/true --python /bin/true --min-taxa 5 >"${TMP}/up-t.out" 2>&1
+PHYLOGENY_DATA_DIR="$BASE" "$UP" --all-methods --dry-run --uploader /bin/true --python /bin/true --min-taxa 5 >"${TMP}/up-t.out" 2>&1
 grep -q "No <method>_outputs/<dataset> directories matched" "${TMP}/up-t.out" || fail "--min-taxa did not filter everything out"
 
 # --sync refreshes the mirror before planning (a new result appears).
 make_results "${DATA}/${DS}/R2/astralx_outputs/search-space_S3" "R2-S3"
-PHYLOGENY_DATA_DIR="$BASE" "$UP" --dry-run --sync --uploader /bin/true --python /bin/true >"${TMP}/up-s.out" 2>&1 || \
+PHYLOGENY_DATA_DIR="$BASE" "$UP" --all-methods --dry-run --sync --uploader /bin/true --python /bin/true >"${TMP}/up-s.out" 2>&1 || \
   fail "--sync dry run failed: $(cat "${TMP}/up-s.out")"
 grep -q "Refreshing the outputs mirror" "${TMP}/up-s.out" || fail "--sync did not run the mirror sync"
-PHYLOGENY_DATA_DIR="$BASE" "$UP" --sync --yes --uploader /bin/true --python /bin/true >"${TMP}/up-s2.out" 2>&1 || \
+PHYLOGENY_DATA_DIR="$BASE" "$UP" --all-methods --sync --yes --uploader /bin/true --python /bin/true >"${TMP}/up-s2.out" 2>&1 || \
   fail "--sync upload with a stub uploader failed: $(cat "${TMP}/up-s2.out")"
 [[ -s "${M}/R2/search-space_S3/out-astralx.tre" ]] || fail "--sync did not back-fill the new result"
 grep -q "uploaded=3 failed=0" "${TMP}/up-s2.out" || fail "stub upload summary unexpected: $(cat "${TMP}/up-s2.out")"
 
 # Simulated input data inside the mirror blocks the upload.
 printf 'leak\n' > "${M}/R1/all_gt.tre"
-if PHYLOGENY_DATA_DIR="$BASE" "$UP" --dry-run --uploader /bin/true --python /bin/true >"${TMP}/up-leak.out" 2>&1; then
+if PHYLOGENY_DATA_DIR="$BASE" "$UP" --all-methods --dry-run --uploader /bin/true --python /bin/true >"${TMP}/up-leak.out" 2>&1; then
   fail "uploader accepted a mirror containing all_gt.tre"
 fi
 grep -q "BLOCKED: contains all_gt.tre" "${TMP}/up-leak.out" || fail "leak was not reported: $(cat "${TMP}/up-leak.out")"
@@ -245,16 +247,16 @@ rm -f "${M}/R1/all_gt.tre"
 
 # A missing .command blocks unless explicitly allowed.
 rm -f "${OUTPUTS}/aster_outputs/${DS}/${DS}.command"
-if PHYLOGENY_DATA_DIR="$BASE" "$UP" --dry-run --uploader /bin/true --python /bin/true >"${TMP}/up-cmd.out" 2>&1; then
+if PHYLOGENY_DATA_DIR="$BASE" "$UP" --all-methods --dry-run --uploader /bin/true --python /bin/true >"${TMP}/up-cmd.out" 2>&1; then
   fail "uploader accepted a dataset without its .command file"
 fi
 grep -q "BLOCKED: missing .command" "${TMP}/up-cmd.out" || fail "missing command was not reported"
-PHYLOGENY_DATA_DIR="$BASE" "$UP" --dry-run --uploader /bin/true --python /bin/true --allow-missing-command >"${TMP}/up-cmd2.out" 2>&1 || \
+PHYLOGENY_DATA_DIR="$BASE" "$UP" --all-methods --dry-run --uploader /bin/true --python /bin/true --allow-missing-command >"${TMP}/up-cmd2.out" 2>&1 || \
   fail "--allow-missing-command did not unblock the plan"
 grep -q "upload (NO .command)" "${TMP}/up-cmd2.out" || fail "missing command was not flagged in the plan"
 
 # Non-interactive launches proceed (for nohup) but print a visible note.
-PHYLOGENY_DATA_DIR="$BASE" "$UP" --uploader /bin/true --python /bin/true --allow-missing-command </dev/null >"${TMP}/up-noyes.out" 2>&1 || \
+PHYLOGENY_DATA_DIR="$BASE" "$UP" --all-methods --uploader /bin/true --python /bin/true --allow-missing-command </dev/null >"${TMP}/up-noyes.out" 2>&1 || \
   fail "non-interactive uploader failed: $(cat "${TMP}/up-noyes.out")"
 grep -q "Non-interactive session: proceeding without confirmation" "${TMP}/up-noyes.out" || \
   fail "non-interactive uploader did not explain that it would proceed"

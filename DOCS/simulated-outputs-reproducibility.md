@@ -120,7 +120,7 @@ or containing the data directory is refused.
 | File | Role |
 |---|---|
 | `scripts/phylogeny-data-dir.sh` | Shared helper: the data-root resolution order above (`astralx_prepare_simphy_data_dir`, `astralx_resolve_simphy_data_dir`). |
-| `scripts/simphy-outputs-dir.sh` | Shared helper: default-root rule, guards, atomic leaf mirroring, command-file copying, forbidden-file detection, dataset-name validation. |
+| `scripts/simphy-outputs-dir.sh` | Shared helper: default-root rule, guards, atomic leaf mirroring (`astralx_mirror_directory_atomic`, also used by the A10K mirror), command-file copying, forbidden-file detection, dataset-name validation. |
 | `test-astralx-simulated.sh` | Mirrors its results leaf after every run and on the "already completed" skip path (free back-fill). Appends the simulated-run context to the command record. Flags `--simphy-outputs-dir`, `--no-outputs-mirror`. |
 | `run-astralx-with-monitor.sh` | Writes `<output>.command` (e.g. `out-astralx.command`) beside the output tree before the run and appends exit code and running time after. Applies to real-dataset runs too. |
 | `run-bulk-simulated.sh` | Prints the run plan, confirms, forwards the mirror flags. Flags `--dry-run`, `--yes`. |
@@ -231,7 +231,13 @@ run (source `scripts/simphy-outputs-dir.sh`). Write the method's exact command
 into the results directory as `<output-basename>.command`. Nothing else needs
 to change: sync and upload discover `<method>_outputs` directories generically.
 
-## 9. Change log
+## 9. Related
+
+The A10K (10k-astral-dataset) runs have the same kind of mirror under
+`outputs/10k-astral-dataset`; see
+[`a10k-outputs-reproducibility.md`](a10k-outputs-reproducibility.md).
+
+## 10. Change log
 
 - 2026-09-12: ported the reference implementation to ASTRAL-X. Mirror root is
   `outputs/simphy`; the older `simphy/outputs` location is not read.
@@ -249,3 +255,9 @@ to change: sync and upload discover `<method>_outputs` directories generically.
 - 2026-09-12: uploaders auto-detect a Python with `huggingface_hub`
   (`scripts/hf-python.sh`); the outputs uploader rejects file-only
   `hf_upload.py` builds up front.
+- 2026-09-13: extracted `astralx_mirror_directory_atomic` from
+  `astralx_mirror_simulated_results` so the A10K mirror shares the atomic leaf
+  swap; behaviour of the SimPhy mirror is unchanged.
+- 2026-09-13: `test/test_simulated_outputs_mirror.sh` passes `--all-methods` to
+  the uploader where it expects the second synthetic method, matching the
+  astralx-only default introduced on 2026-09-12.

@@ -4,7 +4,12 @@
 
 set -euo pipefail
 
+SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_ROOT}/scripts/a10k-outputs-dir.sh"
+
 DATA_DIR=""
+OUTPUTS_DIR=""
+INCLUDE_MIRROR=false
 DRY_RUN=false
 ASSUME_YES=false
 
@@ -17,12 +22,17 @@ Remove all ASTRAL-X A10K results beneath:
 
 The merged DIR/a10k_astralx_scores_merged.csv file is also removed when present.
 Input gene trees, rooted gene trees, species trees, and all other dataset files
-are preserved.
+are preserved. The reproducibility mirror (outputs/<dataset>) is preserved too
+unless --include-mirror is given.
 
 Required:
   --data-dir DIR   A10K dataset root containing 10k-simphy/
 
 Options:
+  --include-mirror Also remove the mirrored astralx_outputs and merged CSV in
+                   the outputs mirror
+  --outputs-dir D  Mirror root (default: derived from DIR, e.g.
+                   data/10k-astral-dataset -> outputs/10k-astral-dataset)
   --dry-run        List exact targets without deleting anything
   --yes, -y        Delete without interactive confirmation
   --help, -h       Show this help
@@ -43,6 +53,13 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     --data-dir=*) DATA_DIR="${1#*=}"; shift ;;
+    --outputs-dir|--a10k-outputs-dir)
+      [[ $# -ge 2 ]] || { echo "Error: $1 requires a value." >&2; exit 2; }
+      OUTPUTS_DIR="$2"
+      shift 2
+      ;;
+    --outputs-dir=*|--a10k-outputs-dir=*) OUTPUTS_DIR="${1#*=}"; shift ;;
+    --include-mirror) INCLUDE_MIRROR=true; shift ;;
     --dry-run) DRY_RUN=true; shift ;;
     --yes|-y) ASSUME_YES=true; shift ;;
     --help|-h) show_usage; exit 0 ;;
@@ -83,11 +100,34 @@ while IFS= read -r -d '' replicate_dir; do
 done < <(find "$SIMPHY_DIR" -mindepth 1 -maxdepth 1 -type d -name 'R*' -print0 | sort -z -V)
 
 TARGETS=("${RESULT_DIRS[@]}")
-MERGED_CSV="${DATA_DIR}/a10k_astralx_scores_merged.csv"
+MERGED_CSV="${DATA_DIR}/${ASTRALX_A10K_MERGED_CSV_NAME}"
 [[ -f "$MERGED_CSV" ]] && TARGETS+=("$MERGED_CSV")
+
+# The reproducibility mirror is only touched on request.
+MIRROR_RESULTS_DIR=""
+MIRROR_MERGED_CSV=""
+if [[ -z "$OUTPUTS_DIR" ]]; then
+  OUTPUTS_DIR="$(astralx_default_a10k_outputs_dir "$DATA_DIR")"
+fi
+OUTPUTS_DIR="$(realpath -m -- "$OUTPUTS_DIR")"
+if [[ "$INCLUDE_MIRROR" == true ]]; then
+  if astralx__path_is_within "$OUTPUTS_DIR" "$DATA_DIR" || astralx__path_is_within "$DATA_DIR" "$OUTPUTS_DIR"; then
+    echo "Error: refusing a mirror directory that overlaps the data directory: $OUTPUTS_DIR" >&2
+    exit 2
+  fi
+  MIRROR_RESULTS_DIR="${OUTPUTS_DIR}/astralx_outputs"
+  MIRROR_MERGED_CSV="${OUTPUTS_DIR}/${ASTRALX_A10K_MERGED_CSV_NAME}"
+  [[ -d "$MIRROR_RESULTS_DIR" ]] && TARGETS+=("$MIRROR_RESULTS_DIR")
+  [[ -f "$MIRROR_MERGED_CSV" ]] && TARGETS+=("$MIRROR_MERGED_CSV")
+fi
 
 echo "A10K data: $DATA_DIR"
 echo "Results:   $SIMPHY_DIR/R*/astralx_outputs"
+if [[ "$INCLUDE_MIRROR" == true ]]; then
+  echo "Mirror:    $OUTPUTS_DIR (astralx_outputs and merged CSV will be removed)"
+else
+  echo "Mirror:    $OUTPUTS_DIR (preserved; pass --include-mirror to remove it too)"
+fi
 echo
 
 if [[ ${#TARGETS[@]} -eq 0 ]]; then
@@ -99,6 +139,7 @@ echo "Targets (${#TARGETS[@]}):"
 for target in "${TARGETS[@]}"; do
   case "$target" in
     "$SIMPHY_DIR"/R*/astralx_outputs|"$MERGED_CSV") ;;
+    "$MIRROR_RESULTS_DIR"|"$MIRROR_MERGED_CSV") [[ -n "$target" ]] || { echo "Error: empty mirror target" >&2; exit 3; } ;;
     *) echo "Error: unsafe target outside the A10K result layout: $target" >&2; exit 3 ;;
   esac
   printf '  %s\n' "$target"
@@ -138,7 +179,23 @@ if [[ -f "$MERGED_CSV" ]]; then
   rm -f -- "$MERGED_CSV"
 fi
 
+if [[ "$INCLUDE_MIRROR" == true ]]; then
+  if [[ -n "$MIRROR_RESULTS_DIR" && -d "$MIRROR_RESULTS_DIR" ]]; then
+    [[ "$(basename "$MIRROR_RESULTS_DIR")" == "astralx_outputs" ]] || {
+      echo "Error: refusing unexpected mirror directory: $MIRROR_RESULTS_DIR" >&2
+      exit 3
+    }
+    rm -rf -- "$MIRROR_RESULTS_DIR"
+  fi
+  [[ -n "$MIRROR_MERGED_CSV" && -f "$MIRROR_MERGED_CSV" ]] && rm -f -- "$MIRROR_MERGED_CSV"
+fi
+
 echo "Removed ${#RESULT_DIRS[@]} replicate result director$(
   [[ ${#RESULT_DIRS[@]} -eq 1 ]] && printf 'y' || printf 'ies'
 ) and the merged CSV if it existed."
+if [[ "$INCLUDE_MIRROR" == true ]]; then
+  echo "Removed the mirrored astralx_outputs and merged CSV under $OUTPUTS_DIR."
+else
+  echo "The reproducibility mirror under $OUTPUTS_DIR was preserved."
+fi
 echo "All A10K input and simulation files were preserved."

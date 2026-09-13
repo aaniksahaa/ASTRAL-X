@@ -589,6 +589,28 @@ both tree types across every replicate, preview the exact targets first:
 This removes only `10k-simphy/R*/astralx_outputs` and the A10K merged scores
 CSV; gene trees, rooted gene trees, and species trees are preserved.
 
+Each A10K run also maintains a compact reproducibility mirror, exactly like the
+simulated runs: the results stay in the data tree unchanged and are copied
+(inferred tree, CSVs, command record, run log; never gene trees or species
+trees) to the `outputs` sibling of the `data` directory, so
+`data/10k-astral-dataset` mirrors into
+`outputs/10k-astral-dataset/astralx_outputs/10k-simphy/<replicate>/<tree_type>/<setting>`.
+The merged scores CSV from `collect-scores-a10k.sh` and the rooting command for
+estimated gene trees are mirrored as well.
+
+```bash
+./sync-a10k-outputs.sh --data-dir data/10k-astral-dataset --dry-run   # preview a back-fill
+./sync-a10k-outputs.sh --data-dir data/10k-astral-dataset             # mirror older results
+./upload-a10k-outputs.sh --data-dir data/10k-astral-dataset --dry-run
+./upload-a10k-outputs.sh --data-dir data/10k-astral-dataset --sync    # refresh, confirm, then publish
+```
+
+Use `--outputs-dir` to override the mirror root or `--no-outputs-mirror` to
+skip it for one run; `clear-a10k.sh` keeps the mirror unless `--include-mirror`
+is given. See
+[`DOCS/a10k-outputs-reproducibility.md`](DOCS/a10k-outputs-reproducibility.md)
+for the layout, safeguards, and reproduction procedure.
+
 ## Tests
 
 Run the CLI contract tests and the complete CPU regression suite with:

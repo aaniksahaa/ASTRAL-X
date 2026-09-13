@@ -6,8 +6,13 @@ set -euo pipefail
 
 NTFY_CHANNEL_NAME="${NTFY_CHANNEL_NAME:-anik-phylo}"
 
+# Exact invocation of this script, appended to every run's command record.
+SCRIPT_ARGV=("$0" "$@")
+
 TREE_TYPES_RAW="estimated"
 DATA_DIR=""
+OUTPUTS_DIR=""
+OUTPUTS_MIRROR=true
 REPLICATES_SPEC=""
 START_REP=""
 END_REP=""
@@ -20,6 +25,7 @@ GPU_MONITOR=true
 NO_NOTIFY=false
 
 source "${ASTRALX_ROOT}/experiment-setting-name.sh"
+source "${ASTRALX_ROOT}/scripts/a10k-outputs-dir.sh"
 
 csv_get_field() {
   local file="$1"
@@ -71,6 +77,11 @@ Optional:
   --opts-list, --alg-opts-list
                        Semicolon-separated list of option strings to loop over
   --fresh              Force rerun even if stat-astralx.csv exists
+  --outputs-dir        Reproducibility mirror root for the small run outputs
+                       (default: the "outputs" sibling of the "data" directory
+                       holding the dataset, e.g. data/10k-astral-dataset mirrors
+                       into outputs/10k-astral-dataset)
+  --no-outputs-mirror  Do not copy results into the outputs mirror
   --no-time-monitor    Disable time monitoring
   --no-gpu-monitor     Disable GPU monitoring
   --no-notify, -nn     Disable ntfy notifications
@@ -82,6 +93,12 @@ Examples:
   ./run-a10k.sh --data-dir /path/to/10k-astral-dataset --tree-type estimated --opts-list "--search-space S1 -vv;--search-space S2 -vv;--search-space S3 -vv"
   The first example setting is search-space_S1__intersection-method_I2.
   Verbosity is ignored; other meaningful options are appended to the name.
+
+Results are written to
+  <data-dir>/10k-simphy/<replicate>/astralx_outputs/<tree_type>/<setting>/
+exactly as before and are also mirrored (tree, CSVs, command record, run log;
+never gene trees or species trees) to
+  <outputs-dir>/astralx_outputs/10k-simphy/<replicate>/<tree_type>/<setting>/
 EOF
 }
 
@@ -97,6 +114,9 @@ while [[ $# -gt 0 ]]; do
     --opts|--alg-opts|--astralx-opts|--stelar-opts) ASTRALX_OPTS="$2"; shift 2 ;;
     --opts-list|--alg-opts-list|--astralx-opts-list|--stelar-opts-list) ASTRALX_OPTS_LIST_RAW="$2"; shift 2 ;;
     --fresh) FRESH=true; shift ;;
+    --outputs-dir|--a10k-outputs-dir) OUTPUTS_DIR="$2"; shift 2 ;;
+    --outputs-dir=*|--a10k-outputs-dir=*) OUTPUTS_DIR="${1#*=}"; shift ;;
+    --no-outputs-mirror) OUTPUTS_MIRROR=false; shift ;;
     --no-time-monitor) TIME_MONITOR=false; shift ;;
     --no-gpu-monitor) GPU_MONITOR=false; shift ;;
     --no-notify|-nn) NO_NOTIFY=true; shift ;;
@@ -119,6 +139,25 @@ if [[ ! -d "$SIMPHY_DIR" ]]; then
   echo "Error: expected 10k-simphy at $SIMPHY_DIR"
   exit 3
 fi
+if [[ "$OUTPUTS_MIRROR" == true ]]; then
+  OUTPUTS_DIR="$(astralx_prepare_a10k_outputs_dir "$OUTPUTS_DIR" "$DATA_DIR")" || exit 2
+else
+  OUTPUTS_DIR="(disabled)"
+fi
+echo "[DEBUG] data dir: ${DATA_DIR} | outputs mirror: ${OUTPUTS_DIR}"
+
+# Copy one results directory into the reproducibility mirror. A mirror problem
+# is reported loudly but never changes the run's own exit status.
+mirror_results_dir() {
+  local results_dir="$1" mirrored
+  [[ "$OUTPUTS_MIRROR" == true ]] || return 0
+  [[ -d "$results_dir" ]] || return 0
+  if mirrored="$(astralx_mirror_a10k_results "$DATA_DIR" "$OUTPUTS_DIR" "$results_dir")"; then
+    echo "Mirrored outputs to: $mirrored"
+  else
+    echo "WARNING: outputs mirror was not updated for $results_dir" >&2
+  fi
+}
 
 TREE_TYPES=()
 IFS=';' read -r -a raw_tree_types <<< "$TREE_TYPES_RAW"
@@ -206,7 +245,19 @@ for TREE_TYPE in "${TREE_TYPES[@]}"; do
         exit 7
       fi
       echo "Rooting estimated gene trees for ${REPL} with outgroup 0..."
-      "${ASTRALX_ROOT%/}/process_unrooted.sh" -i "$GT_FILE" -o "$ROOTED_GT" -og "0"
+      ROOT_CMD=("${ASTRALX_ROOT%/}/process_unrooted.sh" -i "$GT_FILE" -o "$ROOTED_GT" -og "0")
+      "${ROOT_CMD[@]}"
+      # Record how the rooted input was derived; mirrored beside the results.
+      {
+        echo "# A10K estimated gene trees rooting (written by run-a10k.sh)"
+        echo "# date:    $(date '+%Y-%m-%dT%H:%M:%S%z')"
+        echo "# input:   $GT_FILE"
+        echo "# output:  $ROOTED_GT"
+        printf '%q' "${ROOT_CMD[0]}"
+        printf ' %q' "${ROOT_CMD[@]:1}"
+        printf '\n'
+      } > "${GT_DIR}/${ASTRALX_A10K_ROOTING_RECORD_NAME}" 2>/dev/null ||
+        echo "Warning: could not write rooting record to ${GT_DIR}/${ASTRALX_A10K_ROOTING_RECORD_NAME}" >&2
     fi
     GT_FILE="$ROOTED_GT"
   else
@@ -223,15 +274,20 @@ for TREE_TYPE in "${TREE_TYPES[@]}"; do
     OUT_DIR="${REPL_DIR}/astralx_outputs/${TREE_TYPE}/${SETTING_NAME}"
     OUT_FILE="${OUT_DIR}/out-astralx.tre"
     STAT_FILE="${OUT_DIR}/stat-astralx.csv"
+    RUN_LOG="${OUT_DIR}/.astralx_run.log"
+    COMMAND_FILE="${OUT_FILE%.*}.command"
 
     if [[ "$FRESH" == false && -f "$STAT_FILE" ]]; then
       echo "SKIPPING: ${STAT_FILE} exists."
+      # Keep the reproducibility mirror complete even for runs finished earlier.
+      mirror_results_dir "$OUT_DIR"
       continue
     elif [[ "$FRESH" == true && -f "$STAT_FILE" ]]; then
       echo "[DEBUG] --fresh set, overwriting existing: ${STAT_FILE}"
     fi
 
     mkdir -p "$OUT_DIR"
+    rm -f "$RUN_LOG"
     CMD=("${ASTRALX_ROOT}/run-astralx-with-monitor.sh" -i "$GT_FILE" -o "$OUT_FILE" --astralx-root "$ASTRALX_ROOT")
     if [[ "$TIME_MONITOR" == false ]]; then CMD+=(--no-time-monitor); fi
     if [[ "$GPU_MONITOR" == false ]]; then CMD+=(--no-gpu-monitor); fi
@@ -243,13 +299,41 @@ for TREE_TYPE in "${TREE_TYPES[@]}"; do
     echo "==> Running astralx on ${REPL} (${TREE_TYPE}, ${SETTING_NAME})"
     echo "Command: ${CMD[*]}"
     set +e
-    "${CMD[@]}"
-    RUN_EXIT=$?
+    "${CMD[@]}" 2>&1 | tee "$RUN_LOG"
+    RUN_EXIT=${PIPESTATUS[0]}
     set -e
+
+    # Complete the command record (out-astralx.command, written by the wrapper
+    # with the exact run.sh invocation) with the A10K context of this run.
+    append_command_context() {
+      local rf_rate="$1"
+      {
+        echo "# --- A10K run context (run-a10k.sh) ---"
+        echo "# data_dir:     $DATA_DIR"
+        echo "# replicate:    $REPL"
+        echo "# tree_type:    $TREE_TYPE"
+        echo "# setting:      $SETTING_NAME"
+        echo "# gene trees:   $GT_FILE"
+        echo "# true tree:    $TRUE_TREE"
+        echo "# rf_rate:      $rf_rate"
+        echo "# run_exit:     $RUN_EXIT"
+        if [[ "$TREE_TYPE" == "estimated" ]]; then
+          echo "# rooting cmd:  $(printf '%q' "${ASTRALX_ROOT%/}/process_unrooted.sh"; printf ' %q' -i "${GT_DIR}/estimatedgenetrees.tre" -o "$ROOTED_GT" -og "0")"
+        fi
+        printf '# invoked as:  '
+        printf ' %q' "${SCRIPT_ARGV[@]}"
+        printf '\n'
+        printf '# wrapper cmd: '
+        printf ' %q' "${CMD[@]}"
+        printf '\n'
+      } >> "$COMMAND_FILE" 2>/dev/null || echo "Warning: could not append to command record $COMMAND_FILE" >&2
+    }
 
     SIDE_STATS="${OUT_FILE%.tre}_stats.csv"
     if [[ "$RUN_EXIT" -ne 0 || ! -f "$SIDE_STATS" ]]; then
       echo "Run failed for ${REPL} (${TREE_TYPE}, ${SETTING_NAME}); skipping RF/stat summary."
+      append_command_context "NA"
+      mirror_results_dir "$OUT_DIR"
       continue
     fi
 
@@ -273,6 +357,8 @@ for TREE_TYPE in "${TREE_TYPES[@]}"; do
 
     echo "alg,setting,replicate,tree_type,rf-rate,optimal-quartet-score,running-time-s,max-cpu-mb,max-gpu-mb" > "$STAT_FILE"
     echo "astralx,${SETTING_NAME},${REPL},${TREE_TYPE},${RF_RATE},${OPTIMAL_QUARTET_SCORE},${RUNNING_TIME},${MAX_CPU_MB},${MAX_GPU_MB}" >> "$STAT_FILE"
+    append_command_context "$RF_RATE"
+    mirror_results_dir "$OUT_DIR"
     echo
     echo "=== A10K ASTRAL-X Summary ==="
     echo "Replicate:      ${REPL}"
@@ -285,6 +371,7 @@ for TREE_TYPE in "${TREE_TYPES[@]}"; do
     echo "Max GPU VRAM:   ${MAX_GPU_MB} MB"
     echo "Output tree:    ${OUT_FILE}"
     echo "Stats file:     ${STAT_FILE}"
+    echo "Outputs mirror: ${OUTPUTS_DIR}"
     echo "Saved $STAT_FILE"
 
     if [[ "$NO_NOTIFY" == false ]] && command -v curl >/dev/null 2>&1; then
