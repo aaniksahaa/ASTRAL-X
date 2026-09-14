@@ -17,17 +17,17 @@
 
 
 
-./run-astralx-with-monitor.sh -i data/1kp-og-rhodophyta.tre -o data/out-1kp-og-rhodophyta.tre --opts "--search-mode local -vv" --reference-species-tree data/1kp-st-5-astral.tre
+./run-astralx-with-monitor.sh -i $PHYLOGENY_DATA_DIR/1kp-og-rhodophyta.tre -o $PHYLOGENY_DATA_DIR/out-1kp-og-rhodophyta.tre --opts "--search-mode local -vv" --reference-species-tree $PHYLOGENY_DATA_DIR/1kp-st-5-astral.tre
 
 
 
 
-./run-astralx-with-monitor.sh -i data/avian-14k-og-strca.tre -o data/out-astralx-avian-14k-og-strca-complete-full.tre --opts "--search-mode full -vv --autocomplete-incomplete-gene-trees"
+./run-astralx-with-monitor.sh -i $PHYLOGENY_DATA_DIR/avian-14k-og-strca.tre -o $PHYLOGENY_DATA_DIR/out-astralx-avian-14k-og-strca-complete-full.tre --opts "--search-mode full -vv --autocomplete-incomplete-gene-trees"
 
 
 
 # angio complete full with consensus
-./run-astralx-with-monitor.sh -i data/all_gt_angio.tre -o data/out-astralx-angio-complete-full.tre --opts "--search-mode full -vv --autocomplete-incomplete-gene-trees --consensus-experimental" --reference-species-tree data/s_tree_angio.tre
+./run-astralx-with-monitor.sh -i $PHYLOGENY_DATA_DIR/all_gt_angio.tre -o $PHYLOGENY_DATA_DIR/out-astralx-angio-complete-full.tre --opts "--search-mode full -vv --autocomplete-incomplete-gene-trees --consensus-experimental" --reference-species-tree $PHYLOGENY_DATA_DIR/s_tree_angio.tre
 
 
 
@@ -35,26 +35,26 @@
 ############ angio 
 
 # complete local
-./run-astralx-with-monitor.sh -i data/all_gt_angio.tre -o data/out-astralx-angio-complete-local.tre --opts "--search-mode local -vv --autocomplete-incomplete-gene-trees" --reference-species-tree data/s_tree_angio.tre
+./run-astralx-with-monitor.sh -i $PHYLOGENY_DATA_DIR/all_gt_angio.tre -o $PHYLOGENY_DATA_DIR/out-astralx-angio-complete-local.tre --opts "--search-mode local -vv --autocomplete-incomplete-gene-trees" --reference-species-tree $PHYLOGENY_DATA_DIR/s_tree_angio.tre
 
 # complete full
-./run-astralx-with-monitor.sh -i data/all_gt_angio.tre -o data/out-astralx-angio-complete-full.tre --opts "--search-mode full -vv --autocomplete-incomplete-gene-trees" --reference-species-tree data/s_tree_angio.tre
+./run-astralx-with-monitor.sh -i $PHYLOGENY_DATA_DIR/all_gt_angio.tre -o $PHYLOGENY_DATA_DIR/out-astralx-angio-complete-full.tre --opts "--search-mode full -vv --autocomplete-incomplete-gene-trees" --reference-species-tree $PHYLOGENY_DATA_DIR/s_tree_angio.tre
 
 # incomplete local
-./run-astralx-with-monitor.sh -i data/all_gt_angio.tre -o data/out-astralx-angio-incomplete-local.tre --opts "--search-mode local -vv" --reference-species-tree data/s_tree_angio.tre
+./run-astralx-with-monitor.sh -i $PHYLOGENY_DATA_DIR/all_gt_angio.tre -o $PHYLOGENY_DATA_DIR/out-astralx-angio-incomplete-local.tre --opts "--search-mode local -vv" --reference-species-tree $PHYLOGENY_DATA_DIR/s_tree_angio.tre
 
 # incomplete full
-./run-astralx-with-monitor.sh -i data/all_gt_angio.tre -o data/out-astralx-angio-incomplete-full.tre --opts "--search-mode full -vv" --reference-species-tree data/s_tree_angio.tre
+./run-astralx-with-monitor.sh -i $PHYLOGENY_DATA_DIR/all_gt_angio.tre -o $PHYLOGENY_DATA_DIR/out-astralx-angio-incomplete-full.tre --opts "--search-mode full -vv" --reference-species-tree $PHYLOGENY_DATA_DIR/s_tree_angio.tre
 
 
 
 # angio complete full with consensus, prefix sum and anchor 
-./run-astralx-with-monitor.sh -i data/angio/all_gt_angio.tre -o data/angio/out-astralx-angio-complete-full.tre --opts "--search-mode full -vv --autocomplete-incomplete-gene-trees --consensus-experimental --stepb-quadratic-nn-balls --stepb-random-leftover-resolution --stepb-process-large-polytomies" --reference-species-tree data/angio/s_tree_angio.tre
+./run-astralx-with-monitor.sh -i $PHYLOGENY_DATA_DIR/angio/all_gt_angio.tre -o $PHYLOGENY_DATA_DIR/angio/out-astralx-angio-complete-full.tre --opts "--search-mode full -vv --autocomplete-incomplete-gene-trees --consensus-experimental --stepb-quadratic-nn-balls --stepb-random-leftover-resolution --stepb-process-large-polytomies" --reference-species-tree $PHYLOGENY_DATA_DIR/angio/s_tree_angio.tre
 
 
 
 # angio complete full with consensus and anchor and simple-tree-walk 
-./run-astralx-with-monitor.sh -i data/angio/all_gt_angio.tre -o data/angio/out-astralx-angio-complete-full.tre --opts "--search-mode full -vv --autocomplete-incomplete-gene-trees --consensus-experimental --stepb-quadratic-nn-balls --stepb-random-leftover-resolution --stepb-process-large-polytomies --weight-intersection-method simple-tree-walk" --reference-species-tree data/angio/s_tree_angio.tre
+./run-astralx-with-monitor.sh -i $PHYLOGENY_DATA_DIR/angio/all_gt_angio.tre -o $PHYLOGENY_DATA_DIR/angio/out-astralx-angio-complete-full.tre --opts "--search-mode full -vv --autocomplete-incomplete-gene-trees --consensus-experimental --stepb-quadratic-nn-balls --stepb-random-leftover-resolution --stepb-process-large-polytomies --weight-intersection-method simple-tree-walk" --reference-species-tree $PHYLOGENY_DATA_DIR/angio/s_tree_angio.tre
 
 
 
@@ -65,105 +65,105 @@
 
 # complete local
 ./run-astralx-with-monitor.sh \
-  -i data/avian-48/avian-14k-og-strca.tre \
-  -o data/avian-48/out-astralx-avian-48-complete-local.tre \
+  -i $PHYLOGENY_DATA_DIR/avian-48/avian-14k-og-strca.tre \
+  -o $PHYLOGENY_DATA_DIR/avian-48/out-astralx-avian-48-complete-local.tre \
   --opts "--search-mode local -vv --autocomplete-incomplete-gene-trees" \
-  --reference-species-tree data/avian-48/avian14k_astral.tre
+  --reference-species-tree $PHYLOGENY_DATA_DIR/avian-48/avian14k_astral.tre
 
 # complete full
 ./run-astralx-with-monitor.sh \
-  -i data/avian-48/avian-14k-og-strca.tre \
-  -o data/avian-48/out-astralx-avian-48-complete-full.tre \
+  -i $PHYLOGENY_DATA_DIR/avian-48/avian-14k-og-strca.tre \
+  -o $PHYLOGENY_DATA_DIR/avian-48/out-astralx-avian-48-complete-full.tre \
   --opts "--search-mode full -vv --autocomplete-incomplete-gene-trees" \
-  --reference-species-tree data/avian-48/avian14k_astral.tre
+  --reference-species-tree $PHYLOGENY_DATA_DIR/avian-48/avian14k_astral.tre
 
 
 # complete full
 ./run-astralx-with-monitor.sh \
-  -i data/avian-48/avian-14k-og-strca.tre \
-  -o data/avian-48/out-astralx-avian-48-complete-full.tre \
+  -i $PHYLOGENY_DATA_DIR/avian-48/avian-14k-og-strca.tre \
+  -o $PHYLOGENY_DATA_DIR/avian-48/out-astralx-avian-48-complete-full.tre \
   --opts "--search-mode full -vv --autocomplete-incomplete-gene-trees" \
-  --reference-species-tree data/avian-48/avian14k_astral.tre
+  --reference-species-tree $PHYLOGENY_DATA_DIR/avian-48/avian14k_astral.tre
 
 
 
 # complete full
 ./run-astralx-with-monitor.sh \
-  -i data/avian-48/avian-14k-og-strca.tre \
-  -o data/avian-48/out-astralx-avian-48-complete-full.tre \
+  -i $PHYLOGENY_DATA_DIR/avian-48/avian-14k-og-strca.tre \
+  -o $PHYLOGENY_DATA_DIR/avian-48/out-astralx-avian-48-complete-full.tre \
   --opts "--search-mode full -vv --autocomplete-incomplete-gene-trees" \
-  --reference-species-tree data/avian-48/avian14k_astral.tre
+  --reference-species-tree $PHYLOGENY_DATA_DIR/avian-48/avian14k_astral.tre
 
 
 
 # complete full
 ./run-astralx-with-monitor.sh \
-  -i data/avian-48/avian-14k-og-strca.tre \
-  -o data/avian-48/out-astralx-avian-48-complete-full.tre \
+  -i $PHYLOGENY_DATA_DIR/avian-48/avian-14k-og-strca.tre \
+  -o $PHYLOGENY_DATA_DIR/avian-48/out-astralx-avian-48-complete-full.tre \
   --opts "--search-mode full -vv --autocomplete-incomplete-gene-trees --weight-intersection-method smaller-side-traversal" \
-  --reference-species-tree data/avian-48/avian14k_astral.tre
+  --reference-species-tree $PHYLOGENY_DATA_DIR/avian-48/avian14k_astral.tre
 
 
 # complete full
 ./run-astralx-with-monitor.sh \
-  -i data/avian-48/avian-14k-og-strca.tre \
-  -o data/avian-48/out-astralx-avian-48-complete-full.tre \
+  -i $PHYLOGENY_DATA_DIR/avian-48/avian-14k-og-strca.tre \
+  -o $PHYLOGENY_DATA_DIR/avian-48/out-astralx-avian-48-complete-full.tre \
   --opts "--search-mode full -vv --autocomplete-incomplete-gene-trees --weight-intersection-method bitset" \
-  --reference-species-tree data/avian-48/avian14k_astral.tre
+  --reference-species-tree $PHYLOGENY_DATA_DIR/avian-48/avian14k_astral.tre
 
 
 # complete full with bitset - 3 mins - best Q score 
 ./run-astralx-with-monitor.sh \
-  -i data/avian-48/avian-14k-og-strca.tre \
-  -o data/avian-48/out-astralx-avian-48-complete-full.tre \
+  -i $PHYLOGENY_DATA_DIR/avian-48/avian-14k-og-strca.tre \
+  -o $PHYLOGENY_DATA_DIR/avian-48/out-astralx-avian-48-complete-full.tre \
   --opts "--search-mode full -vv --autocomplete-incomplete-gene-trees --weight-intersection-method bitset" \
-  --reference-species-tree data/avian-48/avian14k_astral.tre
+  --reference-species-tree $PHYLOGENY_DATA_DIR/avian-48/avian14k_astral.tre
 
 
 
 # incomplete local
 ./run-astralx-with-monitor.sh \
-  -i data/avian-48/avian-14k-og-strca.tre \
-  -o data/avian-48/out-astralx-avian-48-incomplete-local.tre \
+  -i $PHYLOGENY_DATA_DIR/avian-48/avian-14k-og-strca.tre \
+  -o $PHYLOGENY_DATA_DIR/avian-48/out-astralx-avian-48-incomplete-local.tre \
   --opts "--search-mode local -vv" \
-  --reference-species-tree data/avian-48/avian14k_astral.tre
+  --reference-species-tree $PHYLOGENY_DATA_DIR/avian-48/avian14k_astral.tre
 
 
 
 # incomplete local with anchor outgroup 
 ./run-astralx-with-monitor.sh \
-  -i data/avian-48/avian-14k-og-strca.tre \
-  -o data/avian-48/out-astralx-avian-48-incomplete-local.tre \
+  -i $PHYLOGENY_DATA_DIR/avian-48/avian-14k-og-strca.tre \
+  -o $PHYLOGENY_DATA_DIR/avian-48/out-astralx-avian-48-incomplete-local.tre \
   --opts "--search-mode local -vv" \
-  --reference-species-tree data/avian-48/avian14k_astral.tre
+  --reference-species-tree $PHYLOGENY_DATA_DIR/avian-48/avian14k_astral.tre
 
 
 
 # incomplete full
 ./run-astralx-with-monitor.sh \
-  -i data/avian-48/avian-14k-og-strca.tre \
-  -o data/avian-48/out-astralx-avian-48-incomplete-full.tre \
+  -i $PHYLOGENY_DATA_DIR/avian-48/avian-14k-og-strca.tre \
+  -o $PHYLOGENY_DATA_DIR/avian-48/out-astralx-avian-48-incomplete-full.tre \
   --opts "--search-mode full -vv" \
-  --reference-species-tree data/avian-48/avian14k_astral.tre
+  --reference-species-tree $PHYLOGENY_DATA_DIR/avian-48/avian14k_astral.tre
 
 
 
 # incomplete full with anchor outgroup 
 ./run-astralx-with-monitor.sh \
-  -i data/avian-48/avian-14k-og-strca.tre \
-  -o data/avian-48/out-astralx-avian-48-incomplete-full.tre \
+  -i $PHYLOGENY_DATA_DIR/avian-48/avian-14k-og-strca.tre \
+  -o $PHYLOGENY_DATA_DIR/avian-48/out-astralx-avian-48-incomplete-full.tre \
   --opts "--search-mode full -vv" \
-  --reference-species-tree data/avian-48/avian14k_astral.tre
+  --reference-species-tree $PHYLOGENY_DATA_DIR/avian-48/avian14k_astral.tre
 
 
 
 
 # incomplete full with anchor outgroup 
 ./run-astralx-with-monitor.sh \
-  -i data/avian-48/avian-14k-og-strca.tre \
-  -o data/avian-48/out-astralx-avian-48-incomplete-full.tre \
+  -i $PHYLOGENY_DATA_DIR/avian-48/avian-14k-og-strca.tre \
+  -o $PHYLOGENY_DATA_DIR/avian-48/out-astralx-avian-48-incomplete-full.tre \
   --opts "--search-mode full -vv --weight-intersection-method smaller-side-traversal" \
-  --reference-species-tree data/avian-48/avian14k_astral.tre
+  --reference-species-tree $PHYLOGENY_DATA_DIR/avian-48/avian14k_astral.tre
 
 
 
@@ -175,33 +175,33 @@
 
 # complete local
 ./run-astralx-with-monitor.sh \
-  -i data/avian-363/63430.gene.trees \
-  -o data/avian-363/out-astralx-avian-363-complete-local.tre \
+  -i $PHYLOGENY_DATA_DIR/avian-363/63430.gene.trees \
+  -o $PHYLOGENY_DATA_DIR/avian-363/out-astralx-avian-363-complete-local.tre \
   --opts "--search-mode local -vv --autocomplete-incomplete-gene-trees" \
-  --reference-species-tree data/avian-363/ref-paper-st-63K.tre
+  --reference-species-tree $PHYLOGENY_DATA_DIR/avian-363/ref-paper-st-63K.tre
 
 
 # complete local - with prefix sum and anchoring 
 ./run-astralx-with-monitor.sh \
-  -i data/avian-363/63430.gene.trees \
-  -o data/avian-363/out-astralx-avian-363-complete-local.tre \
+  -i $PHYLOGENY_DATA_DIR/avian-363/63430.gene.trees \
+  -o $PHYLOGENY_DATA_DIR/avian-363/out-astralx-avian-363-complete-local.tre \
   --opts "--search-mode local -vv --autocomplete-incomplete-gene-trees" \
-  --reference-species-tree data/avian-363/ref-paper-st-63K.tre
+  --reference-species-tree $PHYLOGENY_DATA_DIR/avian-363/ref-paper-st-63K.tre
 
 
 # complete local - with simple tree walk 
 ./run-astralx-with-monitor.sh \
-  -i data/avian-363/63430.gene.trees \
-  -o data/avian-363/out-astralx-avian-363-complete-local.tre \
+  -i $PHYLOGENY_DATA_DIR/avian-363/63430.gene.trees \
+  -o $PHYLOGENY_DATA_DIR/avian-363/out-astralx-avian-363-complete-local.tre \
   --opts "--search-mode local -vv --autocomplete-incomplete-gene-trees --weight-intersection-method simple-tree-walk" \
-  --reference-species-tree data/avian-363/ref-paper-st-63K.tre
+  --reference-species-tree $PHYLOGENY_DATA_DIR/avian-363/ref-paper-st-63K.tre
 
 # complete local - with simple tree walk and anchoring 
 ./run-astralx-with-monitor.sh \
-  -i data/avian-363/63430.gene.trees \
-  -o data/avian-363/out-astralx-avian-363-complete-local.tre \
+  -i $PHYLOGENY_DATA_DIR/avian-363/63430.gene.trees \
+  -o $PHYLOGENY_DATA_DIR/avian-363/out-astralx-avian-363-complete-local.tre \
   --opts "--search-mode local -vv --autocomplete-incomplete-gene-trees --weight-intersection-method simple-tree-walk" \
-  --reference-species-tree data/avian-363/ref-paper-st-63K.tre
+  --reference-species-tree $PHYLOGENY_DATA_DIR/avian-363/ref-paper-st-63K.tre
 
 
 
@@ -213,26 +213,26 @@
 
 # complete full
 ./run-astralx-with-monitor.sh \
-  -i data/avian-363/63430.gene.trees \
-  -o data/avian-363/out-astralx-avian-363-complete-full.tre \
+  -i $PHYLOGENY_DATA_DIR/avian-363/63430.gene.trees \
+  -o $PHYLOGENY_DATA_DIR/avian-363/out-astralx-avian-363-complete-full.tre \
   --opts "--search-mode full -vv --autocomplete-incomplete-gene-trees" \
-  --reference-species-tree data/avian-363/ref-paper-st-63K.tre
+  --reference-species-tree $PHYLOGENY_DATA_DIR/avian-363/ref-paper-st-63K.tre
 
 
 # complete full
 ./run-astralx-with-monitor.sh \
-  -i data/avian-363/63430.gene.trees \
-  -o data/avian-363/out-astralx-avian-363-complete-full.tre \
+  -i $PHYLOGENY_DATA_DIR/avian-363/63430.gene.trees \
+  -o $PHYLOGENY_DATA_DIR/avian-363/out-astralx-avian-363-complete-full.tre \
   --opts "--search-mode full -vv --autocomplete-incomplete-gene-trees" \
-  --reference-species-tree data/avian-363/ref-paper-st-63K.tre
+  --reference-species-tree $PHYLOGENY_DATA_DIR/avian-363/ref-paper-st-63K.tre
 
 
 # complete full with simple tree walk and anchor outgroup 
 ./run-astralx-with-monitor.sh \
-  -i data/avian-363/63430.gene.trees \
-  -o data/avian-363/out-astralx-avian-363-complete-full.tre \
+  -i $PHYLOGENY_DATA_DIR/avian-363/63430.gene.trees \
+  -o $PHYLOGENY_DATA_DIR/avian-363/out-astralx-avian-363-complete-full.tre \
   --opts "--search-mode full -vv --autocomplete-incomplete-gene-trees --weight-intersection-method simple-tree-walk" \
-  --reference-species-tree data/avian-363/ref-paper-st-63K.tre
+  --reference-species-tree $PHYLOGENY_DATA_DIR/avian-363/ref-paper-st-63K.tre
 
 
 
@@ -240,20 +240,20 @@
 
 # incomplete local
 ./run-astralx-with-monitor.sh \
-  -i data/avian-363/63430.gene.trees \
-  -o data/avian-363/out-astralx-avian-363-incomplete-local.tre \
+  -i $PHYLOGENY_DATA_DIR/avian-363/63430.gene.trees \
+  -o $PHYLOGENY_DATA_DIR/avian-363/out-astralx-avian-363-incomplete-local.tre \
   --opts "--search-mode local -vv" \
-  --reference-species-tree data/avian-363/ref-paper-st-63K.tre
+  --reference-species-tree $PHYLOGENY_DATA_DIR/avian-363/ref-paper-st-63K.tre
 
 
 
 
 # incomplete full
 ./run-astralx-with-monitor.sh \
-  -i data/avian-363/63430.gene.trees \
-  -o data/avian-363/out-astralx-avian-363-incomplete-full.tre \
+  -i $PHYLOGENY_DATA_DIR/avian-363/63430.gene.trees \
+  -o $PHYLOGENY_DATA_DIR/avian-363/out-astralx-avian-363-incomplete-full.tre \
   --opts "--search-mode full -vv --weight-intersection-method bitset" \
-  --reference-species-tree data/avian-363/ref-paper-st-63K.tre
+  --reference-species-tree $PHYLOGENY_DATA_DIR/avian-363/ref-paper-st-63K.tre
 
 
 --weight-intersection-method simple-tree-walk
@@ -262,29 +262,29 @@
 
 # incomplete full
 ./run-astralx-with-monitor.sh \
-  -i data/avian-363/63430.gene.trees \
-  -o data/avian-363/out-astralx-avian-363-incomplete-full.tre \
+  -i $PHYLOGENY_DATA_DIR/avian-363/63430.gene.trees \
+  -o $PHYLOGENY_DATA_DIR/avian-363/out-astralx-avian-363-incomplete-full.tre \
   --opts "--search-mode full -vv --weight-intersection-method simple-tree-walk" \
-  --reference-species-tree data/avian-363/ref-paper-st-63K.tre
+  --reference-species-tree $PHYLOGENY_DATA_DIR/avian-363/ref-paper-st-63K.tre
 
 
 
 # incomplete full - simple tree walk with anchor (maybe around 6 hrs)
 ./run-astralx-with-monitor.sh \
-  -i data/avian-363/63430.gene.trees \
-  -o data/avian-363/out-astralx-avian-363-incomplete-full.tre \
+  -i $PHYLOGENY_DATA_DIR/avian-363/63430.gene.trees \
+  -o $PHYLOGENY_DATA_DIR/avian-363/out-astralx-avian-363-incomplete-full.tre \
   --opts "--search-mode full -vv --weight-intersection-method simple-tree-walk" \
-  --reference-species-tree data/avian-363/ref-paper-st-63K.tre
+  --reference-species-tree $PHYLOGENY_DATA_DIR/avian-363/ref-paper-st-63K.tre
 
 
 
 
 # incomplete full
 ./run-astralx-with-monitor.sh \
-  -i data/avian-363/63430.gene.trees \
-  -o data/avian-363/out-astralx-avian-363-incomplete-full.tre \
+  -i $PHYLOGENY_DATA_DIR/avian-363/63430.gene.trees \
+  -o $PHYLOGENY_DATA_DIR/avian-363/out-astralx-avian-363-incomplete-full.tre \
   --opts "--search-mode full -vv" \
-  --reference-species-tree data/avian-363/ref-paper-st-63K.tre
+  --reference-species-tree $PHYLOGENY_DATA_DIR/avian-363/ref-paper-st-63K.tre
 
 
 
@@ -292,32 +292,32 @@
 
 # complete local
 ./run-astralx-with-monitor.sh \
-  -i data/1kp/Best.33.FAA_cleaned-og-33.tre \
-  -o data/1kp/out-astralx-1kp-33-complete-local.tre \
+  -i $PHYLOGENY_DATA_DIR/1kp/Best.33.FAA_cleaned-og-33.tre \
+  -o $PHYLOGENY_DATA_DIR/1kp/out-astralx-1kp-33-complete-local.tre \
   --opts "--search-mode local -vv --autocomplete-incomplete-gene-trees" \
-  --reference-species-tree data/1kp/1kp-st-33-astral.tre
+  --reference-species-tree $PHYLOGENY_DATA_DIR/1kp/1kp-st-33-astral.tre
 
 # complete full
 ./run-astralx-with-monitor.sh \
-  -i data/1kp/Best.33.FAA_cleaned-og-33.tre \
-  -o data/1kp/out-astralx-1kp-33-complete-full.tre \
+  -i $PHYLOGENY_DATA_DIR/1kp/Best.33.FAA_cleaned-og-33.tre \
+  -o $PHYLOGENY_DATA_DIR/1kp/out-astralx-1kp-33-complete-full.tre \
   --opts "--search-mode full -vv --autocomplete-incomplete-gene-trees" \
-  --reference-species-tree data/1kp/1kp-st-33-astral.tre
+  --reference-species-tree $PHYLOGENY_DATA_DIR/1kp/1kp-st-33-astral.tre
 
 
 # incomplete local
 ./run-astralx-with-monitor.sh \
-  -i data/1kp/Best.33.FAA_cleaned-og-33.tre \
-  -o data/1kp/out-astralx-1kp-33-incomplete-local.tre \
+  -i $PHYLOGENY_DATA_DIR/1kp/Best.33.FAA_cleaned-og-33.tre \
+  -o $PHYLOGENY_DATA_DIR/1kp/out-astralx-1kp-33-incomplete-local.tre \
   --opts "--search-mode local -vv" \
-  --reference-species-tree data/1kp/1kp-st-33-astral.tre
+  --reference-species-tree $PHYLOGENY_DATA_DIR/1kp/1kp-st-33-astral.tre
 
 # incomplete full
 ./run-astralx-with-monitor.sh \
-  -i data/1kp/Best.33.FAA_cleaned-og-33.tre \
-  -o data/1kp/out-astralx-1kp-33-incomplete-full.tre \
+  -i $PHYLOGENY_DATA_DIR/1kp/Best.33.FAA_cleaned-og-33.tre \
+  -o $PHYLOGENY_DATA_DIR/1kp/out-astralx-1kp-33-incomplete-full.tre \
   --opts "--search-mode full -vv" \
-  --reference-species-tree data/1kp/1kp-st-33-astral.tre
+  --reference-species-tree $PHYLOGENY_DATA_DIR/1kp/1kp-st-33-astral.tre
 
 
 
@@ -367,23 +367,23 @@
 ###############################################################################
 
 # Estimated gene trees, both local and full search
-./run-a10k.sh --data-dir data/10k-astral-dataset --tree-type estimated --opts-list "--search-mode local;--search-mode full"
+./run-a10k.sh --data-dir $PHYLOGENY_DATA_DIR/10k-astral-dataset --tree-type estimated --opts-list "--search-mode local;--search-mode full"
 
 
 # Estimated gene trees, one setting
-./run-a10k.sh --data-dir data/10k-astral-dataset --tree-type estimated --opts "--search-mode full"
+./run-a10k.sh --data-dir $PHYLOGENY_DATA_DIR/10k-astral-dataset --tree-type estimated --opts "--search-mode full"
 
 # Estimated gene trees, both local and full search
-./run-a10k.sh --data-dir data/10k-astral-dataset --tree-type estimated --opts-list "--search-mode local;--search-mode full"
+./run-a10k.sh --data-dir $PHYLOGENY_DATA_DIR/10k-astral-dataset --tree-type estimated --opts-list "--search-mode local;--search-mode full"
 
 # Estimated gene trees, selected replicate range
-./run-a10k.sh --data-dir data/10k-astral-dataset --tree-type estimated --start-rep 1 --end-rep 5 --opts "--search-mode full"
+./run-a10k.sh --data-dir $PHYLOGENY_DATA_DIR/10k-astral-dataset --tree-type estimated --start-rep 1 --end-rep 5 --opts "--search-mode full"
 
 # True gene trees, selected replicate list
-./run-a10k.sh --data-dir data/10k-astral-dataset --tree-type true --replicates "R1,R3,R5" --opts "--search-mode local"
+./run-a10k.sh --data-dir $PHYLOGENY_DATA_DIR/10k-astral-dataset --tree-type true --replicates "R1,R3,R5" --opts "--search-mode local"
 
 # True gene trees, selected replicate list, both settings
-./run-a10k.sh --data-dir data/10k-astral-dataset --tree-type true --replicates "R1,R3,R5" --opts-list "--search-mode local;--search-mode full"
+./run-a10k.sh --data-dir $PHYLOGENY_DATA_DIR/10k-astral-dataset --tree-type true --replicates "R1,R3,R5" --opts-list "--search-mode local;--search-mode full"
 
 
 
@@ -539,7 +539,7 @@ done
 ./run.sh -i all_gt_bs_rooted_37.tre --gpu --gpu-vram-occupancy-factor 0.5 -vv
 
 # A10K large run: force 10 batches to reduce peak VRAM on 6M splits
-./run-a10k.sh --data-dir data/10k-astral-dataset --tree-type estimated \
+./run-a10k.sh --data-dir $PHYLOGENY_DATA_DIR/10k-astral-dataset --tree-type estimated \
     --opts "--search-mode full --gpu --gpu-batches 10"
 
 # Sweep: compare 1, 5, 10 batches to verify runtime is flat and VRAM drops
@@ -725,21 +725,23 @@ done
 
 
 ./clear-a10k.sh \
-  --data-dir data/10k-astral-dataset \
+  --data-dir $PHYLOGENY_DATA_DIR/10k-astral-dataset \
   --yes
+
 
 --weight-intersection-method smaller-side-traversal
 
 
 
 ./run-a10k.sh \
-  --data-dir data/10k-astral-dataset \
+  --data-dir $PHYLOGENY_DATA_DIR/10k-astral-dataset \
   --tree-type "true;estimated" \
+  --start-rep 1 --end-rep 10 \
   --opts-list "--search-space S1 --intersection-method I1;--search-space S2 --intersection-method I1;--search-space S3 --intersection-method I1"
 
 
 ./run-a10k.sh \
-  --data-dir data/10k-astral-dataset \
+  --data-dir $PHYLOGENY_DATA_DIR/10k-astral-dataset \
   --tree-type true \
   --start-rep 1 --end-rep 10 \
   --opts "--weight-intersection-method smaller-side-traversal --search-mode full -vv --autocomplete-incomplete-gene-trees --consensus-experimental --stepb-quadratic-nn-balls --stepb-random-leftover-resolution --stepb-process-large-polytomies"
@@ -747,7 +749,7 @@ done
 
 
 ./run-a10k.sh \
-  --data-dir data/10k-astral-dataset \
+  --data-dir $PHYLOGENY_DATA_DIR/10k-astral-dataset \
   --tree-type estimated \
   --start-rep 1 --end-rep 10 \
   --opts "--weight-intersection-method smaller-side-traversal --search-mode full -vv --autocomplete-incomplete-gene-trees --consensus-experimental --stepb-quadratic-nn-balls --stepb-random-leftover-resolution --stepb-process-large-polytomies"
@@ -755,14 +757,14 @@ done
 
 
 ./run-a10k.sh \
-  --data-dir data/10k-astral-dataset \
+  --data-dir $PHYLOGENY_DATA_DIR/10k-astral-dataset \
   --tree-type true \
   --start-rep 1 --end-rep 10 \
   --opts "--weight-intersection-method prefix-sum --search-mode full -vv --autocomplete-incomplete-gene-trees --consensus-experimental --stepb-quadratic-nn-balls --stepb-random-leftover-resolution --stepb-process-large-polytomies"
 
 
 ./run-a10k.sh \
-  --data-dir data/10k-astral-dataset \
+  --data-dir $PHYLOGENY_DATA_DIR/10k-astral-dataset \
   --tree-type estimated \
   --start-rep 1 --end-rep 10 \
   --opts "--weight-intersection-method prefix-sum --search-mode full -vv --autocomplete-incomplete-gene-trees --consensus-experimental --stepb-quadratic-nn-balls --stepb-random-leftover-resolution --stepb-process-large-polytomies"
@@ -774,19 +776,19 @@ done
 
 
 # Estimated gene trees, one setting
-./run-a10k.sh --data-dir data/10k-astral-dataset --tree-type estimated --opts "--search-mode full"
+./run-a10k.sh --data-dir $PHYLOGENY_DATA_DIR/10k-astral-dataset --tree-type estimated --opts "--search-mode full"
 
 # Estimated gene trees, both local and full search
-./run-a10k.sh --data-dir data/10k-astral-dataset --tree-type estimated --opts-list "--search-mode local;--search-mode full"
+./run-a10k.sh --data-dir $PHYLOGENY_DATA_DIR/10k-astral-dataset --tree-type estimated --opts-list "--search-mode local;--search-mode full"
 
 # Estimated gene trees, selected replicate range
-./run-a10k.sh --data-dir data/10k-astral-dataset --tree-type estimated --start-rep 1 --end-rep 5 --opts "--search-mode full"
+./run-a10k.sh --data-dir $PHYLOGENY_DATA_DIR/10k-astral-dataset --tree-type estimated --start-rep 1 --end-rep 5 --opts "--search-mode full"
 
 # True gene trees, selected replicate list
-./run-a10k.sh --data-dir data/10k-astral-dataset --tree-type true --replicates "R1,R3,R5" --opts "--search-mode local"
+./run-a10k.sh --data-dir $PHYLOGENY_DATA_DIR/10k-astral-dataset --tree-type true --replicates "R1,R3,R5" --opts "--search-mode local"
 
 # True gene trees, selected replicate list, both settings
-./run-a10k.sh --data-dir data/10k-astral-dataset --tree-type true --replicates "R1,R3,R5" --opts-list "--search-mode local;--search-mode full"
+./run-a10k.sh --data-dir $PHYLOGENY_DATA_DIR/10k-astral-dataset --tree-type true --replicates "R1,R3,R5" --opts-list "--search-mode local;--search-mode full"
 
 
 ###############################################################################
@@ -794,7 +796,7 @@ done
 ###############################################################################
 
 # also copies the merged CSV into outputs/10k-astral-dataset/
-./collect-scores-a10k.sh --data-dir data/10k-astral-dataset --start-rep 1 --end-rep 20
+./collect-scores-a10k.sh --data-dir $PHYLOGENY_DATA_DIR/10k-astral-dataset --start-rep 1 --end-rep 20
 
 
 ###############################################################################
@@ -805,16 +807,16 @@ done
 # (tree, CSVs, out-astralx.command, .astralx_run.log; never gene/species trees)
 
 # back-fill results produced before the mirror existed
-./sync-a10k-outputs.sh --data-dir data/10k-astral-dataset --dry-run
-./sync-a10k-outputs.sh --data-dir data/10k-astral-dataset
+./sync-a10k-outputs.sh --data-dir $PHYLOGENY_DATA_DIR/10k-astral-dataset --dry-run
+./sync-a10k-outputs.sh --data-dir $PHYLOGENY_DATA_DIR/10k-astral-dataset
 
 # publish to Hugging Face (ph/d/a10k/outputs/)
-./upload-a10k-outputs.sh --data-dir data/10k-astral-dataset --dry-run
-./upload-a10k-outputs.sh --data-dir data/10k-astral-dataset --sync
+./upload-a10k-outputs.sh --data-dir $PHYLOGENY_DATA_DIR/10k-astral-dataset --dry-run
+./upload-a10k-outputs.sh --data-dir $PHYLOGENY_DATA_DIR/10k-astral-dataset --sync
 
 # clear results but keep the mirror (default) / remove the mirror too
-./clear-a10k.sh --data-dir data/10k-astral-dataset --yes
-./clear-a10k.sh --data-dir data/10k-astral-dataset --yes --include-mirror
+./clear-a10k.sh --data-dir $PHYLOGENY_DATA_DIR/10k-astral-dataset --yes
+./clear-a10k.sh --data-dir $PHYLOGENY_DATA_DIR/10k-astral-dataset --yes --include-mirror
 
 
 ###############################################################################
@@ -845,13 +847,13 @@ outputs/10k-astral-dataset/a10k_astralx_scores_merged.csv
 ./run.sh -i all_gt_bs_rooted_37.tre --score-species-tree out-37-astralx.tre --gpu
 
 
-./run.sh -i data/all_gt_angio.tre --score-species-tree data/s_tree_angio.tre --gpu
+./run.sh -i $PHYLOGENY_DATA_DIR/all_gt_angio.tre --score-species-tree $PHYLOGENY_DATA_DIR/s_tree_angio.tre --gpu
 
 
-./run.sh -i data/avian-363/63430.gene.trees --score-species-tree data/avian-363/ref-paper-st-63K.tre --gpu
+./run.sh -i $PHYLOGENY_DATA_DIR/avian-363/63430.gene.trees --score-species-tree $PHYLOGENY_DATA_DIR/avian-363/ref-paper-st-63K.tre --gpu
 
 
-./run.sh -i data/avian-48/avian-14k-og-strca.tre --score-species-tree data/avian-48/avian14k_astral.tre --gpu
+./run.sh -i $PHYLOGENY_DATA_DIR/avian-48/avian-14k-og-strca.tre --score-species-tree $PHYLOGENY_DATA_DIR/avian-48/avian14k_astral.tre --gpu
 
 
 ===========================================================================
