@@ -31,8 +31,9 @@ Required:
 Options:
   --include-mirror Also remove the mirrored astralx_outputs and merged CSV in
                    the outputs mirror
-  --outputs-dir D  Mirror root (default: derived from DIR, e.g.
-                   data/10k-astral-dataset -> outputs/10k-astral-dataset)
+  --outputs-dir D  Mirror root (default: <parent>/outputs/<dataset>, e.g.
+                   \$PHYLOGENY_DATA_DIR/10k-astral-dataset ->
+                   \$PHYLOGENY_DATA_DIR/outputs/10k-astral-dataset)
   --dry-run        List exact targets without deleting anything
   --yes, -y        Delete without interactive confirmation
   --help, -h       Show this help

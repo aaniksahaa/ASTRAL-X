@@ -21,8 +21,8 @@ Usage: $0 --data-dir <dir> --start-rep <N> --end-rep <M> [--outputs-dir <dir>] [
 
 Merges every 10k-simphy/R<n>/astralx_outputs/**/stat-astralx.csv into
 <dir>/a10k_astralx_scores_merged.csv and copies that CSV into the outputs
-mirror (default: the "outputs" sibling of the "data" directory holding the
-dataset, e.g. data/10k-astral-dataset -> outputs/10k-astral-dataset).
+mirror (default: <parent>/outputs/<dataset>, e.g.
+\$PHYLOGENY_DATA_DIR/10k-astral-dataset -> \$PHYLOGENY_DATA_DIR/outputs/10k-astral-dataset).
 EOF
 }
 

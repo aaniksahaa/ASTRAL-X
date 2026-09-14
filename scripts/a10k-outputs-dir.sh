@@ -16,11 +16,12 @@
 #   <outputs>/<dataset>.command | .source | .params | README*   (when present)
 #   <outputs>/a10k_astralx_scores_merged.csv                    (collector output)
 #
-# <outputs> defaults to the "outputs" sibling of the "data" directory that holds
-# the dataset: "<root>/data/10k-astral-dataset" mirrors into
-# "<root>/outputs/10k-astral-dataset". A dataset directory that does not live
-# beneath a "data" directory mirrors into "<data-dir>_outputs". An explicit
-# outputs directory always wins.
+# <outputs> defaults to "<parent>/outputs/<dataset>", i.e. an "outputs"
+# directory next to the dataset that holds a sub-directory named after it:
+# "$PHYLOGENY_DATA_DIR/10k-astral-dataset" mirrors into
+# "$PHYLOGENY_DATA_DIR/outputs/10k-astral-dataset", exactly where the SimPhy
+# mirror lives ("$PHYLOGENY_DATA_DIR/outputs/simphy"). An explicit outputs
+# directory always wins.
 
 A10K_OUTPUTS_HELPER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Shared primitives: error printing, containment check, atomic copies.
@@ -57,14 +58,8 @@ astralx_default_a10k_outputs_dir() {
     astralx__outputs_error "an A10K data directory is required to derive the outputs directory."
     return 2
   fi
-  local parent_dir
-  parent_dir="$(dirname -- "$data_dir")"
-  if [[ "$(basename -- "$parent_dir")" == "data" ]]; then
-    # Standard layout: <root>/data/<dataset> -> <root>/outputs/<dataset>
-    printf '%s/outputs/%s\n' "$(dirname -- "$parent_dir")" "$(basename -- "$data_dir")"
-  else
-    printf '%s_outputs\n' "$data_dir"
-  fi
+  # <parent>/<dataset> -> <parent>/outputs/<dataset>
+  printf '%s/outputs/%s\n' "$(dirname -- "$data_dir")" "$(basename -- "$data_dir")"
 }
 
 # Resolve, validate, and create the outputs mirror root.

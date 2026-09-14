@@ -60,7 +60,7 @@ Data tree (unchanged, plus two small additive records marked `+`):
 Outputs mirror (new):
 
 ```
-<outputs>/                                    # e.g. outputs/10k-astral-dataset
+<outputs>/                                    # e.g. $PHYLOGENY_DATA_DIR/outputs/10k-astral-dataset
   <dataset>.command|.source|.params, README*  # copied when present
   a10k_astralx_scores_merged.csv              # copied by the collector / sync
   astralx_outputs/
@@ -90,11 +90,12 @@ The mirror root is derived from the resolved data directory:
 
 | data directory                 | mirror root                        |
 |--------------------------------|------------------------------------|
-| `<root>/data/<dataset>`        | `<root>/outputs/<dataset>`         |
-| any other `<dir>`              | `<dir>_outputs`                    |
+| `<parent>/<dataset>`           | `<parent>/outputs/<dataset>`       |
 
-So the usual `data/10k-astral-dataset` mirrors into
-`outputs/10k-astral-dataset`. `--outputs-dir PATH` overrides the rule. A mirror
+So the usual `$PHYLOGENY_DATA_DIR/10k-astral-dataset` mirrors into
+`$PHYLOGENY_DATA_DIR/outputs/10k-astral-dataset`, next to the SimPhy mirror in
+`$PHYLOGENY_DATA_DIR/outputs/simphy`. The rule does not depend on the parent
+directory's name. `--outputs-dir PATH` overrides the rule. A mirror
 root equal to, inside, or containing the data directory is refused.
 
 ## 4. Components
@@ -190,5 +191,12 @@ from `out-astralx.command` at the recorded git commit.
 
 ## 8. Change log
 
+- 2026-09-15: default mirror root changed to `<parent>/outputs/<dataset>`
+  (`$PHYLOGENY_DATA_DIR/outputs/10k-astral-dataset`). The first version mirrored
+  into the `outputs` sibling of a parent named `data`, which put the A10K mirror
+  one level above the SimPhy mirror (`/…/phylogeny/outputs/` instead of
+  `/…/phylogeny/data/outputs/`). Re-running `run-a10k.sh` or
+  `sync-a10k-outputs.sh` re-mirrors finished runs into the new location; the old
+  directory can be deleted by hand.
 - 2026-09-13: initial implementation. `astralx_mirror_directory_atomic` was
   extracted from the SimPhy mirror so both mirrors share the atomic leaf swap.

@@ -24,15 +24,15 @@ fail() {
 }
 
 # ---------------------------------------------------------------- helpers ---
-BASE="${TMP}/research root"
-DATA="${BASE}/data/10k-astral-dataset"
+BASE="${TMP}/research root/data"
+DATA="${BASE}/10k-astral-dataset"
 OUTPUTS="${BASE}/outputs/10k-astral-dataset"
 mkdir -p "${DATA}/10k-simphy"
 
 [[ "$(astralx_default_a10k_outputs_dir "$DATA")" == "$OUTPUTS" ]] || \
-  fail "data/<dataset> should mirror into outputs/<dataset>"
-[[ "$(astralx_default_a10k_outputs_dir "${TMP}/elsewhere/10k-astral-dataset")" == "${TMP}/elsewhere/10k-astral-dataset_outputs" ]] || \
-  fail "a dataset dir outside a 'data' dir should mirror into '<dir>_outputs'"
+  fail "<parent>/<dataset> should mirror into <parent>/outputs/<dataset>"
+[[ "$(astralx_default_a10k_outputs_dir "${TMP}/elsewhere/10k-astral-dataset/")" == "${TMP}/elsewhere/outputs/10k-astral-dataset" ]] || \
+  fail "the default rule must not depend on the parent being named 'data'"
 RESOLVED="$(astralx_prepare_a10k_outputs_dir "" "$DATA")"
 [[ "$RESOLVED" == "$OUTPUTS" && -d "$OUTPUTS" ]] || fail "default outputs dir was not created: $RESOLVED"
 if astralx_prepare_a10k_outputs_dir "${DATA}/outputs" "$DATA" >/dev/null 2>"${TMP}/inside.err"; then
@@ -133,8 +133,8 @@ grep -q "A10K input data" "${TMP}/bad.out" || fail "refusal reason unclear: $(ca
 rm -rf "${DATA}/10k-simphy/R2/astralx_outputs/estimated/bad"
 
 # ------------------------------------------------ real ASTRAL-X run mirror ---
-RUN_BASE="${TMP}/run"
-RUN_DATA="${RUN_BASE}/data/10k-astral-dataset"
+RUN_BASE="${TMP}/run/data"
+RUN_DATA="${RUN_BASE}/10k-astral-dataset"
 RUN_OUTPUTS="${RUN_BASE}/outputs/10k-astral-dataset"
 make_replicate_inputs "${RUN_DATA}/10k-simphy/R1"
 make_replicate_inputs "${RUN_DATA}/10k-simphy/R2"

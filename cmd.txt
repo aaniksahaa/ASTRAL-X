@@ -800,10 +800,10 @@ done
 
 
 ###############################################################################
-# A10K reproducibility mirror (outputs/10k-astral-dataset)
+# A10K reproducibility mirror ($PHYLOGENY_DATA_DIR/outputs/10k-astral-dataset)
 ###############################################################################
 # run-a10k.sh mirrors every result automatically to
-#   outputs/10k-astral-dataset/astralx_outputs/10k-simphy/<R>/<tree_type>/<setting>/
+#   $PHYLOGENY_DATA_DIR/outputs/10k-astral-dataset/astralx_outputs/10k-simphy/<R>/<tree_type>/<setting>/
 # (tree, CSVs, out-astralx.command, .astralx_run.log; never gene/species trees)
 
 # back-fill results produced before the mirror existed

@@ -234,7 +234,7 @@ to change: sync and upload discover `<method>_outputs` directories generically.
 ## 9. Related
 
 The A10K (10k-astral-dataset) runs have the same kind of mirror under
-`outputs/10k-astral-dataset`; see
+`$PHYLOGENY_DATA_DIR/outputs/10k-astral-dataset`, next to this one; see
 [`a10k-outputs-reproducibility.md`](a10k-outputs-reproducibility.md).
 
 ## 10. Change log

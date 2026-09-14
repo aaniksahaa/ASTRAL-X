@@ -592,9 +592,10 @@ CSV; gene trees, rooted gene trees, and species trees are preserved.
 Each A10K run also maintains a compact reproducibility mirror, exactly like the
 simulated runs: the results stay in the data tree unchanged and are copied
 (inferred tree, CSVs, command record, run log; never gene trees or species
-trees) to the `outputs` sibling of the `data` directory, so
-`data/10k-astral-dataset` mirrors into
-`outputs/10k-astral-dataset/astralx_outputs/10k-simphy/<replicate>/<tree_type>/<setting>`.
+trees) to an `outputs` directory next to the dataset, so
+`$PHYLOGENY_DATA_DIR/10k-astral-dataset` mirrors into
+`$PHYLOGENY_DATA_DIR/outputs/10k-astral-dataset/astralx_outputs/10k-simphy/<replicate>/<tree_type>/<setting>`,
+beside the SimPhy mirror in `$PHYLOGENY_DATA_DIR/outputs/simphy`.
 The merged scores CSV from `collect-scores-a10k.sh` and the rooting command for
 estimated gene trees are mirrored as well.
 

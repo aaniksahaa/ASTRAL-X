@@ -78,9 +78,9 @@ Optional:
                        Semicolon-separated list of option strings to loop over
   --fresh              Force rerun even if stat-astralx.csv exists
   --outputs-dir        Reproducibility mirror root for the small run outputs
-                       (default: the "outputs" sibling of the "data" directory
-                       holding the dataset, e.g. data/10k-astral-dataset mirrors
-                       into outputs/10k-astral-dataset)
+                       (default: <parent>/outputs/<dataset>, e.g.
+                       \$PHYLOGENY_DATA_DIR/10k-astral-dataset mirrors into
+                       \$PHYLOGENY_DATA_DIR/outputs/10k-astral-dataset)
   --no-outputs-mirror  Do not copy results into the outputs mirror
   --no-time-monitor    Disable time monitoring
   --no-gpu-monitor     Disable GPU monitoring

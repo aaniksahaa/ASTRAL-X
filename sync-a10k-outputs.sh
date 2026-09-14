@@ -38,9 +38,9 @@ Required:
   --data-dir PATH      A10K dataset root containing 10k-simphy/
 
 Options:
-  --outputs-dir PATH   Mirror root to write (default: the "outputs" sibling of
-                       the "data" directory holding the dataset, e.g.
-                       data/10k-astral-dataset -> outputs/10k-astral-dataset)
+  --outputs-dir PATH   Mirror root to write (default: <parent>/outputs/<dataset>,
+                       e.g. \$PHYLOGENY_DATA_DIR/10k-astral-dataset ->
+                       \$PHYLOGENY_DATA_DIR/outputs/10k-astral-dataset)
   --method, -m METHOD  Only mirror this method (e.g. "astralx"); repeatable
   --methods LIST       Only mirror these methods, comma/space separated
                        (e.g. "astralx" or "astralx_outputs"; default: all)
