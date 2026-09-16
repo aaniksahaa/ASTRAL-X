@@ -235,6 +235,17 @@ make_results "${DATA}/10k-simphy/R3/astralx_outputs/true/search-mode_local" "R3-
   fail "--sync upload with a stub uploader failed: $(cat "${TMP}/up-s.out")"
 grep -q "Refreshing the outputs mirror" "${TMP}/up-s.out" || fail "--sync did not run the mirror sync"
 [[ -s "${M}/R3/true/search-mode_local/out-astralx.tre" ]] || fail "--sync did not back-fill the new result"
+
+# With --data-dir the refresh is the default; --no-sync and --outputs-dir skip it.
+"$UP" --data-dir "$DATA" --yes --dry-run --uploader /bin/true --python /bin/true >"${TMP}/up-auto.out" 2>&1 || \
+  fail "default upload with --data-dir failed: $(cat "${TMP}/up-auto.out")"
+grep -q "Refreshing the outputs mirror" "${TMP}/up-auto.out" || fail "--data-dir did not refresh the mirror by default"
+"$UP" --data-dir "$DATA" --no-sync --yes --dry-run --uploader /bin/true --python /bin/true >"${TMP}/up-nosync.out" 2>&1 || \
+  fail "--no-sync upload failed: $(cat "${TMP}/up-nosync.out")"
+grep -q "Refreshing the outputs mirror" "${TMP}/up-nosync.out" && fail "--no-sync still refreshed the mirror"
+"$UP" --outputs-dir "$OUTPUTS" --yes --dry-run --uploader /bin/true --python /bin/true >"${TMP}/up-od.out" 2>&1 || \
+  fail "--outputs-dir upload failed: $(cat "${TMP}/up-od.out")"
+grep -q "Refreshing the outputs mirror" "${TMP}/up-od.out" && fail "--outputs-dir alone refreshed the mirror"
 grep -q "uploaded=4 failed=0" "${TMP}/up-s.out" || fail "stub upload summary unexpected: $(cat "${TMP}/up-s.out")"
 
 # Input data inside the mirror blocks the upload.

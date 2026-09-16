@@ -23,7 +23,7 @@ source "${SCRIPT_DIR}/scripts/a10k-outputs-dir.sh"
 
 OUTPUTS_DIR=""
 DATA_DIR=""
-SYNC_FIRST=false
+SYNC_FIRST=""   # empty = auto: refresh the mirror whenever --data-dir is given
 REPO_ID="imAniksahA/blab"
 REPO_TYPE="dataset"
 REMOTE_DIR="ph/d/a10k/outputs"
@@ -49,11 +49,14 @@ refused.
 Location (one of):
   --outputs-dir PATH       Outputs mirror to upload
   --data-dir PATH          A10K dataset root; the mirror location is derived
-                           from it (data/<name> -> outputs/<name>) and --sync
-                           refreshes the mirror from it first
+                           from it (<parent>/<name> -> <parent>/outputs/<name>) and
+                           the mirror is refreshed from it before uploading
 
 Options:
-  --sync                   Run ./sync-a10k-outputs.sh first (needs --data-dir)
+  --no-sync                Do not refresh the mirror first (default with
+                           --data-dir: ./sync-a10k-outputs.sh runs first, so
+                           every finished run is mirrored before upload)
+  --sync                   Force the refresh (needs --data-dir)
   --method, -m METHOD      Only upload this method (e.g. "aster"); repeatable
   --methods LIST           Only upload these methods, comma/space separated
   --all-methods            Upload every <method>_outputs directory found
@@ -69,13 +72,14 @@ Options:
   --yes, -y                Do not ask for confirmation
   --help, -h               Show this message
 
-Re-running is cheap: files already present on the Hub are skipped by the
-uploader, so this doubles as an incremental sync of the outputs mirror.
+Re-running is cheap: files already present on the Hub are always skipped by
+the uploader, so this doubles as an incremental publish of new results.
 
 Examples:
-  ./upload-a10k-outputs.sh --data-dir data/10k-astral-dataset --dry-run
-  ./upload-a10k-outputs.sh --data-dir data/10k-astral-dataset --sync
-  ./upload-a10k-outputs.sh --outputs-dir outputs/10k-astral-dataset --yes
+  ./upload-a10k-outputs.sh --data-dir \$PHYLOGENY_DATA_DIR/10k-astral-dataset --dry-run
+  ./upload-a10k-outputs.sh --data-dir \$PHYLOGENY_DATA_DIR/10k-astral-dataset
+  ./upload-a10k-outputs.sh --data-dir \$PHYLOGENY_DATA_DIR/10k-astral-dataset --no-sync
+  ./upload-a10k-outputs.sh --outputs-dir \$PHYLOGENY_DATA_DIR/outputs/10k-astral-dataset --yes
 EOF
 }
 
@@ -105,6 +109,7 @@ while [[ $# -gt 0 ]]; do
     --data-dir) DATA_DIR="$2"; shift 2 ;;
     --data-dir=*) DATA_DIR="${1#*=}"; shift ;;
     --sync) SYNC_FIRST=true; shift ;;
+    --no-sync) SYNC_FIRST=false; shift ;;
     --methods) METHODS_RAW="$2"; shift 2 ;;
     --methods=*) METHODS_RAW="${1#*=}"; shift ;;
     --method|-m) METHODS_RAW="${METHODS_RAW:+$METHODS_RAW,}$2"; shift 2 ;;
@@ -145,6 +150,10 @@ DATA_DIR="$(expand_home "$DATA_DIR")"
 if [[ "$SYNC_FIRST" == true && -z "$DATA_DIR" ]]; then
   echo "Error: --sync needs --data-dir so the mirror can be refreshed from the dataset tree." >&2
   exit 2
+fi
+if [[ -z "$SYNC_FIRST" ]]; then
+  # Default: refresh the mirror whenever the dataset tree is known.
+  if [[ -n "$DATA_DIR" ]]; then SYNC_FIRST=true; else SYNC_FIRST=false; fi
 fi
 if [[ -n "$DATA_DIR" ]]; then
   if [[ ! -d "$DATA_DIR" ]]; then

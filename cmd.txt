@@ -812,7 +812,8 @@ done
 
 # publish to Hugging Face (ph/d/a10k/outputs/)
 ./upload-a10k-outputs.sh --data-dir $PHYLOGENY_DATA_DIR/10k-astral-dataset --dry-run
-./upload-a10k-outputs.sh --data-dir $PHYLOGENY_DATA_DIR/10k-astral-dataset --sync
+./upload-a10k-outputs.sh --data-dir $PHYLOGENY_DATA_DIR/10k-astral-dataset          # syncs the mirror first, then uploads (already-uploaded files are skipped)
+./upload-a10k-outputs.sh --data-dir $PHYLOGENY_DATA_DIR/10k-astral-dataset --yes    # unattended
 
 # clear results but keep the mirror (default) / remove the mirror too
 ./clear-a10k.sh --data-dir $PHYLOGENY_DATA_DIR/10k-astral-dataset --yes

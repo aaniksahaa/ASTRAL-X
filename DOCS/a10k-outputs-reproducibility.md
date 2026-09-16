@@ -108,7 +108,7 @@ root equal to, inside, or containing the data directory is refused.
 | `run-astralx-with-monitor.sh` | Unchanged: writes `out-astralx.command` (exact `run.sh` line, git commit, wrapper invocation) before the run, appends exit code and running time after. |
 | `collect-scores-a10k.sh` | Copies the merged CSV into the mirror root. Flags `--outputs-dir`, `--no-outputs-mirror`. |
 | `sync-a10k-outputs.sh` | Back-fills or refreshes the whole mirror from the data tree. Flags `--data-dir` (required), `--outputs-dir`, `--methods`, `--dry-run`, `--quiet`. |
-| `upload-a10k-outputs.sh` | Uploads each `<method>_outputs` directory as a folder plus the root-level files. Flags `--data-dir` / `--outputs-dir`, `--sync`, `--methods`, `--all-methods`, `--dry-run`, `--yes`, `--repo-id`, `--remote-dir`, `--python`. |
+| `upload-a10k-outputs.sh` | Uploads each `<method>_outputs` directory as a folder plus the root-level files. Flags `--data-dir` / `--outputs-dir`, `--no-sync` / `--sync` (with `--data-dir` the mirror is refreshed first by default), `--methods`, `--all-methods`, `--dry-run`, `--yes`, `--repo-id`, `--remote-dir`, `--python`. |
 | `clear-a10k.sh` | Preserves the mirror by default and says where it is; `--include-mirror` also removes the mirrored `astralx_outputs` and merged CSV (provenance files stay). |
 
 ## 5. Behaviour and invariants
@@ -162,7 +162,8 @@ root equal to, inside, or containing the data directory is refused.
 
 # publish
 ./upload-a10k-outputs.sh --data-dir data/10k-astral-dataset --dry-run
-./upload-a10k-outputs.sh --data-dir data/10k-astral-dataset --sync
+./upload-a10k-outputs.sh --data-dir data/10k-astral-dataset          # refreshes the mirror first
+./upload-a10k-outputs.sh --data-dir data/10k-astral-dataset --no-sync
 
 # clear results; the mirror is kept unless asked
 ./clear-a10k.sh --data-dir data/10k-astral-dataset --dry-run
@@ -191,6 +192,8 @@ from `out-astralx.command` at the recorded git commit.
 
 ## 8. Change log
 
+- 2026-09-16: `upload-a10k-outputs.sh` refreshes the mirror by default when
+  `--data-dir` is given (`--no-sync` opts out; `--sync` forces it).
 - 2026-09-15: default mirror root changed to `<parent>/outputs/<dataset>`
   (`$PHYLOGENY_DATA_DIR/outputs/10k-astral-dataset`). The first version mirrored
   into the `outputs` sibling of a parent named `data`, which put the A10K mirror
