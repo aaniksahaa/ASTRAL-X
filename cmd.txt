@@ -868,3 +868,13 @@ CPU ONLY RUNS
 
 ===========================================================================
 
+
+Upload a10k 
+
+./upload-a10k-outputs.sh --data-dir $PHYLOGENY_DATA_DIR/10k-astral-dataset          # asks once
+./upload-a10k-outputs.sh --data-dir $PHYLOGENY_DATA_DIR/10k-astral-dataset --yes    # unattended
+./upload-a10k-outputs.sh --data-dir $PHYLOGENY_DATA_DIR/10k-astral-dataset --dry-run
+
+
+
+
