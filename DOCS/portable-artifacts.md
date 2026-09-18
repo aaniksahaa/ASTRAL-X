@@ -36,19 +36,19 @@ own matching runtime.
 Linux release artifact (CUDA bundled, automatic CPU fallback):
 
 ```bash
-./build_portable.sh
+./scripts/build_portable.sh
 ```
 
 macOS release artifact (CPU, because CUDA is unavailable):
 
 ```bash
-./build_portable.sh --without-cuda
+./scripts/build_portable.sh --without-cuda
 ```
 
 Windows PowerShell release artifact:
 
 ```powershell
-.\build_portable.ps1
+.\scripts\build_portable.ps1
 ```
 
 `--without-cuda` (`-WithoutCuda` on Windows) creates a CPU-only build. The

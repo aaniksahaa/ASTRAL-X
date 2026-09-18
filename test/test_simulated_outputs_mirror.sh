@@ -86,12 +86,12 @@ mkdir -p "${DATA}/${DS}/1"
 printf 'raw\n' > "${DATA}/${DS}/1/g_trees1.trees"
 
 # ------------------------------------------------------------ sync dry run ---
-PHYLOGENY_DATA_DIR="$BASE" "${ROOT}/sync-simulated-outputs.sh" --dry-run >"${TMP}/sync-dry.out" 2>&1
+PHYLOGENY_DATA_DIR="$BASE" "${ROOT}/scripts/sync-simulated-outputs.sh" --dry-run >"${TMP}/sync-dry.out" 2>&1
 grep -q "would mirror=5" "${TMP}/sync-dry.out" || fail "dry run did not count 5 results dirs: $(cat "${TMP}/sync-dry.out")"
 [[ -z "$(find "$OUTPUTS" -mindepth 1 -print -quit)" ]] || fail "dry run wrote into the outputs dir"
 
 # ---------------------------------------------------------------- sync run ---
-PHYLOGENY_DATA_DIR="$BASE" "${ROOT}/sync-simulated-outputs.sh" >"${TMP}/sync.out" 2>&1
+PHYLOGENY_DATA_DIR="$BASE" "${ROOT}/scripts/sync-simulated-outputs.sh" >"${TMP}/sync.out" 2>&1
 grep -q "mirrored=5 filtered-out=0 failed=0" "${TMP}/sync.out" || fail "sync summary unexpected: $(cat "${TMP}/sync.out")"
 
 M="${OUTPUTS}/astralx_outputs/${DS}"
@@ -120,7 +120,7 @@ done
 # Re-sync replaces a stale mirror leaf exactly (stale extra file disappears).
 printf 'stale\n' > "${M}/R1/search-space_S1/stale.txt"
 printf '((a,c),(b,d));\n' > "${DATA}/${DS}/R1/astralx_outputs/search-space_S1/out-astralx.tre"
-PHYLOGENY_DATA_DIR="$BASE" "${ROOT}/sync-simulated-outputs.sh" --methods astralx --quiet >"${TMP}/resync.out" 2>&1
+PHYLOGENY_DATA_DIR="$BASE" "${ROOT}/scripts/sync-simulated-outputs.sh" --methods astralx --quiet >"${TMP}/resync.out" 2>&1
 grep -q "mirrored=4 filtered-out=1 failed=0" "${TMP}/resync.out" || fail "method filter summary unexpected: $(cat "${TMP}/resync.out")"
 [[ ! -e "${M}/R1/search-space_S1/stale.txt" ]] || fail "stale mirror file survived a re-sync"
 cmp -s "${DATA}/${DS}/R1/astralx_outputs/search-space_S1/out-astralx.tre" "${M}/R1/search-space_S1/out-astralx.tre" || \
@@ -130,7 +130,7 @@ cmp -s "${DATA}/${DS}/R1/astralx_outputs/search-space_S1/out-astralx.tre" "${M}/
 # Results containing simulated input data are refused.
 mkdir -p "${DATA}/${DS}/R2/astralx_outputs/bad"
 printf 'x\n' > "${DATA}/${DS}/R2/astralx_outputs/bad/all_gt.tre"
-if PHYLOGENY_DATA_DIR="$BASE" "${ROOT}/sync-simulated-outputs.sh" --quiet >"${TMP}/bad.out" 2>&1; then
+if PHYLOGENY_DATA_DIR="$BASE" "${ROOT}/scripts/sync-simulated-outputs.sh" --quiet >"${TMP}/bad.out" 2>&1; then
   fail "sync succeeded although a results dir contained all_gt.tre"
 fi
 grep -q "simulated input data" "${TMP}/bad.out" || fail "refusal reason unclear: $(cat "${TMP}/bad.out")"
@@ -150,7 +150,7 @@ COMMON=(--simphy-data-dir "$RUN_DATA" -t 4 -g 1 -r R1
   --opts '--search-space S1 --cpu -q'
   --no-time-monitor --no-gpu-monitor --no-notify)
 
-env -u PHYLOGENY_DATA_DIR "${ROOT}/test-astralx-simulated.sh" "${COMMON[@]}" >"${TMP}/run1.out" 2>&1
+env -u PHYLOGENY_DATA_DIR "${ROOT}/scripts/test-astralx-simulated.sh" "${COMMON[@]}" >"${TMP}/run1.out" 2>&1
 grep -q "outputs mirror: ${RUN_OUTPUTS}" "${TMP}/run1.out" || fail "run did not report the default outputs mirror: $(grep -i mirror "${TMP}/run1.out")"
 RUN_LEAF="${RUN_OUTPUTS}/astralx_outputs/${RUN_DS}/R1/search-space_S1__cpu_true"
 grep -q "Mirrored outputs to: ${RUN_LEAF}" "${TMP}/run1.out" || fail "run did not mirror its outputs"
@@ -160,8 +160,8 @@ SRC_LEAF="${RUN_DATA}/${RUN_DS}/R1/astralx_outputs/search-space_S1__cpu_true"
 [[ -f "${RUN_LEAF}/.astralx.success" && -f "${RUN_LEAF}/.astralx.lock" ]] || fail "mirrored run lacks markers"
 # The exact ASTRAL-X command is recorded beside the tree and mirrored with it.
 [[ -s "${RUN_LEAF}/out-astralx.command" ]] || fail "run command record was not mirrored"
-grep -q "&& ./run.sh --input .*all_gt.tre --output .*out-astralx.tre --search-space S1 --cpu -q\$" "${RUN_LEAF}/out-astralx.command" || \
-  fail "command record lacks the exact run.sh invocation: $(cat "${RUN_LEAF}/out-astralx.command")"
+grep -q "&& ./astralx --input .*all_gt.tre --output .*out-astralx.tre --search-space S1 --cpu -q\$" "${RUN_LEAF}/out-astralx.command" || \
+  fail "command record lacks the exact ./astralx invocation: $(cat "${RUN_LEAF}/out-astralx.command")"
 grep -q "^# git_commit: " "${RUN_LEAF}/out-astralx.command" || fail "command record lacks the git commit"
 grep -q "^# exit_code:    0$" "${RUN_LEAF}/out-astralx.command" || fail "command record lacks the exit code"
 grep -q "^# invoked as: .*test-astralx-simulated.sh" "${RUN_LEAF}/out-astralx.command" || fail "command record lacks the outer invocation"
@@ -174,26 +174,26 @@ diff -r "$SRC_LEAF" "$RUN_LEAF" >/dev/null || fail "mirror leaf differs from the
 
 # The skip path (already completed) rebuilds a deleted mirror.
 rm -rf "$RUN_OUTPUTS"
-env -u PHYLOGENY_DATA_DIR "${ROOT}/test-astralx-simulated.sh" "${COMMON[@]}" >"${TMP}/run2.out" 2>&1
+env -u PHYLOGENY_DATA_DIR "${ROOT}/scripts/test-astralx-simulated.sh" "${COMMON[@]}" >"${TMP}/run2.out" 2>&1
 grep -q "SKIPPING: successful output already exists" "${TMP}/run2.out" || fail "second run did not skip"
 [[ -s "${RUN_LEAF}/out-astralx.tre" ]] || fail "skip path did not rebuild the mirror"
 
 # --no-outputs-mirror leaves the mirror untouched; explicit dir is honored.
 rm -rf "$RUN_OUTPUTS"
-env -u PHYLOGENY_DATA_DIR "${ROOT}/test-astralx-simulated.sh" "${COMMON[@]}" --no-outputs-mirror >"${TMP}/run3.out" 2>&1
+env -u PHYLOGENY_DATA_DIR "${ROOT}/scripts/test-astralx-simulated.sh" "${COMMON[@]}" --no-outputs-mirror >"${TMP}/run3.out" 2>&1
 [[ ! -e "$RUN_OUTPUTS" ]] || fail "--no-outputs-mirror still wrote a mirror"
 grep -q "SKIPPING: successful output already exists" "${TMP}/run3.out" || fail "third run did not take the skip path"
-env -u PHYLOGENY_DATA_DIR "${ROOT}/test-astralx-simulated.sh" "${COMMON[@]}" --simphy-outputs-dir "${TMP}/explicit outputs" >"${TMP}/run4.out" 2>&1
+env -u PHYLOGENY_DATA_DIR "${ROOT}/scripts/test-astralx-simulated.sh" "${COMMON[@]}" --simphy-outputs-dir "${TMP}/explicit outputs" >"${TMP}/run4.out" 2>&1
 [[ -s "${TMP}/explicit outputs/astralx_outputs/${RUN_DS}/R1/search-space_S1__cpu_true/out-astralx.tre" ]] || \
   fail "explicit --simphy-outputs-dir was not used"
-if env -u PHYLOGENY_DATA_DIR "${ROOT}/test-astralx-simulated.sh" "${COMMON[@]}" --simphy-outputs-dir "${RUN_DATA}/outputs" >"${TMP}/run5.out" 2>&1; then
+if env -u PHYLOGENY_DATA_DIR "${ROOT}/scripts/test-astralx-simulated.sh" "${COMMON[@]}" --simphy-outputs-dir "${RUN_DATA}/outputs" >"${TMP}/run5.out" 2>&1; then
   fail "an outputs dir inside the data dir was accepted by the run script"
 fi
 
 # run-bulk-simulated.sh forwards the mirror options.
-grep -q -- '--simphy-outputs-dir' "${ROOT}/run-bulk-simulated.sh" || fail "bulk runner lacks --simphy-outputs-dir"
-grep -q -- '--no-outputs-mirror' "${ROOT}/run-bulk-simulated.sh" || fail "bulk runner lacks --no-outputs-mirror"
-"${ROOT}/run-bulk-simulated.sh" --simphy-data-dir "${TMP}/plan/data" \
+grep -q -- '--simphy-outputs-dir' "${ROOT}/scripts/run-bulk-simulated.sh" || fail "bulk runner lacks --simphy-outputs-dir"
+grep -q -- '--no-outputs-mirror' "${ROOT}/scripts/run-bulk-simulated.sh" || fail "bulk runner lacks --no-outputs-mirror"
+"${ROOT}/scripts/run-bulk-simulated.sh" --simphy-data-dir "${TMP}/plan/data" \
   --simphy-outputs-dir "${TMP}/plan/outputs" --taxa-list "10,20" \
   --genes-list 10 --num-replicates 2 \
   --opts-list '--search-space S1;--search-space S2' --dry-run >"${TMP}/plan.out" 2>&1
@@ -206,7 +206,7 @@ grep -q "Dry run; nothing was simulated or executed" "${TMP}/plan.out" || fail "
 # ------------------------------------------------------- uploader dry run ---
 # The uploader defaults to astralx_outputs only; --all-methods covers the
 # second synthetic method as well.
-UP="${ROOT}/upload-bulk-simulated-outputs.sh"
+UP="${ROOT}/scripts/upload-bulk-simulated-outputs.sh"
 PHYLOGENY_DATA_DIR="$BASE" "$UP" --all-methods --dry-run --uploader /bin/true --python /bin/true >"${TMP}/up.out" 2>&1 || \
   fail "uploader dry run failed: $(cat "${TMP}/up.out")"
 grep -q "Plan: upload 3 dataset" "${TMP}/up.out" || fail "uploader did not plan 3 dataset uploads: $(cat "${TMP}/up.out")"

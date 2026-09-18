@@ -98,10 +98,10 @@ Compilable Java project with CLI argument parsing, logging framework, and CUDA b
 
 ### Checkpoint 0
 ```
-$ ./build.sh
-$ java -cp build astralx.Main -i all_gt_bs_rooted_37.tre -o /dev/null -v
+$ ./scripts/build.sh
+$ java -cp build astralx.Main -i example/all_gt_37.tre -o /dev/null -v
 [INFO] ASTRAL-X v0.1
-[INFO] Input: all_gt_bs_rooted_37.tre
+[INFO] Input: example/all_gt_37.tre
 [INFO] Threads: 8
 [INFO] Mode: CPU
 ```
@@ -151,7 +151,7 @@ Parse Newick trees into internal representation with postorder arrays and positi
 
 ### Checkpoint 1
 ```
-Test: Parse all_gt_bs_rooted_37.tre
+Test: Parse example/all_gt_37.tre
 Assert: n == 37, k == 200
 Assert: Every tree has leafCount == 37 (complete trees)
 Assert: postorderArray has no -1 entries for complete trees
@@ -603,7 +603,7 @@ children's subtree scores count.
 ### Checkpoint 7 -- MAJOR MILESTONE
 ```
 End-to-end test on 37-taxa dataset:
-$ java -cp build astralx.Main -i all_gt_bs_rooted_37.tre -o output_37.tre -v
+$ java -cp build astralx.Main -i example/all_gt_37.tre -o output_37.tre -v
 
 Assert: Output is a valid Newick tree with exactly 37 leaves
 Assert: All 37 taxon names are present in the output

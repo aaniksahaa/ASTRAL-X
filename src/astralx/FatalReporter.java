@@ -13,6 +13,11 @@ import java.time.format.DateTimeFormatter;
 
 /** Best-effort fatal report for Java exceptions and memory failures. */
 public final class FatalReporter {
+    /** Crash reports are collected under this directory (relative to the working directory). */
+    public static final String CRASH_LOG_DIRECTORY = "crash-logs";
+    /** Optional system property overriding the crash-log directory (absolute or cwd-relative). */
+    public static final String CRASH_LOG_DIRECTORY_PROPERTY = "astralx.crashLogDir";
+
     private FatalReporter() {}
 
     public static void report(Throwable failure, String[] args) {
@@ -22,8 +27,12 @@ public final class FatalReporter {
         String stamp = DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss")
             .withZone(ZoneOffset.UTC).format(Instant.now());
         String name = "astralx-crash-" + stamp + "-" + ProcessHandle.current().pid() + ".log";
-        Path report = Path.of(System.getProperty("user.dir", ".")).resolve(name);
+        String configured = System.getProperty(CRASH_LOG_DIRECTORY_PROPERTY, "").trim();
+        Path directory = Path.of(System.getProperty("user.dir", "."))
+            .resolve(configured.isEmpty() ? CRASH_LOG_DIRECTORY : configured);
+        Path report = directory.resolve(name);
         try {
+            Files.createDirectories(directory);
             Files.writeString(report, text + System.lineSeparator(), StandardCharsets.UTF_8);
             System.err.println("Crash report written to: " + report.toAbsolutePath());
         } catch (Throwable writeFailure) {

@@ -79,13 +79,13 @@ printf '# 10k dataset\n' > "${DATA}/README.md"
 printf 'alg,setting\nastralx,x\n' > "${DATA}/a10k_astralx_scores_merged.csv"
 
 # ------------------------------------------------------------ sync dry run ---
-"${ROOT}/sync-a10k-outputs.sh" --data-dir "$DATA" --dry-run >"${TMP}/sync-dry.out" 2>&1
+"${ROOT}/scripts/sync-a10k-outputs.sh" --data-dir "$DATA" --dry-run >"${TMP}/sync-dry.out" 2>&1
 grep -q "would mirror=6 filtered-out=0 problems=0 merged-csv=would copy" "${TMP}/sync-dry.out" || \
   fail "dry run summary unexpected: $(cat "${TMP}/sync-dry.out")"
 [[ -z "$(find "$OUTPUTS" -mindepth 1 -print -quit)" ]] || fail "dry run wrote into the outputs dir"
 
 # ---------------------------------------------------------------- sync run ---
-"${ROOT}/sync-a10k-outputs.sh" --data-dir "$DATA" >"${TMP}/sync.out" 2>&1
+"${ROOT}/scripts/sync-a10k-outputs.sh" --data-dir "$DATA" >"${TMP}/sync.out" 2>&1
 grep -q "mirrored=6 filtered-out=0 failed=0 merged-csv=copied" "${TMP}/sync.out" || \
   fail "sync summary unexpected: $(cat "${TMP}/sync.out")"
 
@@ -115,7 +115,7 @@ cmp -s "${DATA}/a10k_astralx_scores_merged.csv" "${OUTPUTS}/a10k_astralx_scores_
 # Re-sync replaces a stale mirror leaf exactly (stale extra file disappears).
 printf 'stale\n' > "${M}/R1/estimated/search-mode_full/stale.txt"
 printf '((1,3),((2,4),0));\n' > "${DATA}/10k-simphy/R1/astralx_outputs/estimated/search-mode_full/out-astralx.tre"
-"${ROOT}/sync-a10k-outputs.sh" --data-dir "$DATA" --methods astralx --quiet >"${TMP}/resync.out" 2>&1
+"${ROOT}/scripts/sync-a10k-outputs.sh" --data-dir "$DATA" --methods astralx --quiet >"${TMP}/resync.out" 2>&1
 grep -q "mirrored=5 filtered-out=1 failed=0" "${TMP}/resync.out" || fail "method filter summary unexpected: $(cat "${TMP}/resync.out")"
 [[ ! -e "${M}/R1/estimated/search-mode_full/stale.txt" ]] || fail "stale mirror file survived a re-sync"
 cmp -s "${DATA}/10k-simphy/R1/astralx_outputs/estimated/search-mode_full/out-astralx.tre" "${M}/R1/estimated/search-mode_full/out-astralx.tre" || \
@@ -125,7 +125,7 @@ cmp -s "${DATA}/10k-simphy/R1/astralx_outputs/estimated/search-mode_full/out-ast
 # Results containing input data are refused.
 mkdir -p "${DATA}/10k-simphy/R2/astralx_outputs/estimated/bad"
 printf 'x\n' > "${DATA}/10k-simphy/R2/astralx_outputs/estimated/bad/s_tree.trees"
-if "${ROOT}/sync-a10k-outputs.sh" --data-dir "$DATA" --quiet >"${TMP}/bad.out" 2>&1; then
+if "${ROOT}/scripts/sync-a10k-outputs.sh" --data-dir "$DATA" --quiet >"${TMP}/bad.out" 2>&1; then
   fail "sync succeeded although a results dir contained s_tree.trees"
 fi
 grep -q "A10K input data" "${TMP}/bad.out" || fail "refusal reason unclear: $(cat "${TMP}/bad.out")"
@@ -142,7 +142,7 @@ printf 'downloaded from the ASTRAL 10k dataset\n' > "${RUN_DATA}/10k-astral-data
 COMMON=(--data-dir "$RUN_DATA" --opts '--search-space S1 --cpu -q'
   --no-time-monitor --no-gpu-monitor --no-notify)
 
-"${ROOT}/run-a10k.sh" "${COMMON[@]}" --tree-type "true;estimated" --replicates R1 >"${TMP}/run1.out" 2>&1 || \
+"${ROOT}/scripts/run-a10k.sh" "${COMMON[@]}" --tree-type "true;estimated" --replicates R1 >"${TMP}/run1.out" 2>&1 || \
   fail "run-a10k.sh failed: $(tail -n 30 "${TMP}/run1.out")"
 grep -q "outputs mirror: ${RUN_OUTPUTS}" "${TMP}/run1.out" || fail "run did not report the default outputs mirror: $(grep -i mirror "${TMP}/run1.out")"
 for tree_type in true estimated; do
@@ -155,8 +155,8 @@ for tree_type in true estimated; do
   grep -q "ASTRAL-X" "${RUN_LEAF}/.astralx_run.log" || fail "run log does not contain the wrapper output"
   # The exact ASTRAL-X command is recorded beside the tree and mirrored with it.
   [[ -s "${RUN_LEAF}/out-astralx.command" ]] || fail "run command record was not mirrored (${tree_type})"
-  grep -q "&& ./run.sh --input .* --output .*out-astralx.tre --search-space S1 --cpu -q\$" "${RUN_LEAF}/out-astralx.command" || \
-    fail "command record lacks the exact run.sh invocation: $(cat "${RUN_LEAF}/out-astralx.command")"
+  grep -q "&& ./astralx --input .* --output .*out-astralx.tre --search-space S1 --cpu -q\$" "${RUN_LEAF}/out-astralx.command" || \
+    fail "command record lacks the exact ./astralx invocation: $(cat "${RUN_LEAF}/out-astralx.command")"
   grep -q "^# git_commit: " "${RUN_LEAF}/out-astralx.command" || fail "command record lacks the git commit"
   grep -q "^# exit_code:    0$" "${RUN_LEAF}/out-astralx.command" || fail "command record lacks the exit code"
   grep -q "^# --- A10K run context (run-a10k.sh) ---$" "${RUN_LEAF}/out-astralx.command" || fail "command record lacks the A10K context"
@@ -180,35 +180,35 @@ grep -q "process_unrooted.sh .* -og 0$" "${RUN_OUTPUTS}/astralx_outputs/10k-simp
 
 # The skip path (already completed) rebuilds a deleted mirror.
 rm -rf "$RUN_OUTPUTS"
-"${ROOT}/run-a10k.sh" "${COMMON[@]}" --tree-type true --replicates R1 >"${TMP}/run2.out" 2>&1 || fail "second run failed"
+"${ROOT}/scripts/run-a10k.sh" "${COMMON[@]}" --tree-type true --replicates R1 >"${TMP}/run2.out" 2>&1 || fail "second run failed"
 grep -q "SKIPPING: .*stat-astralx.csv exists" "${TMP}/run2.out" || fail "second run did not skip"
 [[ -s "${RUN_OUTPUTS}/astralx_outputs/10k-simphy/R1/true/${SETTING}/out-astralx.tre" ]] || fail "skip path did not rebuild the mirror"
 
 # --no-outputs-mirror leaves the mirror untouched; explicit dir is honored.
 rm -rf "$RUN_OUTPUTS"
-"${ROOT}/run-a10k.sh" "${COMMON[@]}" --tree-type true --replicates R1 --no-outputs-mirror >"${TMP}/run3.out" 2>&1 || fail "third run failed"
+"${ROOT}/scripts/run-a10k.sh" "${COMMON[@]}" --tree-type true --replicates R1 --no-outputs-mirror >"${TMP}/run3.out" 2>&1 || fail "third run failed"
 [[ ! -e "$RUN_OUTPUTS" ]] || fail "--no-outputs-mirror still wrote a mirror"
 grep -q "SKIPPING" "${TMP}/run3.out" || fail "third run did not take the skip path"
-"${ROOT}/run-a10k.sh" "${COMMON[@]}" --tree-type true --replicates R1 --outputs-dir "${TMP}/explicit outputs" >"${TMP}/run4.out" 2>&1 || fail "fourth run failed"
+"${ROOT}/scripts/run-a10k.sh" "${COMMON[@]}" --tree-type true --replicates R1 --outputs-dir "${TMP}/explicit outputs" >"${TMP}/run4.out" 2>&1 || fail "fourth run failed"
 [[ -s "${TMP}/explicit outputs/astralx_outputs/10k-simphy/R1/true/${SETTING}/out-astralx.tre" ]] || \
   fail "explicit --outputs-dir was not used"
-if "${ROOT}/run-a10k.sh" "${COMMON[@]}" --tree-type true --replicates R1 --outputs-dir "${RUN_DATA}/outputs" >"${TMP}/run5.out" 2>&1; then
+if "${ROOT}/scripts/run-a10k.sh" "${COMMON[@]}" --tree-type true --replicates R1 --outputs-dir "${RUN_DATA}/outputs" >"${TMP}/run5.out" 2>&1; then
   fail "an outputs dir inside the data dir was accepted by the run script"
 fi
 
 # ------------------------------------------------- merged scores collector ---
-"${ROOT}/collect-scores-a10k.sh" --data-dir "$RUN_DATA" --start-rep 1 --end-rep 2 >"${TMP}/collect.out" 2>&1 || \
+"${ROOT}/scripts/collect-scores-a10k.sh" --data-dir "$RUN_DATA" --start-rep 1 --end-rep 2 >"${TMP}/collect.out" 2>&1 || \
   fail "collector failed: $(cat "${TMP}/collect.out")"
 [[ -s "${RUN_DATA}/a10k_astralx_scores_merged.csv" ]] || fail "collector did not write the merged CSV"
 [[ "$(wc -l < "${RUN_DATA}/a10k_astralx_scores_merged.csv")" == 3 ]] || fail "merged CSV should hold the header and two rows"
 grep -q "Mirrored merged stats to: ${RUN_OUTPUTS}/a10k_astralx_scores_merged.csv" "${TMP}/collect.out" || \
   fail "collector did not report the mirrored CSV: $(cat "${TMP}/collect.out")"
 cmp -s "${RUN_DATA}/a10k_astralx_scores_merged.csv" "${RUN_OUTPUTS}/a10k_astralx_scores_merged.csv" || fail "mirrored merged CSV differs"
-"${ROOT}/collect-scores-a10k.sh" --data-dir "$RUN_DATA" --start-rep 1 --end-rep 2 --no-outputs-mirror >"${TMP}/collect2.out" 2>&1
+"${ROOT}/scripts/collect-scores-a10k.sh" --data-dir "$RUN_DATA" --start-rep 1 --end-rep 2 --no-outputs-mirror >"${TMP}/collect2.out" 2>&1
 ! grep -q "Mirrored merged stats" "${TMP}/collect2.out" || fail "--no-outputs-mirror still mirrored the merged CSV"
 
 # ------------------------------------------------------- uploader dry run ---
-UP="${ROOT}/upload-a10k-outputs.sh"
+UP="${ROOT}/scripts/upload-a10k-outputs.sh"
 "$UP" --data-dir "$DATA" --dry-run --uploader /bin/true --python /bin/true >"${TMP}/up.out" 2>&1 || \
   fail "uploader dry run failed: $(cat "${TMP}/up.out")"
 grep -q "Plan: upload 1 method director" "${TMP}/up.out" || fail "uploader did not plan the astralx upload: $(cat "${TMP}/up.out")"
@@ -265,20 +265,20 @@ grep -q "Non-interactive session: proceeding without confirmation" "${TMP}/up-no
 
 # ------------------------------------------------------------- cleaner ---
 # Earlier steps removed the run mirror; rebuild it so the cleaner has targets.
-"${ROOT}/sync-a10k-outputs.sh" --data-dir "$RUN_DATA" --quiet >"${TMP}/resync-run.out" 2>&1 || \
+"${ROOT}/scripts/sync-a10k-outputs.sh" --data-dir "$RUN_DATA" --quiet >"${TMP}/resync-run.out" 2>&1 || \
   fail "re-sync of the run mirror failed: $(cat "${TMP}/resync-run.out")"
 [[ -d "${RUN_OUTPUTS}/astralx_outputs" && -f "${RUN_OUTPUTS}/10k-astral-dataset.source" ]] || fail "re-sync did not rebuild the run mirror"
-"${ROOT}/clear-a10k.sh" --data-dir "$RUN_DATA" --dry-run >"${TMP}/clear-dry.out" 2>&1 || fail "cleaner dry run failed"
+"${ROOT}/scripts/clear-a10k.sh" --data-dir "$RUN_DATA" --dry-run >"${TMP}/clear-dry.out" 2>&1 || fail "cleaner dry run failed"
 grep -q "Mirror: .*preserved" "${TMP}/clear-dry.out" || fail "cleaner did not state that the mirror is preserved"
 ! grep -q "^  ${RUN_OUTPUTS}" "${TMP}/clear-dry.out" || fail "cleaner listed mirror targets without --include-mirror"
-"${ROOT}/clear-a10k.sh" --data-dir "$RUN_DATA" --dry-run --include-mirror >"${TMP}/clear-dry2.out" 2>&1 || fail "cleaner dry run with mirror failed"
+"${ROOT}/scripts/clear-a10k.sh" --data-dir "$RUN_DATA" --dry-run --include-mirror >"${TMP}/clear-dry2.out" 2>&1 || fail "cleaner dry run with mirror failed"
 grep -Fq "  ${RUN_OUTPUTS}/astralx_outputs" "${TMP}/clear-dry2.out" || fail "--include-mirror did not list the mirrored results: $(cat "${TMP}/clear-dry2.out")"
 grep -Fq "  ${RUN_OUTPUTS}/a10k_astralx_scores_merged.csv" "${TMP}/clear-dry2.out" || fail "--include-mirror did not list the mirrored CSV"
 [[ -d "${RUN_OUTPUTS}/astralx_outputs" ]] || fail "dry run removed the mirror"
-"${ROOT}/clear-a10k.sh" --data-dir "$RUN_DATA" --yes >"${TMP}/clear.out" 2>&1 || fail "cleaner failed"
+"${ROOT}/scripts/clear-a10k.sh" --data-dir "$RUN_DATA" --yes >"${TMP}/clear.out" 2>&1 || fail "cleaner failed"
 [[ ! -e "${RUN_DATA}/10k-simphy/R1/astralx_outputs" ]] || fail "cleaner did not remove the results"
 [[ -d "${RUN_OUTPUTS}/astralx_outputs" && -f "${RUN_OUTPUTS}/10k-astral-dataset.source" ]] || fail "cleaner removed the mirror without --include-mirror"
-"${ROOT}/clear-a10k.sh" --data-dir "$RUN_DATA" --yes --include-mirror >"${TMP}/clear2.out" 2>&1 || fail "cleaner with mirror failed"
+"${ROOT}/scripts/clear-a10k.sh" --data-dir "$RUN_DATA" --yes --include-mirror >"${TMP}/clear2.out" 2>&1 || fail "cleaner with mirror failed"
 [[ ! -e "${RUN_OUTPUTS}/astralx_outputs" && ! -e "${RUN_OUTPUTS}/a10k_astralx_scores_merged.csv" ]] || fail "--include-mirror did not remove the mirror"
 [[ -f "${RUN_OUTPUTS}/10k-astral-dataset.source" ]] || fail "--include-mirror removed the provenance file"
 [[ -f "${RUN_DATA}/10k-simphy/R1/truegenetrees" && -f "${RUN_DATA}/10k-simphy/R1/estimatedgenetrees/estimatedgenetrees.rooted.tre" ]] || \

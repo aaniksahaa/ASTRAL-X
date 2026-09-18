@@ -7,6 +7,9 @@ data/*
 
 *.log
 
+# Runtime diagnostics written by ASTRAL-X after an unexpected Java/JVM failure.
+crash-logs/
+
 backups/
 
 *.zip
@@ -14,5 +17,8 @@ backups/
 # Self-contained release images and archives produced by build_portable.*
 dist/
 
-# Local Python environment created by setup_dev.sh
+# Local Python environment created by scripts/setup_dev.sh
 .venv/
+
+# Python bytecode caches
+__pycache__/

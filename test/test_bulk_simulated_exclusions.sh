@@ -13,7 +13,7 @@ fail() {
 
 # Source mode loads only the uppercase exclusion configuration and predicate;
 # run-bulk-simulated.sh must not start any simulation or inference work.
-source "${ROOT}/run-bulk-simulated.sh"
+source "${ROOT}/scripts/run-bulk-simulated.sh"
 
 # Pinned copy of the configured list, so an accidental edit is caught here.
 EXPECTED_EXCLUSIONS=(

@@ -1,0 +1,448 @@
+#!/usr/bin/env bash
+# run-bulk-simulated.sh
+#
+# Runs sim.sh and test-astralx-simulated.sh or test-baseline-simulated.sh
+# over all combinations of parameter lists.
+#
+# Usage:
+#   ./scripts/run-bulk-simulated.sh -m stelar
+#   ./scripts/run-bulk-simulated.sh --base-dir /path/to/research
+
+set -euo pipefail
+
+ASTRALX_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "${ASTRALX_ROOT}/scripts/phylogeny-data-dir.sh"
+source "${ASTRALX_ROOT}/scripts/simphy-outputs-dir.sh"
+source "${ASTRALX_ROOT}/scripts/experiment-setting-name.sh"
+
+BASE_DIR=""
+BASE_DIR_PROVIDED=false
+METHOD="astralx"  # default method
+FRESH=false
+NO_NOTIFY=false
+GPU_MONITOR=true
+SIMPHY_DATA_DIR=""
+SIMPHY_OUTPUTS_DIR=""
+OUTPUTS_MIRROR=true
+NUM_REPLICATES=1
+ASSUME_YES=false
+DRY_RUN=false
+
+T_LIST=(10)
+
+# T_LIST=(1000 2500 5000 7500 10000)
+
+G_LIST=(10)
+SB_LIST=(0.000001)
+SPMIN_LIST=(100000)
+SPMAX_LIST=(200000)
+
+# Configurations that must not run through ASTRAL-X. Each entry is an exact
+# TAXA,GENE_TREES,SB,SPMIN,SPMAX,REPLICATE tuple. Keep replicate names in R<n>
+# form. sim.sh may still prepare the surrounding dataset batch; only the listed
+# per-replicate inference/result run is purposefully skipped.
+EXCLUDED_SIMULATED_CONFIGS=(
+  "30000,1000,0.000001,100000,150000,R5"
+  "30000,1000,0.000001,100000,250000,R4"
+  "30000,1000,0.000001,100000,300000,R3"
+  "40000,1000,0.000001,100000,150000,R2"
+  "40000,1000,0.000001,100000,150000,R5"
+  "40000,1000,0.000001,100000,200000,R5"
+  "40000,1000,0.000001,100000,300000,R5"
+  "1000,25000,0.000001,100000,200000,R3"
+  "1000,25000,0.000001,100000,250000,R2"
+  "75000,1000,0.000001,100000,200000,R5"
+  "100000,1000,0.000001,100000,200000,R3"
+  "100000,1000,0.000001,100000,200000,R4"
+  "125000,1000,0.000001,100000,200000,R2"
+  "125000,1000,0.000001,100000,200000,R3"
+  "125000,1000,0.000001,100000,200000,R4"
+  "150000,1000,0.000001,100000,200000,R4"
+  "175000,1000,0.000001,100000,200000,R2"
+  "175000,1000,0.000001,100000,200000,R4"
+  "200000,1000,0.000001,100000,200000,R1"
+  "200000,1000,0.000001,100000,200000,R2"
+  "225000,1000,0.000001,100000,200000,R1"
+  "225000,1000,0.000001,100000,200000,R3"
+  "1000,25000,0.000001,100000,200000,R3"
+  "1000,75000,0.000001,100000,200000,R3"
+  "1000,100000,0.000001,100000,200000,R4"
+  "1000,125000,0.000001,100000,200000,R4"
+  "1000,150000,0.000001,100000,200000,R2"
+  "1000,200000,0.000001,100000,200000,R4"
+  "1000,225000,0.000001,100000,200000,R2"
+  "1000,275000,0.000001,100000,200000,R3"
+  "1000,300000,0.000001,100000,200000,R2"
+)
+
+IS_SIMULATED_CONFIG_EXCLUDED() {
+  local CANDIDATE_CONFIG="$1,$2,$3,$4,$5,$6"
+  local EXCLUDED_CONFIG
+  for EXCLUDED_CONFIG in "${EXCLUDED_SIMULATED_CONFIGS[@]}"; do
+    [[ "$CANDIDATE_CONFIG" == "$EXCLUDED_CONFIG" ]] && return 0
+  done
+  return 1
+}
+
+# Method-specific options (passed through)
+ASTER_OPTS=""
+ASTER_BIN=""
+ASTRAL_OPTS=""
+ASTRALX_OPTS_LIST_RAW=""
+ASTRAL_XMS=""
+ASTRAL_XMX=""
+TREEQMC_OPTS=""
+WQFM_OPTS=""
+SUPERTRIPLETS_OPTS=""
+TMC_OPTS=""
+
+# Permit the exclusion predicate and uppercase configuration array to be loaded
+# by the isolated regression test without executing a simulated-data sweep.
+if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
+  return 0
+fi
+
+print_help() {
+  cat <<EOF
+run-bulk-simulated.sh
+
+Runs sim.sh and test-astralx-simulated.sh or test-baseline-simulated.sh for all combinations of parameter lists.
+
+Options:
+  --method, -m      Method to use: astralx (default: astralx)
+  --base-dir, -b    Base directory containing the ASTRAL-X checkout
+  --num-replicates, -n  Number of replicates to run (default: 1)
+  --taxa-list LIST       Comma/space-separated taxon counts (default: 10)
+  --genes-list LIST      Comma/space-separated gene-tree counts (default: 10)
+  --sb-list LIST         Comma/space-separated speciation rates
+  --spmin-list LIST      Comma/space-separated minimum population sizes
+  --spmax-list LIST      Comma/space-separated maximum population sizes
+  --simphy-data-dir DIR  Store/read generated datasets under DIR
+                         (default: \$PHYLOGENY_DATA_DIR/simphy/data)
+  --simphy-outputs-dir DIR
+                         Reproducibility mirror for run outputs and SimPhy commands
+                         (default: \$PHYLOGENY_DATA_DIR/outputs/simphy)
+  --no-outputs-mirror    Do not mirror run outputs
+  --fresh           Pass --fresh to sim.sh and test scripts (recreate outputs)
+  --no-gpu-monitor  Disable GPU-memory sampling
+  --no-notify, -nn  Disable completion notifications
+  --yes, -y         Start without the interactive confirmation
+  --dry-run         Print the run plan (dataset / replicate / setting) and exit
+  --opts, --alg-opts       Extra options for one ASTRAL-X simulated setting
+  --opts-list, --alg-opts-list
+                         Semicolon-separated list of ASTRAL-X option strings to loop over
+  --help, -h        Show this message
+
+Examples:
+  ./scripts/run-bulk-simulated.sh --opts "--search-space S2 -vv"
+  ./scripts/run-bulk-simulated.sh --taxa-list "10,20" --genes-list "10,50" --num-replicates 3
+  ./scripts/run-bulk-simulated.sh --opts-list "--search-space S1 -vv;--search-space S2 -vv;--search-space S3 -vv"
+EOF
+}
+
+# parse args
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --method|-m) METHOD="$2"; shift 2 ;;
+    --base-dir|-b) BASE_DIR="$2"; BASE_DIR_PROVIDED=true; shift 2 ;;
+    --num-replicates|-n) NUM_REPLICATES="$2"; shift 2 ;;
+    --taxa-list) read -r -a T_LIST <<< "${2//,/ }"; shift 2 ;;
+    --genes-list) read -r -a G_LIST <<< "${2//,/ }"; shift 2 ;;
+    --sb-list) read -r -a SB_LIST <<< "${2//,/ }"; shift 2 ;;
+    --spmin-list) read -r -a SPMIN_LIST <<< "${2//,/ }"; shift 2 ;;
+    --spmax-list) read -r -a SPMAX_LIST <<< "${2//,/ }"; shift 2 ;;
+    --simphy-data-dir) SIMPHY_DATA_DIR="$2"; shift 2 ;;
+    --simphy-outputs-dir) SIMPHY_OUTPUTS_DIR="$2"; shift 2 ;;
+    --no-outputs-mirror) OUTPUTS_MIRROR=false; shift ;;
+    --opts|--alg-opts|--astralx-opts) ASTRAL_OPTS="$2"; shift 2 ;;
+    --opts=*|--alg-opts=*|--astralx-opts=*) ASTRAL_OPTS="${1#*=}"; shift ;;
+    --opts-list|--alg-opts-list|--astralx-opts-list) ASTRALX_OPTS_LIST_RAW="$2"; shift 2 ;;
+    --opts-list=*|--alg-opts-list=*|--astralx-opts-list=*) ASTRALX_OPTS_LIST_RAW="${1#*=}"; shift ;;
+    --fresh) FRESH=true; shift ;;
+    --no-gpu-monitor) GPU_MONITOR=false; shift ;;
+    --no-notify|-nn) NO_NOTIFY=true; shift ;;
+    --yes|-y) ASSUME_YES=true; shift ;;
+    --dry-run|--plan-only) DRY_RUN=true; shift ;;
+    --help|-h) print_help; exit 0 ;;
+    *) echo "Unknown option: $1"; print_help; exit 1 ;;
+  esac
+done
+
+# Validate method
+case "$METHOD" in
+  astralx|astral-x|stelar) METHOD="astralx" ;;
+  *)
+    echo "Error: --method must be astralx."
+    exit 1
+    ;;
+esac
+
+# Keep the defaults deliberately small. Larger experiment matrices must be
+# requested explicitly through the list options above.
+for parameter_list in T_LIST G_LIST SB_LIST SPMIN_LIST SPMAX_LIST; do
+  declare -n values="$parameter_list"
+  if [[ ${#values[@]} -eq 0 ]]; then
+    echo "Error: $parameter_list cannot be empty."
+    exit 1
+  fi
+done
+unset -n values
+
+if [[ ! "$NUM_REPLICATES" =~ ^[1-9][0-9]*$ ]]; then
+  echo "Error: --num-replicates must be a positive integer."
+  exit 1
+fi
+
+if [[ "$BASE_DIR_PROVIDED" == true ]]; then
+  SIMPHY_DATA_DIR_FALLBACK="${BASE_DIR%/}/ASTRAL-X/simphy/data"
+else
+  SIMPHY_DATA_DIR_FALLBACK="${ASTRALX_ROOT}/simphy/data"
+fi
+SIMPHY_DATA_DIR="$(astralx_resolve_simphy_data_dir "$SIMPHY_DATA_DIR" "$SIMPHY_DATA_DIR_FALLBACK")"
+
+# -------------------------------
+# execution
+# -------------------------------
+
+# Build base-dir argument if provided
+BASE_DIR_ARGS=()
+if $BASE_DIR_PROVIDED; then
+  BASE_DIR_ARGS=(--base-dir "$BASE_DIR")
+  echo "Base dir: $BASE_DIR"
+else
+  echo "Base dir: (not specified, using repository defaults)"
+fi
+
+# Build fresh argument if provided
+FRESH_ARGS=()
+if $FRESH; then
+  FRESH_ARGS=(--fresh)
+  echo "Fresh:    yes"
+else
+  echo "Fresh:    no"
+fi
+SIM_DATA_ARGS=(--simphy-data-dir "$SIMPHY_DATA_DIR")
+SHARED_TEST_ARGS=("${SIM_DATA_ARGS[@]}")
+if [[ "$OUTPUTS_MIRROR" == false ]]; then
+  SHARED_TEST_ARGS+=(--no-outputs-mirror)
+  echo "Outputs mirror: disabled"
+else
+  SIMPHY_OUTPUTS_DIR="$(astralx_prepare_simphy_outputs_dir "$SIMPHY_OUTPUTS_DIR" "$SIMPHY_DATA_DIR")"
+  SHARED_TEST_ARGS+=(--simphy-outputs-dir "$SIMPHY_OUTPUTS_DIR")
+  echo "Outputs mirror: $SIMPHY_OUTPUTS_DIR"
+fi
+if [[ "$GPU_MONITOR" == false ]]; then
+  SHARED_TEST_ARGS+=(--no-gpu-monitor)
+fi
+if [[ "$NO_NOTIFY" == true ]]; then
+  SHARED_TEST_ARGS+=(--no-notify)
+fi
+echo "Method:   $METHOD"
+echo "Replicates: $NUM_REPLICATES"
+echo "SimPhy data: $SIMPHY_DATA_DIR"
+
+ASTRALX_OPTS_LIST=()
+if [[ -n "$ASTRALX_OPTS_LIST_RAW" ]]; then
+  IFS=';' read -r -a raw_opts_list <<< "$ASTRALX_OPTS_LIST_RAW"
+  for opts in "${raw_opts_list[@]}"; do
+    opts="$(echo "$opts" | sed 's/^ *//;s/ *$//')"
+    [[ -n "$opts" ]] && ASTRALX_OPTS_LIST+=("$opts")
+  done
+fi
+if [[ ${#ASTRALX_OPTS_LIST[@]} -eq 0 ]]; then
+  ASTRALX_OPTS_LIST+=("${ASTRAL_OPTS}")
+fi
+
+# -------------------------------
+# plan: one line per dataset / replicate / setting, then one confirmation
+# -------------------------------
+declare -a PLAN_LINES=()
+declare -a PLAN_DATASETS=()   # "t g sb spmin spmax" per dataset, in run order
+planned_runs=0
+excluded_runs=0
+
+# Collapse sorted replicate numbers into "R1-R4, R6" style ranges.
+format_replicate_ranges() {
+  local -a nums=("$@")
+  local out="" start="" prev=""
+  local n
+  for n in "${nums[@]}"; do
+    if [[ -z "$start" ]]; then
+      start=$n; prev=$n; continue
+    fi
+    if (( n == prev + 1 )); then
+      prev=$n; continue
+    fi
+    out+="${out:+, }R${start}"; (( start != prev )) && out+="-R${prev}"
+    start=$n; prev=$n
+  done
+  if [[ -n "$start" ]]; then
+    out+="${out:+, }R${start}"; (( start != prev )) && out+="-R${prev}"
+  fi
+  printf '%s' "$out"
+}
+
+for t in "${T_LIST[@]}"; do
+  for g in "${G_LIST[@]}"; do
+    for sb in "${SB_LIST[@]}"; do
+      for spmin in "${SPMIN_LIST[@]}"; do
+        for spmax in "${SPMAX_LIST[@]}"; do
+          DATASET_NAME="t_${t}_g_${g}_sb_${sb}_spmin_${spmin}_spmax_${spmax}"
+          PLAN_DATASETS+=("$t $g $sb $spmin $spmax")
+          included=()
+          excluded=()
+          for ((i=1; i<=NUM_REPLICATES; i++)); do
+            if IS_SIMULATED_CONFIG_EXCLUDED "$t" "$g" "$sb" "$spmin" "$spmax" "R$i"; then
+              excluded+=("$i")
+            else
+              included+=("$i")
+            fi
+          done
+          for ASTRALX_OPTS_ITEM in "${ASTRALX_OPTS_LIST[@]}"; do
+            SETTING_NAME="$(build_setting_name_from_opts "$ASTRALX_OPTS_ITEM")"
+            line="  ${DATASET_NAME} / "
+            if [[ ${#included[@]} -gt 0 ]]; then
+              line+="$(format_replicate_ranges "${included[@]}")"
+            else
+              line+="(none)"
+            fi
+            line+=" / ${SETTING_NAME}"
+            if [[ ${#excluded[@]} -gt 0 ]]; then
+              line+="   (excluded: $(format_replicate_ranges "${excluded[@]}"))"
+            fi
+            PLAN_LINES+=("$line")
+            planned_runs=$((planned_runs + ${#included[@]}))
+            excluded_runs=$((excluded_runs + ${#excluded[@]}))
+          done
+        done
+      done
+    done
+  done
+done
+
+echo
+echo "Run plan (${#PLAN_DATASETS[@]} dataset(s), ${NUM_REPLICATES} replicate(s), ${#ASTRALX_OPTS_LIST[@]} setting(s)):"
+echo "  <dataset> / <replicates> / <setting folder under ${METHOD}_outputs>"
+printf '%s\n' "${PLAN_LINES[@]}"
+echo
+echo "Total: ${planned_runs} run(s) to execute, ${excluded_runs} excluded."
+echo "Completed runs are skipped unless --fresh is given."
+
+if [[ "$DRY_RUN" == true ]]; then
+  echo "Dry run; nothing was simulated or executed."
+  exit 0
+fi
+
+if [[ "$ASSUME_YES" == false ]]; then
+  if [[ -t 0 ]]; then
+    read -r -p "Proceed with ${planned_runs} run(s)? [y/N]: " confirm
+    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+      echo "Cancelled; nothing was executed."
+      exit 0
+    fi
+  else
+    echo "Non-interactive session: proceeding without confirmation (pass --yes to silence this note)."
+  fi
+fi
+
+echo
+echo "Starting bulk runs..."
+
+for DATASET_SPEC in "${PLAN_DATASETS[@]}"; do
+  read -r t g sb spmin spmax <<< "$DATASET_SPEC"
+
+  echo ">>> Running: t=$t g=$g sb=$sb spmin=$spmin spmax=$spmax (method=$METHOD)"
+
+  "${ASTRALX_ROOT}/scripts/sim.sh" -rs "$NUM_REPLICATES" "${BASE_DIR_ARGS[@]}" "${SIM_DATA_ARGS[@]}" -t "$t" -g "$g" --sb "$sb" --spmin "$spmin" --spmax "$spmax" "${FRESH_ARGS[@]}"
+
+  # Run replicates
+  for ((i=1; i<=NUM_REPLICATES; i++)); do
+    REPLICATE_NAME="R$i"
+    if IS_SIMULATED_CONFIG_EXCLUDED \
+        "$t" "$g" "$sb" "$spmin" "$spmax" "$REPLICATE_NAME"; then
+      echo "  SKIPPING excluded configuration: t=$t g=$g sb=$sb spmin=$spmin spmax=$spmax replicate=$REPLICATE_NAME"
+      continue
+    fi
+    echo "  Running replicate $REPLICATE_NAME with $METHOD"
+
+    for ASTRALX_OPTS_ITEM in "${ASTRALX_OPTS_LIST[@]}"; do
+      echo "  >>> t_${t}_g_${g}_sb_${sb}_spmin_${spmin}_spmax_${spmax} / ${REPLICATE_NAME} / $(build_setting_name_from_opts "$ASTRALX_OPTS_ITEM")"
+      TEST_CMD=("${ASTRALX_ROOT}/scripts/test-astralx-simulated.sh" -r "$REPLICATE_NAME" "${BASE_DIR_ARGS[@]}" "${SHARED_TEST_ARGS[@]}" -t "$t" -g "$g" --sb "$sb" --spmin "$spmin" --spmax "$spmax" "${FRESH_ARGS[@]}")
+      if [[ -n "$ASTRALX_OPTS_ITEM" ]]; then
+        TEST_CMD+=(--opts "$ASTRALX_OPTS_ITEM")
+      fi
+      "${TEST_CMD[@]}"
+    done
+  done
+done
+
+echo "All runs finished."
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# T_LIST=(1000)
+# G_LIST=(1000 2500 5000 7500 10000)
+# SB_LIST=(0.000001)
+# SPMIN_LIST=(100000)
+# SPMAX_LIST=(200000)
+
+
+
+
+
+
+
+
+
+
+
+
+# echo "Starting bulk runs... phase 2"
+
+# for t in "${T_LIST[@]}"; do
+#   for g in "${G_LIST[@]}"; do
+#     for sb in "${SB_LIST[@]}"; do
+#       for spmin in "${SPMIN_LIST[@]}"; do
+#         for spmax in "${SPMAX_LIST[@]}"; do
+
+#           echo ">>> Running: t=$t g=$g sb=$sb spmin=$spmin spmax=$spmax (method=$METHOD)"
+          
+#           ./sim.sh -rs "$NUM_REPLICATES" "${BASE_DIR_ARGS[@]}" "${SIM_DATA_ARGS[@]}" -t "$t" -g "$g" --sb "$sb" --spmin "$spmin" --spmax "$spmax" "${FRESH_ARGS[@]}"
+          
+#           # Run replicates
+#           for ((i=1; i<=NUM_REPLICATES; i++)); do
+#             REPLICATE_NAME="R$i"
+#             if IS_SIMULATED_CONFIG_EXCLUDED \
+#                 "$t" "$g" "$sb" "$spmin" "$spmax" "$REPLICATE_NAME"; then
+#               echo "  SKIPPING excluded configuration: t=$t g=$g sb=$sb spmin=$spmin spmax=$spmax replicate=$REPLICATE_NAME"
+#               continue
+#             fi
+#             echo "  Running replicate $REPLICATE_NAME with $METHOD"
+            
+#             for ASTRALX_OPTS_ITEM in "${ASTRALX_OPTS_LIST[@]}"; do
+#               TEST_CMD=("${ASTRALX_ROOT}/scripts/test-astralx-simulated.sh" -r "$REPLICATE_NAME" "${BASE_DIR_ARGS[@]}" "${SHARED_TEST_ARGS[@]}" -t "$t" -g "$g" --sb "$sb" --spmin "$spmin" --spmax "$spmax" "${FRESH_ARGS[@]}")
+#               if [[ -n "$ASTRALX_OPTS_ITEM" ]]; then
+#                 TEST_CMD+=(--opts "$ASTRALX_OPTS_ITEM")
+#               fi
+#               "${TEST_CMD[@]}"
+#             done
+#           done
+
+#         done
+#       done
+#     done
+#   done
+# done
+
+# echo "All runs finished."

@@ -71,8 +71,8 @@ mkdir -p "$TMP_DIR"
 # ── build phase ───────────────────────────────────────────────────────────────
 if [[ $SKIP_BUILD -eq 0 ]]; then
     echo -e "${BOLD}Building ASTRAL-X...${NC}"
-    bash "${ROOT_DIR}/build.sh"
-    bash "${ROOT_DIR}/build_native.sh" 2>/dev/null || true
+    bash "${ROOT_DIR}/scripts/build.sh"
+    bash "${ROOT_DIR}/scripts/build_native.sh" 2>/dev/null || true
 
     echo -e "${BOLD}Building ASTRAL-MP...${NC}"
     bash "${ASTRALMP_ROOT}/ASTRAL/compile_astral.sh"

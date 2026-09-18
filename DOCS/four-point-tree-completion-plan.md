@@ -585,7 +585,7 @@ In ASTRAL-X: set `--completion-method distance`.
 
 After the new completer is wired in, run the full ASTRAL-X test suite:
 ```bash
-./build.sh && cd test && python verify_weights.py
+./scripts/build.sh && cd test && python verify_weights.py
 ```
 All 13 test cases (TC1–TC13) should still pass. Since weight scoring uses
 `originalTrees` (pre-completion), changes to the completer do not affect

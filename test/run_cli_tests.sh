@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TEST_CLASSES="$(mktemp -d "${TMPDIR:-/tmp}/astralx-cli-tests.XXXXXX")"
 trap 'rm -rf "$TEST_CLASSES"' EXIT
 
-source "${ROOT}/experiment-setting-name.sh"
+source "${ROOT}/scripts/experiment-setting-name.sh"
 [[ "$(build_setting_name_from_opts '--search-space S1 --intersection-method I2 -vv')" == \
    "search-space_S1__intersection-method_I2" ]]
 [[ "$(build_setting_name_from_opts '--search-space complete-full --weight-intersection-method prefix-sum --cpu')" == \
@@ -14,7 +14,7 @@ source "${ROOT}/experiment-setting-name.sh"
    "search-mode_local__intersection-method_I1__threads_8" ]]
 [[ "$(build_setting_name_from_opts '-vv --quiet')" == "default" ]]
 
-"${ROOT}/build.sh" >/dev/null
+"${ROOT}/scripts/build.sh" >/dev/null
 javac -cp "${ROOT}/build" -d "$TEST_CLASSES" \
   "${ROOT}/test/CliPresetsTest.java" \
   "${ROOT}/test/PackedSimilarityParityTest.java" \
@@ -189,9 +189,9 @@ SCORE_ONLY_OUTPUT="$(java -cp "${ROOT}/build" astralx.Main --cpu -q \
 # intersection, with exactly one taxon name per output line.
 TAXA_UNION="${TEST_CLASSES}/taxa-union.txt"
 TAXA_INTERSECTION="${TEST_CLASSES}/taxa-intersection.txt"
-"${ROOT}/extract-taxa.sh" --no-build \
+"${ROOT}/scripts/extract-taxa.sh" --no-build \
   -i "${ROOT}/test/input/taxa_extract_multi.tre" -o "$TAXA_UNION" >/dev/null
-"${ROOT}/extract-taxa.sh" --no-build \
+"${ROOT}/scripts/extract-taxa.sh" --no-build \
   -i "${ROOT}/test/input/taxa_extract_multi.tre" -o "$TAXA_INTERSECTION" \
   --intersection >/dev/null
 printf 'A\nB\nC\nD\nE\n' > "${TEST_CLASSES}/expected-union.txt"

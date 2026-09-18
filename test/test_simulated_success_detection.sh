@@ -16,7 +16,7 @@ COMMON=(--simphy-data-dir "$DATA" -t 4 -g 1 -r R1
   --opts '--search-space S1 --cpu -q'
   --no-time-monitor --no-gpu-monitor --no-notify)
 
-"$ROOT/test-astralx-simulated.sh" "${COMMON[@]}" >/dev/null
+"$ROOT/scripts/test-astralx-simulated.sh" "${COMMON[@]}" >/dev/null
 RESULTS_DIR=$(find "$RUN_DIR/astralx_outputs" -mindepth 1 -maxdepth 1 -type d)
 OUTPUT="$RESULTS_DIR/out-astralx.tre"
 SIDE="$RESULTS_DIR/out-astralx_stats.csv"
@@ -32,17 +32,17 @@ diff -r "$RESULTS_DIR" "$MIRROR_LEAF" >/dev/null
 # A failed sidecar plus a stale tree must never be accepted as completed.
 rm -f "$SUCCESS"
 sed -i '2s/,0$/,1/' "$SIDE"
-rerun_log=$("$ROOT/test-astralx-simulated.sh" "${COMMON[@]}" 2>&1)
+rerun_log=$("$ROOT/scripts/test-astralx-simulated.sh" "${COMMON[@]}" 2>&1)
 [[ "$rerun_log" == *"Previous statistics exist but no successful output was recorded; rerunning."* ]]
 [[ -s "$OUTPUT" && -s "$SUCCESS" ]]
 [[ "$(awk -F, 'NR==2 {print $9}' "$SIDE")" == "0" ]]
 
-skip_log=$("$ROOT/test-astralx-simulated.sh" "${COMMON[@]}" 2>&1)
+skip_log=$("$ROOT/scripts/test-astralx-simulated.sh" "${COMMON[@]}" 2>&1)
 [[ "$skip_log" == *"SKIPPING: successful output already exists"* ]]
 
 # The stats collector reads the same data tree the run wrote to.
 COMBINED="${TMP}/combined.csv"
-"${ROOT}/collect-stats-simulated.sh" --simphy-data-dir "$DATA" --out "$COMBINED" >/dev/null
+"${ROOT}/scripts/collect-stats-simulated.sh" --simphy-data-dir "$DATA" --out "$COMBINED" >/dev/null
 grep -q 'optimal-quartet-score' "$COMBINED"
 ! grep -qi 'triplet' "$COMBINED"
 [[ "$(awk -F, 'NR==1 {print $10}' "$COMBINED")" == "optimal-quartet-score" ]]

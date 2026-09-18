@@ -92,13 +92,13 @@ loading a dataset.
 
 ## Taxa extraction and taxon-restricted analysis
 
-`extract-taxa.sh` uses the same Newick leaf-token scanner as ASTRAL-X. It writes
+`scripts/extract-taxa.sh` uses the same Newick leaf-token scanner as ASTRAL-X. It writes
 only taxon names, sorted deterministically with one name per line. For a file
 containing multiple Newick trees (one tree per non-empty line), the default is
 the union of their taxa:
 
 ```bash
-./extract-taxa.sh \
+./scripts/extract-taxa.sh \
   --input /path/to/trees.nwk \
   --output /path/to/taxa.txt
 ```
@@ -112,7 +112,7 @@ the gene-tree union taxon set. To score an induced common subset instead, supply
 a one-name-per-line allow-list:
 
 ```bash
-./run.sh \
+./astralx \
   --input /path/to/gene_trees.nwk \
   --score-species-tree /path/to/species_tree.nwk \
   --taxa-file /path/to/taxa.txt \
@@ -133,7 +133,7 @@ placement.
 The same allow-list can restrict species-tree inference:
 
 ```bash
-./run.sh \
+./astralx \
   --input /path/to/gene_trees.nwk \
   --taxa-file /path/to/taxa.txt \
   --output /path/to/species_tree.nwk \
@@ -317,7 +317,7 @@ The portable builder is the single local entry point for compilation, packaging,
 smoke testing, checksumming, and manifest generation:
 
 ```bash
-./build_portable.sh --version 1.0.0
+./scripts/build_portable.sh --version 1.0.0
 ```
 
 The newly built application and release files are written under `dist/1.0.0/`.
@@ -371,6 +371,31 @@ version used by the bundled ELF files, making the release baseline auditable.
 This section is for contributors working from a source checkout. Portable-release
 users do not need these development dependencies.
 
+## Repository layout
+
+The repository root deliberately holds only the `./astralx` launcher, this
+`README.md`, the research command sheet `cmd.txt`, and the top-level
+directories:
+
+| Path | Contents |
+|---|---|
+| `astralx` | Developer launcher; forwards every argument to `scripts/run.sh`. |
+| `src/` | Java sources (`src/astralx`) and CUDA kernels (`src/native`). |
+| `scripts/` | Every build, run, simulation, benchmark, and upload script, plus the Python helpers (`rf.py`, `clean.py`, `root_by_outgroups.py`, `analyze-dataset.py`) and `requirements-dev.txt`. |
+| `example/` | Bundled inputs: `all_gt_37.tre`, `all_gt_48.tre`, `all_gt_200.tre` with their reference trees `true_37.tre`, `true_48.tre`, `true_200.tre`, and the sample output `out_astralx_37.tre`. |
+| `test/` | CLI contract tests, regression suite, and script-level tests. |
+| `DOCS/`, `DESIGN/` | Design notes and reproducibility documentation. |
+| `packaging/` | The portable Unix launcher installed into release images. |
+| `simphy/` | Bundled SimPhy executable and simulator driver. |
+| `build/`, `native/`, `dist/`, `.venv/`, `crash-logs/` | Generated: compiled classes, CUDA libraries, portable releases, the Python environment, and crash reports. All but `native/` are git-ignored. |
+
+Every script under `scripts/` locates the repository root from its own
+location, so `./scripts/<name>.sh` works from the root and by absolute path from
+anywhere else. When ASTRAL-X aborts with a Java exception or memory failure it
+writes a report to `crash-logs/` inside the working directory (the developer
+launcher pins this to the repository's `crash-logs/`, including HotSpot
+`hs_err`-style files); that directory is git-ignored.
+
 ## Development requirements
 
 The development scripts target Linux and expect:
@@ -399,22 +424,22 @@ sudo apt install openjdk-21-jdk python3 python3-venv time curl
 From the repository root, run:
 
 ```bash
-./setup_dev.sh
+./scripts/setup_dev.sh
 ```
 
 The setup script checks the machine, creates `.venv`, installs
-`requirements-dev.txt`, builds ASTRAL-X, builds the CUDA libraries when `nvcc`
+`scripts/requirements-dev.txt`, builds ASTRAL-X, builds the CUDA libraries when `nvcc`
 is available, and runs the CPU test suite. It never installs system packages or
 uses `sudo`. Useful variants are:
 
 ```bash
-./setup_dev.sh --cpu-only       # explicitly skip the CUDA build
-./setup_dev.sh --no-tests       # prepare and build without running tests
-./setup_dev.sh --check          # verify an existing setup without changing it
+./scripts/setup_dev.sh --cpu-only       # explicitly skip the CUDA build
+./scripts/setup_dev.sh --no-tests       # prepare and build without running tests
+./scripts/setup_dev.sh --check          # verify an existing setup without changing it
 ```
 
 The repository scripts automatically use `.venv/bin/python`, so activating the
-virtual environment is optional. Run `./setup_dev.sh --help` for every setup
+virtual environment is optional. Run `./scripts/setup_dev.sh --help` for every setup
 option.
 
 ## Build and run from source
@@ -422,15 +447,16 @@ option.
 Build Java only, or build the optional CUDA libraries separately:
 
 ```bash
-./build.sh
-./build_native.sh
+./scripts/build.sh
+./scripts/build_native.sh
 ```
 
-`run.sh` builds stale sources automatically and uses CUDA with safe CPU fallback
-by default:
+The `./astralx` launcher at the repository root forwards to `scripts/run.sh`.
+It builds stale sources automatically and uses CUDA with safe CPU fallback by
+default:
 
 ```bash
-./run.sh -i gene_trees.tre -o species_tree.tre --search-space S1
+./astralx -i gene_trees.tre -o species_tree.tre --search-space S1
 ```
 
 Use `--cpu` for a CPU-only run or `--no-build` when the current build should be
@@ -443,7 +469,7 @@ The monitoring wrapper records elapsed time, peak CPU memory, optional GPU
 memory, exit status, and RF distance when a true tree is provided:
 
 ```bash
-./run-astralx-with-monitor.sh \
+./scripts/run-astralx-with-monitor.sh \
   -i gene_trees.tre \
   -o results/species_tree.tre \
   --search-space S2 \
@@ -461,8 +487,8 @@ notification channel, or keep `--no-notify` for local development.
 The bundled SimPhy workflow can create a small dataset and run ASTRAL-X on it:
 
 ```bash
-./sim.sh -t 10 -g 10 -rs 1 -r R1
-./test-astralx-simulated.sh \
+./scripts/sim.sh -t 10 -g 10 -rs 1 -r R1
+./scripts/test-astralx-simulated.sh \
   -t 10 -g 10 -r R1 \
   --opts "--cpu --search-space S1" \
   --no-notify
@@ -471,7 +497,7 @@ The bundled SimPhy workflow can create a small dataset and run ASTRAL-X on it:
 For a controlled parameter sweep, pass all experiment sizes explicitly:
 
 ```bash
-./run-bulk-simulated.sh \
+./scripts/run-bulk-simulated.sh \
   --taxa-list "10,20" \
   --genes-list "10,50" \
   --num-replicates 2 \
@@ -484,7 +510,7 @@ The bulk script intentionally defaults to one small 10-taxon, 10-gene run. Use
 `--fresh` only when existing simulation outputs should be regenerated.
 
 Individual replicates that must never be inferred are listed in
-`EXCLUDED_SIMULATED_CONFIGS` near the top of `run-bulk-simulated.sh`, as exact
+`EXCLUDED_SIMULATED_CONFIGS` near the top of `scripts/run-bulk-simulated.sh`, as exact
 `TAXA,GENE_TREES,SB,SPMIN,SPMAX,REPLICATE` tuples. `sim.sh` still prepares the
 surrounding dataset batch; only the listed per-replicate inference is skipped,
 and the run plan reports it inline (`… / R3-R4 / … (excluded: R1-R2)`) so the
@@ -514,10 +540,10 @@ only result artifacts and the SimPhy `.command`/`.params` files. For the normal
 trees, databases, ZIPs, and `stat-sim.csv` are explicitly refused.
 
 ```bash
-./sync-simulated-outputs.sh --dry-run       # preview a back-fill
-./sync-simulated-outputs.sh                 # mirror older results
-./upload-bulk-simulated-outputs.sh --dry-run
-./upload-bulk-simulated-outputs.sh --sync   # refresh, confirm, then publish
+./scripts/sync-simulated-outputs.sh --dry-run       # preview a back-fill
+./scripts/sync-simulated-outputs.sh                 # mirror older results
+./scripts/upload-bulk-simulated-outputs.sh --dry-run
+./scripts/upload-bulk-simulated-outputs.sh --sync   # refresh, confirm, then publish
 ```
 
 Use `--simphy-outputs-dir` to override the mirror root or
@@ -527,11 +553,11 @@ for the layout, safeguards, and reproduction procedure.
 
 ## Standard-dataset experiments
 
-`run-bulk-standard.sh` works with the repository's configured benchmark layout.
+`scripts/run-bulk-standard.sh` works with the repository's configured benchmark layout.
 Provide the dataset location and select ASTRAL-X explicitly:
 
 ```bash
-./run-bulk-standard.sh \
+./scripts/run-bulk-standard.sh \
   --base-dir /path/to/research \
   --dataset-dir /path/to/datasets/standard \
   --method astralx \
@@ -541,7 +567,7 @@ Provide the dataset location and select ASTRAL-X explicitly:
 ```
 
 The configured folders expect their original benchmark subdirectory and file
-names; inspect `./run-bulk-standard.sh --help` before launching a sweep.
+names; inspect `./scripts/run-bulk-standard.sh --help` before launching a sweep.
 ASTRAL-X-only runs need no baseline installation. The ASTER, ASTRAL, TreeQMC,
 wQFMtree, SuperTriplets, and TMC binaries are required only when their
 corresponding methods are selected.
@@ -549,17 +575,17 @@ corresponding methods are selected.
 Combine generated statistics with:
 
 ```bash
-./collect-stats-simulated.sh --help
-./collect-stats-standard.sh --help
+./scripts/collect-stats-simulated.sh --help
+./scripts/collect-stats-standard.sh --help
 ```
 
 To remove one method's bulk-standard statistics before collecting again, first
 preview and then confirm the cleanup:
 
 ```bash
-./clear-bulk-standard.sh --method astralx --dry-run
-./clear-bulk-standard.sh --method astralx --yes
-./collect-stats-standard.sh
+./scripts/clear-bulk-standard.sh --method astralx --dry-run
+./scripts/clear-bulk-standard.sh --method astralx --yes
+./scripts/collect-stats-standard.sh
 ```
 
 The cleaner preserves output trees and logs by default. Add `--all-results` to
@@ -572,7 +598,7 @@ example, this runs every selected replicate and setting once with true gene
 trees and once with estimated gene trees:
 
 ```bash
-./run-a10k.sh \
+./scripts/run-a10k.sh \
   --data-dir /path/to/10k-astral-dataset \
   --tree-type "true;estimated" \
   --opts "--search-space S1 --intersection-method I1"
@@ -582,8 +608,8 @@ To clear every result produced by the A10K runner, including all settings and
 both tree types across every replicate, preview the exact targets first:
 
 ```bash
-./clear-a10k.sh --data-dir /path/to/10k-astral-dataset --dry-run
-./clear-a10k.sh --data-dir /path/to/10k-astral-dataset --yes
+./scripts/clear-a10k.sh --data-dir /path/to/10k-astral-dataset --dry-run
+./scripts/clear-a10k.sh --data-dir /path/to/10k-astral-dataset --yes
 ```
 
 This removes only `10k-simphy/R*/astralx_outputs` and the A10K merged scores
@@ -600,14 +626,14 @@ The merged scores CSV from `collect-scores-a10k.sh` and the rooting command for
 estimated gene trees are mirrored as well.
 
 ```bash
-./sync-a10k-outputs.sh --data-dir data/10k-astral-dataset --dry-run   # preview a back-fill
-./sync-a10k-outputs.sh --data-dir data/10k-astral-dataset             # mirror older results
-./upload-a10k-outputs.sh --data-dir data/10k-astral-dataset --dry-run
-./upload-a10k-outputs.sh --data-dir data/10k-astral-dataset --sync    # refresh, confirm, then publish
+./scripts/sync-a10k-outputs.sh --data-dir data/10k-astral-dataset --dry-run   # preview a back-fill
+./scripts/sync-a10k-outputs.sh --data-dir data/10k-astral-dataset             # mirror older results
+./scripts/upload-a10k-outputs.sh --data-dir data/10k-astral-dataset --dry-run
+./scripts/upload-a10k-outputs.sh --data-dir data/10k-astral-dataset --sync    # refresh, confirm, then publish
 ```
 
 Use `--outputs-dir` to override the mirror root or `--no-outputs-mirror` to
-skip it for one run; `clear-a10k.sh` keeps the mirror unless `--include-mirror`
+skip it for one run; `scripts/clear-a10k.sh` keeps the mirror unless `--include-mirror`
 is given. See
 [`DOCS/a10k-outputs-reproducibility.md`](DOCS/a10k-outputs-reproducibility.md)
 for the layout, safeguards, and reproduction procedure.
@@ -621,7 +647,6 @@ bash test/run_cli_tests.sh
 bash test/run_tests.sh --cpu
 ```
 
-All primary developer launchers resolve their resources from the repository
-location, so they can be invoked by absolute path from another working
-directory. Set `ASTRALX_PYTHON` only when an interpreter other than the managed
+All developer scripts resolve their resources from the repository location, so
+they can be invoked by absolute path from another working directory. Set `ASTRALX_PYTHON` only when an interpreter other than the managed
 `.venv` should be used.

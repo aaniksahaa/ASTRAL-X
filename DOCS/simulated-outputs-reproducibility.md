@@ -154,7 +154,7 @@ or containing the data directory is refused.
 - **Command record** (`out-astralx.command`) contains, as `#` comment lines:
   date, host, ASTRAL-X root, git commit (marked when the tree has uncommitted
   changes), input, output, reference tree, the wrapper invocation; then one
-  executable line `cd <root> && ./run.sh --input ... --output ... <flags>`;
+  executable line `cd <root> && ./astralx --input ... --output ... <flags>`;
   then `exit_code` and `running_time`. For simulated runs, a trailing block
   adds dataset, replicate, setting, true tree, RF rate, the exact
   `test-astralx-simulated.sh` invocation, and the wrapper command. All values
@@ -180,19 +180,19 @@ or containing the data directory is refused.
 
 ```bash
 # normal experiments: mirror happens automatically
-./run-bulk-simulated.sh --taxa-list 1000 --genes-list 1000 -n 5 \
+./scripts/run-bulk-simulated.sh --taxa-list 1000 --genes-list 1000 -n 5 \
   --opts-list "--search-space S1 --intersection-method I1;" --no-notify
-./run-bulk-simulated.sh ... --dry-run          # plan only
-./run-bulk-simulated.sh ... --yes              # no prompt
+./scripts/run-bulk-simulated.sh ... --dry-run          # plan only
+./scripts/run-bulk-simulated.sh ... --yes              # no prompt
 
 # back-fill results produced before the mirror existed
-./sync-simulated-outputs.sh --dry-run
-./sync-simulated-outputs.sh
+./scripts/sync-simulated-outputs.sh --dry-run
+./scripts/sync-simulated-outputs.sh
 
 # publish
-./upload-bulk-simulated-outputs.sh --dry-run
-./upload-bulk-simulated-outputs.sh --sync
-./upload-bulk-simulated-outputs.sh --methods astralx --min-taxa 1000
+./scripts/upload-bulk-simulated-outputs.sh --dry-run
+./scripts/upload-bulk-simulated-outputs.sh --sync
+./scripts/upload-bulk-simulated-outputs.sh --methods astralx --min-taxa 1000
 
 # fetch a published mirror (generic folder downloader)
 ~/utils/hf-data-transfer/hf_download.sh --repo-id imAniksahA/blab \
@@ -202,7 +202,7 @@ or containing the data directory is refused.
 
 Reproducing a published result: run the SimPhy line in `<dataset>.command`
 (and the `_incomplete.command` line if applicable) to regenerate the data, then
-run the `cd ... && ./run.sh ...` line from `out-astralx.command` at the recorded
+run the `cd ... && ./astralx ...` line from `out-astralx.command` at the recorded
 git commit.
 
 ## 7. Tests

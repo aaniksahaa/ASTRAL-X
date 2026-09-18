@@ -25,7 +25,7 @@ SCRIPT_DIR   = os.path.dirname(os.path.abspath(__file__))
 ASTRALX_ROOT = os.path.normpath(os.path.join(SCRIPT_DIR, "..", ".."))
 ASTRALMP_DIR = os.path.join(ASTRALX_ROOT, "astral-my")
 
-ASTRALX_RUN  = os.path.join(ASTRALX_ROOT, "run.sh")
+ASTRALX_RUN  = os.path.join(ASTRALX_ROOT, "astralx")
 ASTRALMP_DEV = os.path.join(ASTRALMP_DIR, "dev.sh")
 
 

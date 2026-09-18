@@ -105,7 +105,7 @@ root equal to, inside, or containing the data directory is refused.
 | `scripts/a10k-outputs-dir.sh` | Shared helper: default-root rule, guards, results-path parsing, forbidden-file detection, leaf mirroring, rooting-record / provenance / merged-CSV copying. Sources `scripts/simphy-outputs-dir.sh` for the shared primitives. |
 | `scripts/simphy-outputs-dir.sh` | Provides `astralx_mirror_directory_atomic` (temp dir + rename), used by both mirrors. |
 | `run-a10k.sh` | Mirrors each results leaf after every run (also failed runs) and on the "already completed" skip path (free back-fill). Captures the wrapper output to `.astralx_run.log`. Appends the A10K context to the command record. Writes `estimatedgenetrees.rooted.command` when it roots estimated gene trees. Flags `--outputs-dir`, `--no-outputs-mirror`. |
-| `run-astralx-with-monitor.sh` | Unchanged: writes `out-astralx.command` (exact `run.sh` line, git commit, wrapper invocation) before the run, appends exit code and running time after. |
+| `run-astralx-with-monitor.sh` | Unchanged: writes `out-astralx.command` (exact `./astralx` line, git commit, wrapper invocation) before the run, appends exit code and running time after. |
 | `collect-scores-a10k.sh` | Copies the merged CSV into the mirror root. Flags `--outputs-dir`, `--no-outputs-mirror`. |
 | `sync-a10k-outputs.sh` | Back-fills or refreshes the whole mirror from the data tree. Flags `--data-dir` (required), `--outputs-dir`, `--methods`, `--dry-run`, `--quiet`. |
 | `upload-a10k-outputs.sh` | Uploads each `<method>_outputs` directory as a folder plus the root-level files. Flags `--data-dir` / `--outputs-dir`, `--no-sync` / `--sync` (with `--data-dir` the mirror is refreshed first by default), `--methods`, `--all-methods`, `--dry-run`, `--yes`, `--repo-id`, `--remote-dir`, `--python`. |
@@ -123,7 +123,7 @@ root equal to, inside, or containing the data directory is refused.
   `10k-simphy/<R>/<method>_outputs/<tree_type>/<setting>` are mirrored.
 - **Command record** (`out-astralx.command`) contains the wrapper's block
   (date, host, ASTRAL-X root, git commit, input, output, wrapper invocation,
-  the executable `cd <root> && ./run.sh ...` line, exit code, running time)
+  the executable `cd <root> && ./astralx ...` line, exit code, running time)
   followed by an A10K block: data directory, replicate, tree type, setting,
   gene-tree file, true tree, RF rate, run exit code, the rooting command (for
   estimated gene trees), the exact `run-a10k.sh` invocation, and the wrapper
@@ -148,26 +148,26 @@ root equal to, inside, or containing the data directory is refused.
 
 ```bash
 # normal experiments: mirror happens automatically
-./run-a10k.sh --data-dir data/10k-astral-dataset --tree-type "true;estimated" \
+./scripts/run-a10k.sh --data-dir data/10k-astral-dataset --tree-type "true;estimated" \
   --opts "--search-space S1 --intersection-method I1"
-./run-a10k.sh --data-dir data/10k-astral-dataset ... --outputs-dir /elsewhere/10k-outputs
-./run-a10k.sh --data-dir data/10k-astral-dataset ... --no-outputs-mirror
+./scripts/run-a10k.sh --data-dir data/10k-astral-dataset ... --outputs-dir /elsewhere/10k-outputs
+./scripts/run-a10k.sh --data-dir data/10k-astral-dataset ... --no-outputs-mirror
 
 # merged scores (also copied into the mirror)
-./collect-scores-a10k.sh --data-dir data/10k-astral-dataset --start-rep 1 --end-rep 20
+./scripts/collect-scores-a10k.sh --data-dir data/10k-astral-dataset --start-rep 1 --end-rep 20
 
 # back-fill results produced before the mirror existed
-./sync-a10k-outputs.sh --data-dir data/10k-astral-dataset --dry-run
-./sync-a10k-outputs.sh --data-dir data/10k-astral-dataset
+./scripts/sync-a10k-outputs.sh --data-dir data/10k-astral-dataset --dry-run
+./scripts/sync-a10k-outputs.sh --data-dir data/10k-astral-dataset
 
 # publish
-./upload-a10k-outputs.sh --data-dir data/10k-astral-dataset --dry-run
-./upload-a10k-outputs.sh --data-dir data/10k-astral-dataset          # refreshes the mirror first
-./upload-a10k-outputs.sh --data-dir data/10k-astral-dataset --no-sync
+./scripts/upload-a10k-outputs.sh --data-dir data/10k-astral-dataset --dry-run
+./scripts/upload-a10k-outputs.sh --data-dir data/10k-astral-dataset          # refreshes the mirror first
+./scripts/upload-a10k-outputs.sh --data-dir data/10k-astral-dataset --no-sync
 
 # clear results; the mirror is kept unless asked
-./clear-a10k.sh --data-dir data/10k-astral-dataset --dry-run
-./clear-a10k.sh --data-dir data/10k-astral-dataset --yes --include-mirror
+./scripts/clear-a10k.sh --data-dir data/10k-astral-dataset --dry-run
+./scripts/clear-a10k.sh --data-dir data/10k-astral-dataset --yes --include-mirror
 
 # fetch a published mirror (generic folder downloader)
 ~/utils/hf-data-transfer/hf_download.sh --repo-id imAniksahA/blab \
@@ -177,7 +177,7 @@ root equal to, inside, or containing the data directory is refused.
 
 Reproducing a published result: obtain the A10K dataset (see the mirrored
 provenance file when present), run the `rooting cmd` line from the command
-record for estimated gene trees, then run the `cd ... && ./run.sh ...` line
+record for estimated gene trees, then run the `cd ... && ./astralx ...` line
 from `out-astralx.command` at the recorded git commit.
 
 ## 7. Tests

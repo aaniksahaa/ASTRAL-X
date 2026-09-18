@@ -26,7 +26,7 @@ import re
 import subprocess
 import os
 
-RF_PY = os.path.join(os.path.dirname(__file__), '..', 'rf.py')
+RF_PY = os.path.join(os.path.dirname(__file__), '..', 'scripts', 'rf.py')
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────

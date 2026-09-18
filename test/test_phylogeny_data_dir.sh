@@ -51,14 +51,14 @@ DS="t_1_g_1_sb_0.000001_spmin_500000_spmax_1500000"
 DEFAULT_DATASET="${DEFAULT_BASE}/simphy/data/${DS}/R1"
 mkdir -p "$DEFAULT_DATASET"
 : > "${DEFAULT_DATASET}/stat-sim.csv"
-PHYLOGENY_DATA_DIR="$DEFAULT_BASE" "${ROOT}/sim.sh" -t 1 -g 1 >"${WORK}/default-sim.out"
+PHYLOGENY_DATA_DIR="$DEFAULT_BASE" "${ROOT}/scripts/sim.sh" -t 1 -g 1 >"${WORK}/default-sim.out"
 grep -Fq "SKIPPING: ${DEFAULT_DATASET}/stat-sim.csv" "${WORK}/default-sim.out" || \
   fail "sim.sh did not use the environment-derived checkpoint path: $(cat "${WORK}/default-sim.out")"
 
 OVERRIDE_DATASET="${OVERRIDE}/t_2_g_3_sb_0.000001_spmin_500000_spmax_1500000/R1"
 mkdir -p "$OVERRIDE_DATASET"
 : > "${OVERRIDE_DATASET}/stat-sim.csv"
-PHYLOGENY_DATA_DIR="$DEFAULT_BASE" "${ROOT}/sim.sh" -t 2 -g 3 --simphy-data-dir "$OVERRIDE" \
+PHYLOGENY_DATA_DIR="$DEFAULT_BASE" "${ROOT}/scripts/sim.sh" -t 2 -g 3 --simphy-data-dir "$OVERRIDE" \
   >"${WORK}/override-sim.out"
 grep -Fq "SKIPPING: ${OVERRIDE_DATASET}/stat-sim.csv" "${WORK}/override-sim.out" || \
   fail "sim.sh did not honor the explicit override"
@@ -68,7 +68,7 @@ CHECKOUT_SIMPHY="${WORK}/checkout/simphy"
 FALLBACK_DATASET="${CHECKOUT_SIMPHY}/data/t_4_g_5_sb_0.000001_spmin_500000_spmax_1500000/R1"
 mkdir -p "$FALLBACK_DATASET"
 : > "${FALLBACK_DATASET}/stat-sim.csv"
-env -u PHYLOGENY_DATA_DIR "${ROOT}/sim.sh" -t 4 -g 5 --simphy-dir "$CHECKOUT_SIMPHY" \
+env -u PHYLOGENY_DATA_DIR "${ROOT}/scripts/sim.sh" -t 4 -g 5 --simphy-dir "$CHECKOUT_SIMPHY" \
   >"${WORK}/fallback-sim.out"
 grep -Fq "SKIPPING: ${FALLBACK_DATASET}/stat-sim.csv" "${WORK}/fallback-sim.out" || \
   fail "sim.sh did not fall back to <simphy-dir>/data"
@@ -77,7 +77,7 @@ grep -Fq "SKIPPING: ${FALLBACK_DATASET}/stat-sim.csv" "${WORK}/fallback-sim.out"
 # The incomplete variant must land in the same environment-derived tree.
 printf '((a,b),(c,d));\n((a,c),(b,d));\n' > "${DEFAULT_DATASET}/all_gt.tre"
 printf '((a,b),(c,d));\n' > "${DEFAULT_DATASET}/s_tree.trees"
-PHYLOGENY_DATA_DIR="$DEFAULT_BASE" "${ROOT}/sim_incomplete.sh" -t 1 -g 1 -rs 1 --min-keep 3 \
+PHYLOGENY_DATA_DIR="$DEFAULT_BASE" "${ROOT}/scripts/sim_incomplete.sh" -t 1 -g 1 -rs 1 --min-keep 3 \
   >"${WORK}/incomplete.out" 2>&1 || fail "sim_incomplete.sh failed: $(cat "${WORK}/incomplete.out")"
 INC_DIR="${DEFAULT_BASE}/simphy/data/${DS}_incomplete"
 [[ -s "${INC_DIR}/R1/all_gt.tre" ]] || fail "incomplete trees were not written to the shared tree"
@@ -85,28 +85,28 @@ INC_DIR="${DEFAULT_BASE}/simphy/data/${DS}_incomplete"
 
 # ------------------------------------------------- collect / download / up ---
 STATS_BASE="${WORK}/stats root"
-PHYLOGENY_DATA_DIR="$STATS_BASE" "${ROOT}/collect-stats-simulated.sh" \
+PHYLOGENY_DATA_DIR="$STATS_BASE" "${ROOT}/scripts/collect-stats-simulated.sh" \
   --out "${WORK}/unused.csv" >"${WORK}/stats.out"
 [[ -d "${STATS_BASE}/simphy/data" ]] || fail "stats collector did not use the default directory"
 grep -q "No stat files" "${WORK}/stats.out" || fail "empty stats directory was not handled"
 
 DOWNLOAD_BASE="${WORK}/download root"
-PHYLOGENY_DATA_DIR="$DOWNLOAD_BASE" "${ROOT}/download-bulk-simulated.sh" \
+PHYLOGENY_DATA_DIR="$DOWNLOAD_BASE" "${ROOT}/scripts/download-bulk-simulated.sh" \
   --dry-run --download-script /bin/true --taxa-list 1 --gene-trees-list 1 \
   --sb-list 0.1 --spmin-list 1 --spmax-list 1 >"${WORK}/download.out" 2>&1 || \
   fail "download tool failed: $(cat "${WORK}/download.out")"
 [[ -d "${DOWNLOAD_BASE}/simphy/data" ]] || fail "download tool did not use the default directory"
 
 UPLOAD_BASE="${WORK}/upload root"
-PHYLOGENY_DATA_DIR="$UPLOAD_BASE" "${ROOT}/upload-bulk-simulated.sh" \
+PHYLOGENY_DATA_DIR="$UPLOAD_BASE" "${ROOT}/scripts/upload-bulk-simulated.sh" \
   --dry-run --uploader /bin/true --python /bin/true >"${WORK}/upload.out" 2>&1 || true
 [[ -d "${UPLOAD_BASE}/simphy/data" ]] || fail "upload tool did not use the default directory"
 
 OUTPUTS_BASE="${WORK}/outputs root"
-PHYLOGENY_DATA_DIR="$OUTPUTS_BASE" "${ROOT}/upload-bulk-simulated-outputs.sh" \
+PHYLOGENY_DATA_DIR="$OUTPUTS_BASE" "${ROOT}/scripts/upload-bulk-simulated-outputs.sh" \
   --dry-run --uploader /bin/true --python /bin/true >"${WORK}/upload-outputs.out" 2>&1
 [[ -d "${OUTPUTS_BASE}/outputs/simphy" ]] || fail "outputs uploader did not use the default mirror root"
-PHYLOGENY_DATA_DIR="$OUTPUTS_BASE" "${ROOT}/sync-simulated-outputs.sh" --dry-run >"${WORK}/sync-outputs.out"
+PHYLOGENY_DATA_DIR="$OUTPUTS_BASE" "${ROOT}/scripts/sync-simulated-outputs.sh" --dry-run >"${WORK}/sync-outputs.out"
 [[ -d "${OUTPUTS_BASE}/simphy/data" && -d "${OUTPUTS_BASE}/outputs/simphy" ]] || \
   fail "outputs sync did not use the default directories"
 
