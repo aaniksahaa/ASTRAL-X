@@ -161,8 +161,9 @@ or containing the data directory is refused.
   are shell-quoted (`printf %q`).
 - **Plans.** Both bulk scripts print
   `<dataset> / <replicate range> / <setting>` lines. Replicates are collapsed
-  into ranges (`R1-R4, R6`); excluded configurations from
-  `EXCLUDED_SIMULATED_CONFIGS` are noted inline. The run plan is followed by a
+  into ranges (`R1-R4, R6`); replicates listed in
+  `ALREADY_COMPLETED_SIMULATED_CONFIGS` (results already produced by an earlier
+  sweep, so not recomputed) are noted inline. The run plan is followed by a
   `[y/N]` prompt; `--yes` skips it and a non-terminal stdin proceeds with a
   note so `nohup` launches keep working. The uploader revalidates every
   directory immediately before uploading and refuses if anything forbidden
@@ -213,10 +214,10 @@ git commit.
   command record contents, and uploader planning and refusals.
 - `test/test_simulated_success_detection.sh` asserts the mirror leaf equals the
   results leaf and that the collected CSV carries the quartet score.
-- `test/test_bulk_simulated_exclusions.sh` pins the configured
-  `EXCLUDED_SIMULATED_CONFIGS` tuples, checks that no exclusion leaks into a
-  neighbouring taxa/gene-tree/sb/spmax setting, and drives the skip branch used
-  by the replicate loops with a dummy tuple.
+- `test/test_bulk_simulated_skip_list.sh` checks that
+  `ALREADY_COMPLETED_SIMULATED_CONFIGS` ships empty, that a listed tuple does not
+  leak into a neighbouring taxa/gene-tree/sb/spmax setting, and drives the skip
+  branch used by the replicate loops with a test-only tuple.
 - `test/test_phylogeny_data_dir.sh` covers the data-root resolution order
   (environment default, explicit override, repository fallback, error cases)
   and checks that `sim.sh`, `sim_incomplete.sh`, the stats collector, and the
@@ -241,11 +242,13 @@ The A10K (10k-astral-dataset) runs have the same kind of mirror under
 
 - 2026-09-12: ported the reference implementation to ASTRAL-X. Mirror root is
   `outputs/simphy`; the older `simphy/outputs` location is not read.
-- 2026-09-12: adopted the reference repository's `EXCLUDED_SIMULATED_CONFIGS`
-  list verbatim: 31 per-replicate entries, 30 distinct (the tuple
-  `1000,25000,0.000001,100000,200000,R3` is listed twice there and kept as-is so
-  the two repositories stay diff-clean). Covered by
-  `test/test_bulk_simulated_exclusions.sh`.
+- 2026-09-12: added the per-replicate skip list to `run-bulk-simulated.sh` so
+  replicates whose results already existed from earlier sweeps were not
+  recomputed during the large runs.
+- 2026-09-18: renamed the list to `ALREADY_COMPLETED_SIMULATED_CONFIGS` to
+  state its purpose (compute-time saving only) and emptied it for the public
+  release, so every replicate runs by default. Covered by
+  `test/test_bulk_simulated_skip_list.sh`.
 - 2026-09-12: every SimPhy-data-touching script now resolves the data root
   through `astralx_resolve_simphy_data_dir`, so `sim.sh`, `sim_incomplete.sh`,
   `collect-stats-simulated.sh`, `download-bulk-simulated.sh` and

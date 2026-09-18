@@ -37,49 +37,21 @@ SB_LIST=(0.000001)
 SPMIN_LIST=(100000)
 SPMAX_LIST=(200000)
 
-# Configurations that must not run through ASTRAL-X. Each entry is an exact
-# TAXA,GENE_TREES,SB,SPMIN,SPMAX,REPLICATE tuple. Keep replicate names in R<n>
-# form. sim.sh may still prepare the surrounding dataset batch; only the listed
-# per-replicate inference/result run is purposefully skipped.
-EXCLUDED_SIMULATED_CONFIGS=(
-  "30000,1000,0.000001,100000,150000,R5"
-  "30000,1000,0.000001,100000,250000,R4"
-  "30000,1000,0.000001,100000,300000,R3"
-  "40000,1000,0.000001,100000,150000,R2"
-  "40000,1000,0.000001,100000,150000,R5"
-  "40000,1000,0.000001,100000,200000,R5"
-  "40000,1000,0.000001,100000,300000,R5"
-  "1000,25000,0.000001,100000,200000,R3"
-  "1000,25000,0.000001,100000,250000,R2"
-  "75000,1000,0.000001,100000,200000,R5"
-  "100000,1000,0.000001,100000,200000,R3"
-  "100000,1000,0.000001,100000,200000,R4"
-  "125000,1000,0.000001,100000,200000,R2"
-  "125000,1000,0.000001,100000,200000,R3"
-  "125000,1000,0.000001,100000,200000,R4"
-  "150000,1000,0.000001,100000,200000,R4"
-  "175000,1000,0.000001,100000,200000,R2"
-  "175000,1000,0.000001,100000,200000,R4"
-  "200000,1000,0.000001,100000,200000,R1"
-  "200000,1000,0.000001,100000,200000,R2"
-  "225000,1000,0.000001,100000,200000,R1"
-  "225000,1000,0.000001,100000,200000,R3"
-  "1000,25000,0.000001,100000,200000,R3"
-  "1000,75000,0.000001,100000,200000,R3"
-  "1000,100000,0.000001,100000,200000,R4"
-  "1000,125000,0.000001,100000,200000,R4"
-  "1000,150000,0.000001,100000,200000,R2"
-  "1000,200000,0.000001,100000,200000,R4"
-  "1000,225000,0.000001,100000,200000,R2"
-  "1000,275000,0.000001,100000,200000,R3"
-  "1000,300000,0.000001,100000,200000,R2"
+# Replicates whose ASTRAL-X results were already produced by an earlier sweep
+# (for example on another machine) and therefore do not need to be recomputed
+# here. Listing them only saves compute time: sim.sh still prepares the
+# surrounding dataset batch, and the listed per-replicate inference is skipped
+# because its results already exist. Each entry is an exact
+# TAXA,GENE_TREES,SB,SPMIN,SPMAX,REPLICATE tuple with replicate names in R<n>
+# form. Leave the list empty to run every replicate.
+ALREADY_COMPLETED_SIMULATED_CONFIGS=(
 )
 
-IS_SIMULATED_CONFIG_EXCLUDED() {
+IS_SIMULATED_CONFIG_ALREADY_COMPLETED() {
   local CANDIDATE_CONFIG="$1,$2,$3,$4,$5,$6"
-  local EXCLUDED_CONFIG
-  for EXCLUDED_CONFIG in "${EXCLUDED_SIMULATED_CONFIGS[@]}"; do
-    [[ "$CANDIDATE_CONFIG" == "$EXCLUDED_CONFIG" ]] && return 0
+  local COMPLETED_CONFIG
+  for COMPLETED_CONFIG in "${ALREADY_COMPLETED_SIMULATED_CONFIGS[@]}"; do
+    [[ "$CANDIDATE_CONFIG" == "$COMPLETED_CONFIG" ]] && return 0
   done
   return 1
 }
@@ -96,8 +68,8 @@ WQFM_OPTS=""
 SUPERTRIPLETS_OPTS=""
 TMC_OPTS=""
 
-# Permit the exclusion predicate and uppercase configuration array to be loaded
-# by the isolated regression test without executing a simulated-data sweep.
+# Permit the already-completed predicate and uppercase configuration array to be
+# loaded by the isolated regression test without executing a simulated-data sweep.
 if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
   return 0
 fi
@@ -259,7 +231,7 @@ fi
 declare -a PLAN_LINES=()
 declare -a PLAN_DATASETS=()   # "t g sb spmin spmax" per dataset, in run order
 planned_runs=0
-excluded_runs=0
+already_completed_runs=0
 
 # Collapse sorted replicate numbers into "R1-R4, R6" style ranges.
 format_replicate_ranges() {
@@ -290,10 +262,10 @@ for t in "${T_LIST[@]}"; do
           DATASET_NAME="t_${t}_g_${g}_sb_${sb}_spmin_${spmin}_spmax_${spmax}"
           PLAN_DATASETS+=("$t $g $sb $spmin $spmax")
           included=()
-          excluded=()
+          already_completed=()
           for ((i=1; i<=NUM_REPLICATES; i++)); do
-            if IS_SIMULATED_CONFIG_EXCLUDED "$t" "$g" "$sb" "$spmin" "$spmax" "R$i"; then
-              excluded+=("$i")
+            if IS_SIMULATED_CONFIG_ALREADY_COMPLETED "$t" "$g" "$sb" "$spmin" "$spmax" "R$i"; then
+              already_completed+=("$i")
             else
               included+=("$i")
             fi
@@ -307,12 +279,12 @@ for t in "${T_LIST[@]}"; do
               line+="(none)"
             fi
             line+=" / ${SETTING_NAME}"
-            if [[ ${#excluded[@]} -gt 0 ]]; then
-              line+="   (excluded: $(format_replicate_ranges "${excluded[@]}"))"
+            if [[ ${#already_completed[@]} -gt 0 ]]; then
+              line+="   (already completed earlier, skipped: $(format_replicate_ranges "${already_completed[@]}"))"
             fi
             PLAN_LINES+=("$line")
             planned_runs=$((planned_runs + ${#included[@]}))
-            excluded_runs=$((excluded_runs + ${#excluded[@]}))
+            already_completed_runs=$((already_completed_runs + ${#already_completed[@]}))
           done
         done
       done
@@ -325,7 +297,7 @@ echo "Run plan (${#PLAN_DATASETS[@]} dataset(s), ${NUM_REPLICATES} replicate(s),
 echo "  <dataset> / <replicates> / <setting folder under ${METHOD}_outputs>"
 printf '%s\n' "${PLAN_LINES[@]}"
 echo
-echo "Total: ${planned_runs} run(s) to execute, ${excluded_runs} excluded."
+echo "Total: ${planned_runs} run(s) to execute, ${already_completed_runs} skipped as already completed earlier."
 echo "Completed runs are skipped unless --fresh is given."
 
 if [[ "$DRY_RUN" == true ]]; then
@@ -358,9 +330,9 @@ for DATASET_SPEC in "${PLAN_DATASETS[@]}"; do
   # Run replicates
   for ((i=1; i<=NUM_REPLICATES; i++)); do
     REPLICATE_NAME="R$i"
-    if IS_SIMULATED_CONFIG_EXCLUDED \
+    if IS_SIMULATED_CONFIG_ALREADY_COMPLETED \
         "$t" "$g" "$sb" "$spmin" "$spmax" "$REPLICATE_NAME"; then
-      echo "  SKIPPING excluded configuration: t=$t g=$g sb=$sb spmin=$spmin spmax=$spmax replicate=$REPLICATE_NAME"
+      echo "  SKIPPING already-completed configuration (results exist from an earlier sweep): t=$t g=$g sb=$sb spmin=$spmin spmax=$spmax replicate=$REPLICATE_NAME"
       continue
     fi
     echo "  Running replicate $REPLICATE_NAME with $METHOD"
@@ -423,9 +395,9 @@ echo "All runs finished."
 #           # Run replicates
 #           for ((i=1; i<=NUM_REPLICATES; i++)); do
 #             REPLICATE_NAME="R$i"
-#             if IS_SIMULATED_CONFIG_EXCLUDED \
+#             if IS_SIMULATED_CONFIG_ALREADY_COMPLETED \
 #                 "$t" "$g" "$sb" "$spmin" "$spmax" "$REPLICATE_NAME"; then
-#               echo "  SKIPPING excluded configuration: t=$t g=$g sb=$sb spmin=$spmin spmax=$spmax replicate=$REPLICATE_NAME"
+#               echo "  SKIPPING already-completed configuration (results exist from an earlier sweep): t=$t g=$g sb=$sb spmin=$spmin spmax=$spmax replicate=$REPLICATE_NAME"
 #               continue
 #             fi
 #             echo "  Running replicate $REPLICATE_NAME with $METHOD"

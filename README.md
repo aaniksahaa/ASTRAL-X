@@ -509,12 +509,15 @@ For a controlled parameter sweep, pass all experiment sizes explicitly:
 The bulk script intentionally defaults to one small 10-taxon, 10-gene run. Use
 `--fresh` only when existing simulation outputs should be regenerated.
 
-Individual replicates that must never be inferred are listed in
-`EXCLUDED_SIMULATED_CONFIGS` near the top of `scripts/run-bulk-simulated.sh`, as exact
-`TAXA,GENE_TREES,SB,SPMIN,SPMAX,REPLICATE` tuples. `sim.sh` still prepares the
-surrounding dataset batch; only the listed per-replicate inference is skipped,
-and the run plan reports it inline (`… / R3-R4 / … (excluded: R1-R2)`) so the
-omission is visible before anything starts.
+To avoid recomputing replicates whose results you already have (for example
+from a sweep on another machine), list them in
+`ALREADY_COMPLETED_SIMULATED_CONFIGS` near the top of
+`scripts/run-bulk-simulated.sh` as exact `TAXA,GENE_TREES,SB,SPMIN,SPMAX,REPLICATE`
+tuples. The list ships empty, so every replicate runs by default. `sim.sh`
+still prepares the surrounding dataset batch; only the listed per-replicate
+inference is skipped, and the run plan reports it inline
+(`… / R3-R4 / … (already completed earlier, skipped: R1-R2)`) so the skip is
+visible before anything starts.
 
 Every script that touches the simulated data tree — `sim.sh`,
 `sim_incomplete.sh`, `run-bulk-simulated.sh`, `test-astralx-simulated.sh`,
