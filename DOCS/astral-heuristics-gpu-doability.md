@@ -3,7 +3,7 @@
 ## Context
 
 This note summarizes the legacy ASTRAL heuristic bipartition-expansion pipeline in
-[`astral-mp-legacy-codebase`](/home/aaniksahaa/research/ASTRAL-X/astral-mp-legacy-codebase),
+`astral-mp-legacy-codebase`,
 with emphasis on:
 
 - what the code is doing,
@@ -23,10 +23,10 @@ The short answer is:
 
 The relevant logic lives mainly in:
 
-- [`astral-mp-legacy-codebase/WQDataCollection.java`](/home/aaniksahaa/research/ASTRAL-X/astral-mp-legacy-codebase/WQDataCollection.java)
-- [`astral-mp-legacy-codebase/SimilarityMatrix.java`](/home/aaniksahaa/research/ASTRAL-X/astral-mp-legacy-codebase/SimilarityMatrix.java)
-- [`astral-mp-legacy-codebase/DistanceMatrix.java`](/home/aaniksahaa/research/ASTRAL-X/astral-mp-legacy-codebase/DistanceMatrix.java)
-- [`astral-mp-legacy-codebase/AbstractMatrix.java`](/home/aaniksahaa/research/ASTRAL-X/astral-mp-legacy-codebase/AbstractMatrix.java)
+- `astral-mp-legacy-codebase/WQDataCollection.java`
+- `astral-mp-legacy-codebase/SimilarityMatrix.java`
+- `astral-mp-legacy-codebase/DistanceMatrix.java`
+- `astral-mp-legacy-codebase/AbstractMatrix.java`
 
 At a high level, the heuristic expansion stage does four things:
 
@@ -40,10 +40,10 @@ At a high level, the heuristic expansion stage does four things:
 
 ### 1. Matrix construction
 
-In [`WQDataCollection.calculateDistances()`](/home/aaniksahaa/research/ASTRAL-X/astral-mp-legacy-codebase/WQDataCollection.java), ASTRAL chooses one of:
+In `WQDataCollection.calculateDistances()`, ASTRAL chooses one of:
 
-- [`SimilarityMatrix.populate(...)`](/home/aaniksahaa/research/ASTRAL-X/astral-mp-legacy-codebase/SimilarityMatrix.java)
-- [`DistanceMatrix.matricesByBranchDistance(...)`](/home/aaniksahaa/research/ASTRAL-X/astral-mp-legacy-codebase/DistanceMatrix.java)
+- `SimilarityMatrix.populate(...)`
+- `DistanceMatrix.matricesByBranchDistance(...)`
 
 This stage traverses gene trees and accumulates pairwise taxon statistics into a dense matrix.
 
@@ -52,10 +52,10 @@ This is the most arithmetic-heavy part of the heuristic pipeline.
 
 ### 2. Completing incomplete gene trees
 
-In [`WQDataCollection.getCompleteTree(...)`](/home/aaniksahaa/research/ASTRAL-X/astral-mp-legacy-codebase/WQDataCollection.java), for each missing taxon:
+In `WQDataCollection.getCompleteTree(...)`, for each missing taxon:
 
 1. Find a closest present taxon using the precomputed matrix through
-   [`AbstractMatrix.getClosestPresentTaxonId(...)`](/home/aaniksahaa/research/ASTRAL-X/astral-mp-legacy-codebase/AbstractMatrix.java).
+   `AbstractMatrix.getClosestPresentTaxonId(...)`.
 2. Reroot the current tree at that closest taxon.
 3. Walk downward using four-point comparisons via `getBetterSideByFourPoint(...)`.
 4. Insert the missing taxon at the selected location.
@@ -65,19 +65,19 @@ This is tree-editing and control-heavy logic, not just matrix arithmetic.
 
 ### 3. Adding extra bipartitions by distance/similarity
 
-In [`WQDataCollection.addExtraBipartitionByDistance()`](/home/aaniksahaa/research/ASTRAL-X/astral-mp-legacy-codebase/WQDataCollection.java), the code uses the species matrix to infer additional bipartitions.
+In `WQDataCollection.addExtraBipartitionByDistance()`, the code uses the species matrix to infer additional bipartitions.
 
 Depending on matrix type:
 
-- similarity path: [`SimilarityMatrix.inferTreeBitsets()`](/home/aaniksahaa/research/ASTRAL-X/astral-mp-legacy-codebase/SimilarityMatrix.java) which uses UPGMA-like clustering
-- distance path: [`DistanceMatrix.inferTreeBitsets()`](/home/aaniksahaa/research/ASTRAL-X/astral-mp-legacy-codebase/DistanceMatrix.java) which calls PhyDstar
+- similarity path: `SimilarityMatrix.inferTreeBitsets()` which uses UPGMA-like clustering
+- distance path: `DistanceMatrix.inferTreeBitsets()` which calls PhyDstar
 
 This stage turns matrix information into clusters/bipartitions to enlarge the search space.
 
 
 ### 4. Polytomy heuristics
 
-In [`WQDataCollection.sampleAndResolve(...)`](/home/aaniksahaa/research/ASTRAL-X/astral-mp-legacy-codebase/WQDataCollection.java) and related methods:
+In `WQDataCollection.sampleAndResolve(...)` and related methods:
 
 - randomly sample one taxon around polytomy branches,
 - induce a smaller matrix,
@@ -96,8 +96,8 @@ This part is repeated and somewhat irregular.
 
 Files:
 
-- [`astral-mp-legacy-codebase/SimilarityMatrix.java`](/home/aaniksahaa/research/ASTRAL-X/astral-mp-legacy-codebase/SimilarityMatrix.java)
-- [`astral-mp-legacy-codebase/DistanceMatrix.java`](/home/aaniksahaa/research/ASTRAL-X/astral-mp-legacy-codebase/DistanceMatrix.java)
+- `astral-mp-legacy-codebase/SimilarityMatrix.java`
+- `astral-mp-legacy-codebase/DistanceMatrix.java`
 
 Why:
 
@@ -132,7 +132,7 @@ This is mostly gather/copy work and can be batched.
 
 File:
 
-- [`astral-mp-legacy-codebase/SimilarityMatrix.java`](/home/aaniksahaa/research/ASTRAL-X/astral-mp-legacy-codebase/SimilarityMatrix.java)
+- `astral-mp-legacy-codebase/SimilarityMatrix.java`
 
 Why awkward:
 
@@ -148,7 +148,7 @@ Possible to accelerate partially, but not a clean GPU fit.
 
 File:
 
-- [`astral-mp-legacy-codebase/DistanceMatrix.java`](/home/aaniksahaa/research/ASTRAL-X/astral-mp-legacy-codebase/DistanceMatrix.java)
+- `astral-mp-legacy-codebase/DistanceMatrix.java`
 
 Why awkward:
 
@@ -165,7 +165,7 @@ Again, possible in theory, but not the cleanest use of GPU.
 
 File:
 
-- [`astral-mp-legacy-codebase/WQDataCollection.java`](/home/aaniksahaa/research/ASTRAL-X/astral-mp-legacy-codebase/WQDataCollection.java)
+- `astral-mp-legacy-codebase/WQDataCollection.java`
 
 The routine:
 
@@ -181,7 +181,7 @@ That makes it a poor direct GPU target.
 
 #### Greedy consensus tree updates around polytomies
 
-Also in [`WQDataCollection.java`](/home/aaniksahaa/research/ASTRAL-X/astral-mp-legacy-codebase/WQDataCollection.java), the code:
+Also in `WQDataCollection.java`, the code:
 
 - counts sampled bipartitions,
 - sorts them,
@@ -288,8 +288,8 @@ The correct conclusion is:
 
 | Step | Main file(s) | GPU suitability | Likely time role |
 |---|---|---:|---|
-| Build similarity/distance matrix | [`SimilarityMatrix.java`](/home/aaniksahaa/research/ASTRAL-X/astral-mp-legacy-codebase/SimilarityMatrix.java), [`DistanceMatrix.java`](/home/aaniksahaa/research/ASTRAL-X/astral-mp-legacy-codebase/DistanceMatrix.java) | High | Likely dominant asymptotic bulk work |
-| Complete missing taxa into gene trees | [`WQDataCollection.java`](/home/aaniksahaa/research/ASTRAL-X/astral-mp-legacy-codebase/WQDataCollection.java) | Low | Irregular, important, but not likely the main growth term |
-| Add extra bipartitions from matrix | [`WQDataCollection.java`](/home/aaniksahaa/research/ASTRAL-X/astral-mp-legacy-codebase/WQDataCollection.java) | Medium | Moderate |
-| UPGMA / PhyDstar tree inference from matrix | [`SimilarityMatrix.java`](/home/aaniksahaa/research/ASTRAL-X/astral-mp-legacy-codebase/SimilarityMatrix.java), [`DistanceMatrix.java`](/home/aaniksahaa/research/ASTRAL-X/astral-mp-legacy-codebase/DistanceMatrix.java) | Medium-low | Can matter, but control-heavy |
-| Polytomy sampling and greedy resolution | [`WQDataCollection.java`](/home/aaniksahaa/research/ASTRAL-X/astral-mp-legacy-codebase/WQDataCollection.java) | Low-medium | Repeated and messy, but typically not the main arithmetic wall |
+| Build similarity/distance matrix | `SimilarityMatrix.java`, `DistanceMatrix.java` | High | Likely dominant asymptotic bulk work |
+| Complete missing taxa into gene trees | `WQDataCollection.java` | Low | Irregular, important, but not likely the main growth term |
+| Add extra bipartitions from matrix | `WQDataCollection.java` | Medium | Moderate |
+| UPGMA / PhyDstar tree inference from matrix | `SimilarityMatrix.java`, `DistanceMatrix.java` | Medium-low | Can matter, but control-heavy |
+| Polytomy sampling and greedy resolution | `WQDataCollection.java` | Low-medium | Repeated and messy, but typically not the main arithmetic wall |
