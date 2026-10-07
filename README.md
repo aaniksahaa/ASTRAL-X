@@ -464,8 +464,10 @@ provided:
 Output parent directories are created automatically. Add
 `--reference-species-tree true_tree.tre` to calculate the RF distance,
 `--no-gpu-monitor` to disable GPU sampling, and `--no-build` to reuse the
-current build. Set `NTFY_CHANNEL_NAME` to choose a notification channel, or
-keep `--no-notify` for local development. `cmd.txt` collects the monitored
+current build. Monitored runs can post a completion summary through the
+optional local command `~/utils/notify/notify` (topic `NOTIFY_TOPIC`, default
+`anik-phylo`); a machine without it sends nothing. `--no-notify` / `-nn`
+disables it; keep `--no-notify` for local development. `cmd.txt` collects the monitored
 invocations used for the published experiments.
 
 ## Simulated experiments

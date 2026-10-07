@@ -24,7 +24,8 @@ NATIVE_DIR="${ASTRALX_ROOT}/native"
 # Every crash artifact (Java fatal report, HotSpot hs_err file) lands here; the
 # directory is git-ignored.
 CRASH_LOG_DIR="${ASTRALX_ROOT}/crash-logs"
-NTFY_CHANNEL_NAME="${NTFY_CHANNEL_NAME:-anik-phylo-asx}"
+NOTIFY_BIN="${NOTIFY_BIN:-$HOME/utils/notify/notify}"
+NOTIFY_TOPIC="${NOTIFY_TOPIC:-${NTFY_CHANNEL_NAME:-anik-phylo}}"   # NTFY_CHANNEL_NAME still honoured for old commands
 
 GREEN='\033[0;32m'
 RED='\033[0;31m'
@@ -102,7 +103,7 @@ Optional:
   --xms SIZE         Java min heap (default: ${XMS})
   --xmx SIZE         Java max heap (default: ${XMX})
   --no-build         Skip scripts/build.sh before running
-  --no-notify, -nn   Disable ntfy notification for score-only mode
+  --no-notify, -nn   Disable completion notification for score-only mode
   --help, -h         Show this message
 
 Compatibility:
@@ -324,7 +325,7 @@ if [[ -n "$SCORE_SPECIES_TREE" ]]; then
     SCORE_VALUE="$(echo "$SCORE_LINE" | awk -F: '{gsub(/^[ \t]+/,"",$2); print $2}' | awk '{print $1}')"
   fi
 
-  if [[ "$NO_NOTIFY" == false ]] && command -v curl >/dev/null 2>&1; then
+  if [[ "$NO_NOTIFY" == false ]] && [ -x "$NOTIFY_BIN" ]; then
     STATUS_TEXT="$(if [[ $EXIT_CODE -eq 0 ]]; then echo "completed"; else echo "failed (exit $EXIT_CODE)"; fi)"
     NOTIFY_BODY="ASTRAL-X score-only ${STATUS_TEXT}
 
@@ -335,7 +336,7 @@ Species tree: $(basename "$SCORE_SPECIES_TREE")"
       NOTIFY_BODY+="
 Output: $(basename "$OUTPUT_FILE")"
     fi
-    curl -s -d "$NOTIFY_BODY" "https://ntfy.sh/${NTFY_CHANNEL_NAME}" >/dev/null 2>&1 || true
+    [ -x "$NOTIFY_BIN" ] && "$NOTIFY_BIN" -q "$NOTIFY_TOPIC" "$NOTIFY_BODY" >/dev/null 2>&1 || true
   fi
 
   exit "$EXIT_CODE"

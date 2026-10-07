@@ -4,7 +4,8 @@
 
 set -euo pipefail
 
-NTFY_CHANNEL_NAME="${NTFY_CHANNEL_NAME:-anik-phylo}"
+NOTIFY_BIN="${NOTIFY_BIN:-$HOME/utils/notify/notify}"
+NOTIFY_TOPIC="${NOTIFY_TOPIC:-${NTFY_CHANNEL_NAME:-anik-phylo}}"   # NTFY_CHANNEL_NAME still honoured for old commands
 
 # Exact invocation of this script, appended to every run's command record.
 SCRIPT_ARGV=("$0" "$@")
@@ -84,7 +85,7 @@ Optional:
   --no-outputs-mirror  Do not copy results into the outputs mirror
   --no-time-monitor    Disable time monitoring
   --no-gpu-monitor     Disable GPU monitoring
-  --no-notify, -nn     Disable ntfy notifications
+  --no-notify, -nn     Disable notifications
 
 Examples:
   ./scripts/run-a10k.sh --data-dir /path/to/10k-astral-dataset --tree-type estimated --opts "--search-space S1 --intersection-method I2 -vv"
@@ -374,8 +375,8 @@ for TREE_TYPE in "${TREE_TYPES[@]}"; do
     echo "Outputs mirror: ${OUTPUTS_DIR}"
     echo "Saved $STAT_FILE"
 
-    if [[ "$NO_NOTIFY" == false ]] && command -v curl >/dev/null 2>&1; then
-      curl -s -d "✅ ASTRAL-X A10K completed
+    if [[ "$NO_NOTIFY" == false ]] && [ -x "$NOTIFY_BIN" ]; then
+      [ -x "$NOTIFY_BIN" ] && "$NOTIFY_BIN" -q "$NOTIFY_TOPIC" "✅ ASTRAL-X A10K completed
 
 Replicate: ${REPL}
 Tree type: ${TREE_TYPE}
@@ -389,7 +390,7 @@ GPU: ${MAX_GPU_MB} MB
 Exit: ${EXIT_CODE}
 
 Tree: $(basename "$OUT_FILE")
-Stats: $(basename "$STAT_FILE")" "https://ntfy.sh/${NTFY_CHANNEL_NAME}" >/dev/null 2>&1 || true
+Stats: $(basename "$STAT_FILE")" >/dev/null 2>&1 || true
     fi
     done
   done

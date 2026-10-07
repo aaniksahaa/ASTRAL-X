@@ -13,7 +13,8 @@ source "${SCRIPT_ROOT}/scripts/simphy-outputs-dir.sh"
 # piped through tee further down the call chain.
 [[ -t 1 || -t 2 ]] && export FORCE_COLOR=1
 
-NTFY_CHANNEL_NAME="${NTFY_CHANNEL_NAME:-anik-phylo-asx}"
+NOTIFY_BIN="${NOTIFY_BIN:-$HOME/utils/notify/notify}"
+NOTIFY_TOPIC="${NOTIFY_TOPIC:-${NTFY_CHANNEL_NAME:-anik-phylo}}"   # NTFY_CHANNEL_NAME still honoured for old commands
 
 # Exact invocation of this script, appended to the run's command record.
 SCRIPT_ARGV=("$0" "$@")
@@ -115,7 +116,7 @@ Optional:
   <outputs>/astralx_outputs/<dataset>/<replicate>/<setting>.
   --no-time-monitor    Disable time monitoring
   --no-gpu-monitor     Disable GPU monitoring
-  --no-notify, -nn     Disable ntfy notifications
+  --no-notify, -nn     Disable notifications
   --debug              Enable shell tracing
 
 Examples:
@@ -393,12 +394,12 @@ echo "Max CPU RAM (MB): ${MAX_CPU_MB}"
 echo "Max GPU VRAM (MB): ${MAX_GPU_MB}"
 echo "Wrote stats to $STAT_FILE"
 
-if [[ "$NO_NOTIFY" == false ]] && command -v curl >/dev/null 2>&1; then
+if [[ "$NO_NOTIFY" == false ]] && [ -x "$NOTIFY_BIN" ]; then
   STATUS_EMOJI=$(if [[ $ASTRALX_EXIT_CODE -eq 0 ]]; then echo "✅"; else echo "❌"; fi)
   STATUS_TEXT=$(if [[ $ASTRALX_EXIT_CODE -eq 0 ]]; then echo "completed"; else echo "failed (exit $ASTRALX_EXIT_CODE)"; fi)
   CSV_HEADER="alg,setting,num-taxa,gene-trees,replicate,sb,spmin,spmax,rf-rate,optimal-quartet-score,running-time-s,max-cpu-mb,max-gpu-mb"
   CSV_ROW="astralx,${SETTING_NAME},${TAXA_NUM},${GENE_TREES},${REPLICATE},${SB},${SPMIN},${SPMAX},${RF_RATE},${OPTIMAL_QUARTET_SCORE},${RUNNING_TIME},${MAX_CPU_MB},${MAX_GPU_MB}"
-  curl -s -d "${STATUS_EMOJI} ASTRAL-X ${STATUS_TEXT} for ${TAXA_NUM} taxa and ${GENE_TREES} gene trees
+  [ -x "$NOTIFY_BIN" ] && "$NOTIFY_BIN" -q "$NOTIFY_TOPIC" "${STATUS_EMOJI} ASTRAL-X ${STATUS_TEXT} for ${TAXA_NUM} taxa and ${GENE_TREES} gene trees
 
 Weight method: ${WEIGHT_METHOD}
 RF Rate: ${RF_RATE}
@@ -410,7 +411,7 @@ Max GPU VRAM: ${MAX_GPU_MB} MB
 ${CSV_HEADER}
 ${CSV_ROW}
 
-Stats: ${STAT_FILE}" "https://ntfy.sh/${NTFY_CHANNEL_NAME}" >/dev/null 2>&1 || true
+Stats: ${STAT_FILE}" >/dev/null 2>&1 || true
 fi
 
 exit "$ASTRALX_EXIT_CODE"
