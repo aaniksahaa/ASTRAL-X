@@ -2,7 +2,7 @@ package astralx;
 
 /** Build and runtime version source. */
 final class Version {
-    static final String DEFAULT = "1.0.0";
+    static final String DEFAULT = "1.1.0";
 
     private Version() {}
 

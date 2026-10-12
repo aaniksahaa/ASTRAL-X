@@ -15,14 +15,14 @@ smaller analyses, compatibility, and development.
 ## Quick start
 
 Download the archive for your platform (for example
-`astralx-1.0.0-linux-x86_64.tar.gz`) from the GitHub Releases page. The archive
+`astralx-1.1.0-linux-x86_64.tar.gz`) from the GitHub Releases page. The archive
 is self-contained: it bundles its own Java runtime and, on Linux and Windows,
 the CUDA libraries, so no Java installation, CUDA toolkit, or repository clone
 is needed. Extract it and run the bundled 37-taxon example:
 
 ```bash
-tar -xzf astralx-1.0.0-linux-x86_64.tar.gz
-cd astralx-1.0.0-linux-x86_64
+tar -xzf astralx-1.1.0-linux-x86_64.tar.gz
+cd astralx-1.1.0-linux-x86_64
 ./astralx --version
 ./astralx -i example/all_gt_37.tre -o example/predicted_st_37.tre
 ```
@@ -49,11 +49,11 @@ the launcher into `~/.local/bin`, without `sudo`. Replace `/path/to/downloaded/`
 with the archive's location:
 
 ```bash
-ASTRALX_INSTALL_ROOT="$HOME/.local/opt/astralx/1.0.0"
+ASTRALX_INSTALL_ROOT="$HOME/.local/opt/astralx/1.1.0"
 mkdir -p "$ASTRALX_INSTALL_ROOT"
-tar -xzf /path/to/downloaded/astralx-1.0.0-linux-x86_64.tar.gz \
+tar -xzf /path/to/downloaded/astralx-1.1.0-linux-x86_64.tar.gz \
   -C "$ASTRALX_INSTALL_ROOT"
-ASTRALX_DIR="$(realpath "$ASTRALX_INSTALL_ROOT/astralx-1.0.0-linux-x86_64")"
+ASTRALX_DIR="$(realpath "$ASTRALX_INSTALL_ROOT/astralx-1.1.0-linux-x86_64")"
 mkdir -p "$HOME/.local/bin"
 ln -sfn "$ASTRALX_DIR/astralx" "$HOME/.local/bin/astralx"
 grep -qxF 'export PATH="$HOME/.local/bin:$PATH"' "$HOME/.bashrc" || \
@@ -700,15 +700,15 @@ The portable builder is the single local entry point for compilation,
 packaging, smoke testing, checksumming, and manifest generation:
 
 ```bash
-./scripts/build_portable.sh --version 1.0.0
+./scripts/build_portable.sh --version 1.1.0
 ```
 
-The newly built application and release files are written under `dist/1.0.0/`.
+The newly built application and release files are written under `dist/1.1.0/`.
 On Linux x86-64, you may relink the `astralx` command to the newly generated
 application:
 
 ```bash
-ASTRALX_DIR="$(realpath dist/1.0.0/astralx-1.0.0-linux-x86_64)"
+ASTRALX_DIR="$(realpath dist/1.1.0/astralx-1.1.0-linux-x86_64)"
 mkdir -p "$HOME/.local/bin"
 ln -sfn "$ASTRALX_DIR/astralx" "$HOME/.local/bin/astralx"
 grep -qxF 'export PATH="$HOME/.local/bin:$PATH"' "$HOME/.bashrc" || \
@@ -722,11 +722,11 @@ deliberately create a CPU-only build. The resulting layout is:
 
 ```text
 dist/
-└── 1.0.0/
-    ├── astralx-1.0.0-<os>-<arch>/
-    ├── astralx-1.0.0-<os>-<arch>.<archive>
-    ├── astralx-1.0.0-<os>-<arch>.<archive>.sha256
-    └── astralx-1.0.0-<os>-<arch>.manifest.json
+└── 1.1.0/
+    ├── astralx-1.1.0-<os>-<arch>/
+    ├── astralx-1.1.0-<os>-<arch>.<archive>
+    ├── astralx-1.1.0-<os>-<arch>.<archive>.sha256
+    └── astralx-1.1.0-<os>-<arch>.manifest.json
 ```
 
 The entire local `dist/` directory is ignored by Git. Portable archives,
