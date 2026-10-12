@@ -87,6 +87,19 @@ The quartet score printed at the end always uses the native input gene-tree
 topology, including unresolved multifurcations, and respects `--taxa-file` when
 supplied. No monitoring wrapper is required for these core statistics.
 
+The quartet score is the number of gene-tree quartets (four-taxon subsets of a
+gene tree) whose induced topology is resolved in the gene tree and identical to
+the topology induced by the species tree. This is exactly the "Final quartet
+score" reported by ASTRAL. Internally the optimization objective sums a weight
+over every species-tree node, which counts each agreeing quartet twice (once at
+each end of the quartet's internal path); the printed score is that objective
+halved, and the halving is exact. Unresolved nodes in a supplied or inferred
+species tree are scored too: a quartet that the species tree leaves unresolved
+contributes nothing, matching ASTRAL's definition. When an inferred tree
+contains an unresolved cluster, ASTRAL-X rescores the output topology against
+the input gene trees instead of reporting the DP objective, which does not
+cover such clusters.
+
 For a broader search on incomplete gene trees that combines candidate
 topologies across trees rather than using only tree-local ones:
 

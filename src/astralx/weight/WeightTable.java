@@ -2218,6 +2218,13 @@ public class WeightTable {
         return scores.getOrDefault(split, 0L);
     }
 
+    /** True when a score was computed for this split (any mode). */
+    public boolean hasScore(BipartitionSplit split) {
+        if (useInt128) return scoresI.containsKey(split);
+        if (useDouble) return scoresD.containsKey(split);
+        return scores.containsKey(split);
+    }
+
     /** Score of a split as a double (valid in all modes; approximate for INT128). */
     public double getScoreD(BipartitionSplit split) {
         if (useInt128) { Int128 v = scoresI.get(split); return v == null ? 0.0 : v.toDouble(); }

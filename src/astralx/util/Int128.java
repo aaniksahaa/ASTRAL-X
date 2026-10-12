@@ -66,6 +66,9 @@ public final class Int128 {
         return new Int128(loPart.hi + hiAdd, loPart.lo);
     }
 
+    /** True when the value is divisible by two. */
+    public boolean isEven() { return (lo & 1L) == 0; }
+
     /** Logical right shift by one (exact divide-by-two for non-negative values). */
     public Int128 halve() {
         long newLo = (lo >>> 1) | (hi << 63);

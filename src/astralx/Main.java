@@ -10,6 +10,7 @@ import astralx.completion.UPGMAClusterer;
 import astralx.gpu.GPUDistanceMatrix;
 import astralx.gpu.GPUSimilarityMatrix;
 import astralx.dp.DPTable;
+import astralx.dp.FixedTreeScorer;
 import astralx.dp.Inference;
 import astralx.greedy.EmissionBridge;
 import astralx.greedy.GreedyConsensus;
@@ -455,8 +456,13 @@ public class Main {
                 System.out.println(speciesTree);
             }
 
-            boolean recomputeFinalScore = inferenceInputHasPolytomy
-                && !cfg.isKeepPolytomyDuringInference();
+            boolean recomputeFinalScore = (inferenceInputHasPolytomy
+                && !cfg.isKeepPolytomyDuringInference())
+                || inference.isLastTreeUnresolved();
+            if (inference.isLastTreeUnresolved()) {
+                Logging.info("Inferred tree has unresolved node(s); the final quartet "
+                    + "score is recomputed on the output topology");
+            }
             if (recomputeFinalScore) {
                 // The inference state can be enormous.  Drop all topology/weight
                 // references before re-reading unresolved gene trees so the final
@@ -485,8 +491,8 @@ public class Main {
                     scoringHasher, scoredSpeciesTree, "Final score", "Final scoring");
                 PhaseLogger.end(
                     "Phase 8  Final quartet scoring against unresolved input", t8, false);
-                Logging.info("Final quartet score = %s  [recomputed from native input "
-                    + "polytomies]", finalQuartetScore);
+                Logging.info("Final quartet score = %s  [recomputed on the output "
+                    + "topology against the native input gene trees]", finalQuartetScore);
             } else {
                 String reason = cfg.isKeepPolytomyDuringInference()
                     ? "inference preserved native input polytomies"
@@ -1263,21 +1269,39 @@ public class Main {
         }
         PhaseLogger.end(phasePrefix + "  Gene-tree tripartitions", tg, false);
 
-        long td = PhaseLogger.begin(phasePrefix + "  Fixed-tree DP transitions", false);
-        DPTable speciesDP = new DPTable(speciesTrees, speciesPref, speciesClusters);
-        if (cfg.isAnchorOutgroup()) {
-            speciesDP.applyAnchoredRoot(speciesClusters.getAnchorHash());
+        // An unresolved species tree has no DP path through its polytomies, so
+        // the search-space shortcuts that assume one (reachability pruning and the
+        // anchored root) would leave its binary nodes unscored.  Score every
+        // fixed-tree split instead; a binary tree keeps the usual settings.
+        boolean prune = cfg.isPruneUnreachableSplits();
+        boolean anchored = cfg.isAnchorOutgroup();
+        if (speciesTree.hasPolytomy && (prune || anchored)) {
+            Logging.info("%s: species tree has unresolved node(s); scoring every "
+                + "fixed-tree split (reachability prune and anchored root off)",
+                scoreLogLabel);
+            cfg.setPruneUnreachableSplits(false);
+            cfg.setAnchorOutgroup(false);
         }
-        PhaseLogger.end(phasePrefix + "  Fixed-tree DP transitions", td, false);
+        try {
+            long td = PhaseLogger.begin(phasePrefix + "  Fixed-tree DP transitions", false);
+            DPTable speciesDP = new DPTable(speciesTrees, speciesPref, speciesClusters);
+            if (cfg.isAnchorOutgroup()) {
+                speciesDP.applyAnchoredRoot(speciesClusters.getAnchorHash());
+            }
+            PhaseLogger.end(phasePrefix + "  Fixed-tree DP transitions", td, false);
 
-        boolean gpuWeight = cfg.getComputeMode() == Config.ComputeMode.GPU
-                            && GPUWeightCalculator.isLoaded();
-        long tw = PhaseLogger.begin(phasePrefix + "  Weight calculation", gpuWeight);
-        WeightTable weightTable = new WeightTable(speciesDP, genePartitions, speciesClusters,
-                                                  speciesTrees, geneTrees);
-        PhaseLogger.end(phasePrefix + "  Weight calculation", tw, gpuWeight);
+            boolean gpuWeight = cfg.getComputeMode() == Config.ComputeMode.GPU
+                                && GPUWeightCalculator.isLoaded();
+            long tw = PhaseLogger.begin(phasePrefix + "  Weight calculation", gpuWeight);
+            WeightTable weightTable = new WeightTable(speciesDP, genePartitions, speciesClusters,
+                                                      speciesTrees, geneTrees);
+            PhaseLogger.end(phasePrefix + "  Weight calculation", tw, gpuWeight);
 
-        Inference scorer = new Inference();
-        return scorer.scoreFixedTree(speciesDP, weightTable, scoreLogLabel);
+            return FixedTreeScorer.score(speciesDP, weightTable, speciesTree, speciesPref,
+                                         geneTrees, registry.size(), scoreLogLabel);
+        } finally {
+            cfg.setPruneUnreachableSplits(prune);
+            cfg.setAnchorOutgroup(anchored);
+        }
     }
 }

@@ -38,10 +38,10 @@ polytomy_completion_score() {
     --search-space "$1" --intersection-method I3 "${@:2}" 2>&1 |
     sed -n 's/.*Quartet score[[:space:]]*\([0-9][0-9]*\).*/\1/p'
 }
-[[ "$(polytomy_completion_score S2)" == "784" ]]
-[[ "$(polytomy_completion_score S3)" == "784" ]]
-[[ "$(polytomy_completion_score S2 --keep-polytomy-during-inference)" == "794" ]]
-[[ "$(polytomy_completion_score S3 --keep-polytomy-during-inference)" == "798" ]]
+[[ "$(polytomy_completion_score S2)" == "392" ]]
+[[ "$(polytomy_completion_score S3)" == "392" ]]
+[[ "$(polytomy_completion_score S2 --keep-polytomy-during-inference)" == "397" ]]
+[[ "$(polytomy_completion_score S3 --keep-polytomy-during-inference)" == "399" ]]
 
 POLY_DEFAULT_OUTPUT="$(NO_COLOR=1 java -cp "${ROOT}/build" astralx.Main --cpu -q \
   -i "${ROOT}/test/input/tc16_polytomy_incomplete.tre" \
@@ -181,9 +181,10 @@ fi
 SCORE_ONLY_OUTPUT="$(java -cp "${ROOT}/build" astralx.Main --cpu -q \
   -i "${ROOT}/test/input/tc1_complete_only.tre" \
   --score-species-tree "${ROOT}/test/input/tc1_true.tre" 2>&1)"
-[[ "$SCORE_ONLY_OUTPUT" == *"QUARTET_SCORE: 10"* ]]
+# Five identical ((A,B),(C,D)) gene trees contain exactly five agreeing quartets.
+[[ "$SCORE_ONLY_OUTPUT" == *"QUARTET_SCORE: 5"* ]]
 [[ "$SCORE_ONLY_OUTPUT" == *"Run Summary"* ]]
-[[ "$SCORE_ONLY_OUTPUT" == *"Quartet score"*"10"* ]]
+[[ "$SCORE_ONLY_OUTPUT" == *"Quartet score"*"5"* ]]
 
 # Parser-backed taxa extraction: deterministic union by default and explicit
 # intersection, with exactly one taxon name per output line.
@@ -219,7 +220,7 @@ for method in I1 I2 I3 I4; do
     --score-species-tree "${ROOT}/test/input/taxa_filter_species.tre" \
     --taxa-file "${ROOT}/test/input/taxa_filter_list.txt" \
     --im "$method" 2>&1 | score_value)"
-  [[ "$manual_score" == "4" && "$filtered_score" == "$manual_score" ]]
+  [[ "$manual_score" == "2" && "$filtered_score" == "$manual_score" ]]
 done
 
 # Native-polytomy restriction parity, covering both an unrooted multifurcating
@@ -315,7 +316,7 @@ manual_poly_final_score="$(sed -n \
 filtered_poly_final_score="$(sed -n \
   's/.*Quartet score[[:space:]]*\([0-9][0-9]*\).*/\1/p' \
   <<<"$filtered_poly_default_output" | tail -n1)"
-[[ "$manual_poly_final_score" == "16" ]]
+[[ "$manual_poly_final_score" == "8" ]]
 [[ "$filtered_poly_final_score" == "$manual_poly_final_score" ]]
 [[ "$filtered_poly_default_output" == \
    *"Phase 8  Final quartet scoring against unresolved input"* ]]

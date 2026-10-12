@@ -30,6 +30,8 @@ public class Inference {
     private final Map<ClusterHash, Int128>           dpMemoI    = new HashMap<>();   // INT128 score path
     private final Map<ClusterHash, BipartitionSplit> bestSplits = new HashMap<>();
     private String lastQuartetScore;
+    /** True when the most recent reconstruction emitted at least one polytomy. */
+    private boolean lastTreeUnresolved;
     /** Exact inverse for every size-one cluster hash in the analysis universe. */
     private Map<ClusterHash, Integer> singletonTaxa = Collections.emptyMap();
     private TaxonHasher reconstructionHasher;
@@ -61,33 +63,49 @@ public class Inference {
         // The score type mirrors the WeightTable's accumulation decision: exact
         // LONG for normal sizes; above the overflow threshold, exact INT128
         // (default) or approximate DOUBLE.  The [tag] makes the type explicit.
+        Long dpTotalL = null; Double dpTotalD = null; Int128 dpTotalI = null;
+        String tag;
         if (weightTable.isInt128()) {
-            Int128 totalScore = solveI(root, dpTable, weightTable);
-            lastQuartetScore = totalScore.toString();
-            long ms = (System.nanoTime() - t0) / 1_000_000;
-            Logging.info("Inference DP: optimization-objective quartet score = %s  "
-                + "[int128]  (%d ms)", totalScore, ms);
+            dpTotalI = solveI(root, dpTable, weightTable);
+            tag = "int128";
         } else if (weightTable.isDouble()) {
-            double totalScore = solveD(root, dpTable, weightTable);
-            lastQuartetScore = String.format(java.util.Locale.ROOT, "%.0f", totalScore);
-            long ms = (System.nanoTime() - t0) / 1_000_000;
-            // %.0f keeps it a plain (huge) number for log parsers; the [double]
-            // tag makes the active numeric type explicit in the logs.
-            Logging.info("Inference DP: optimization-objective quartet score = %.0f  "
-                + "[double]  (%d ms)", totalScore, ms);
+            dpTotalD = solveD(root, dpTable, weightTable);
+            tag = "double";
         } else {
-            long totalScore = solve(root, dpTable, weightTable);
-            lastQuartetScore = Long.toString(totalScore);
-            long ms = (System.nanoTime() - t0) / 1_000_000;
-            Logging.info("Inference DP: optimization-objective quartet score = %d  "
-                + "[long]  (%d ms)", totalScore, ms);
+            dpTotalL = solve(root, dpTable, weightTable);
+            tag = "long";
         }
+        long ms = (System.nanoTime() - t0) / 1_000_000;
+        // %.0f keeps the double total a plain (huge) number for log parsers; the
+        // [tag] makes the active numeric type explicit in the logs.
+        String totalText = dpTotalI != null ? dpTotalI.toString()
+            : dpTotalD != null ? String.format(java.util.Locale.ROOT, "%.0f", dpTotalD)
+            : Long.toString(dpTotalL);
+        Logging.info("Inference DP: objective total = %s  (= 2 x quartet score for a "
+            + "fully resolved tree)  [%s]  (%d ms)", totalText, tag, ms);
 
         BitSet rootMembers = new BitSet(registry.size());
         rootMembers.set(0, registry.size());
         validateMembers(root, rootMembers);
+        lastTreeUnresolved = false;
         String newick = buildNewick(
             root, clusterTable, exemplarTrees, registry, rootMembers) + ";";
+
+        if (lastTreeUnresolved) {
+            // A cluster without any DP split is emitted as a polytomy.  The DP
+            // objective never scores the quartets resolved at such a node, so it
+            // is not twice the quartet score of the output tree; the caller must
+            // rescore the output topology (FixedTreeScorer handles polytomies).
+            lastQuartetScore = null;
+            Logging.info("Inference DP: output tree has unresolved node(s); the DP "
+                + "objective does not score them, so the quartet score is recomputed "
+                + "on the output topology");
+        } else {
+            lastQuartetScore = dpTotalI != null ? quartetScoreFromDpTotal(dpTotalI)
+                : dpTotalD != null ? quartetScoreFromDpTotal(dpTotalD)
+                : quartetScoreFromDpTotal(dpTotalL);
+            Logging.info("Inference DP: quartet score = %s  [%s]", lastQuartetScore, tag);
+        }
         return newick;
     }
 
@@ -125,44 +143,97 @@ public class Inference {
         }
     }
 
-    /** Raw quartet score from the most recent successful inference run. */
+    /**
+     * Quartet score (number of agreeing gene-tree quartets) of the most recent
+     * successful inference run; this is the DP objective total halved.
+     */
     public String getLastQuartetScore() { return lastQuartetScore; }
+
+    /**
+     * True when the most recent inference emitted an unresolved node, in which
+     * case {@link #getLastQuartetScore()} is {@code null} and the output
+     * topology must be rescored (see {@link FixedTreeScorer}).
+     */
+    public boolean isLastTreeUnresolved() { return lastTreeUnresolved; }
 
     /**
      * Score the fixed tree represented by {@code dpTable}; no tree reconstruction
      * or inferred species tree output is produced.
      *
-     * @return formatted raw quartet score
+     * @return formatted quartet score (number of agreeing gene-tree quartets)
      */
     public String scoreFixedTree(DPTable dpTable, WeightTable weightTable) {
         return scoreFixedTree(dpTable, weightTable, "Score-only");
     }
 
-    /** Score a fixed tree with a caller-supplied log label. */
+    /**
+     * DP-based score of a fixed, fully resolved tree with a caller-supplied log
+     * label.  Production scoring goes through {@link FixedTreeScorer}, which
+     * also handles unresolved nodes and uses this value as a cross-check.
+     */
     public String scoreFixedTree(DPTable dpTable, WeightTable weightTable,
                                  String logLabel) {
         long t0 = System.nanoTime();
-        ClusterHash root = dpTable.getRootHash();
+        String score = dpQuartetScore(dpTable, weightTable);
+        long ms = (System.nanoTime() - t0) / 1_000_000;
+        Logging.info("%s: DP quartet score = %s  [%s]  (%d ms)", logLabel, score,
+            weightTable.getMode().name().toLowerCase(java.util.Locale.ROOT), ms);
+        return score;
+    }
 
-        if (weightTable.isInt128()) {
-            Int128 totalScore = solveI(root, dpTable, weightTable);
-            long ms = (System.nanoTime() - t0) / 1_000_000;
-            Logging.info("%s: quartet score = %s  [int128]  (%d ms)",
-                logLabel, totalScore, ms);
-            return totalScore.toString();
-        } else if (weightTable.isDouble()) {
-            double totalScore = solveD(root, dpTable, weightTable);
-            long ms = (System.nanoTime() - t0) / 1_000_000;
-            Logging.info("%s: quartet score = %.0f  [double]  (%d ms)",
-                logLabel, totalScore, ms);
-            return String.format("%.0f", totalScore);
-        } else {
-            long totalScore = solve(root, dpTable, weightTable);
-            long ms = (System.nanoTime() - t0) / 1_000_000;
-            Logging.info("%s: quartet score = %d  [long]  (%d ms)",
-                logLabel, totalScore, ms);
-            return Long.toString(totalScore);
+    /** Quartet score (halved DP objective) of the DP optimum, without logging. */
+    String dpQuartetScore(DPTable dpTable, WeightTable weightTable) {
+        ClusterHash root = dpTable.getRootHash();
+        if (weightTable.isInt128()) return quartetScoreFromDpTotal(solveI(root, dpTable, weightTable));
+        if (weightTable.isDouble()) return quartetScoreFromDpTotal(solveD(root, dpTable, weightTable));
+        return quartetScoreFromDpTotal(solve(root, dpTable, weightTable));
+    }
+
+    // -------------------------------------------------------------------------
+    // DP total -> quartet score
+    //
+    // Each per-split weight QI(A|B) counts, exactly once, every gene-tree quartet
+    // that agrees with the tripartition (A | B | rest).  Summing QI over every
+    // internal node of a species tree therefore counts each agreeing quartet
+    // exactly twice: once at each of the two nodes that terminate the quartet's
+    // internal path.  The DP objective is thus 2 x (number of agreeing gene-tree
+    // quartets).  Maximising the doubled total selects the same tree, so the DP
+    // works with the exact integer total and the halving is applied here, once,
+    // when the score is reported.  This matches ASTRAL's reported
+    // "Final quartet score" (ASTRAL sums 2*QI and divides by four).
+    //
+    // The total is provably even for the exact integer paths, so the halving is
+    // exact; an odd total can only come from a bug upstream and is rejected
+    // rather than silently truncated.
+    // -------------------------------------------------------------------------
+
+    /** Exact LONG path: total must be even and non-negative. */
+    static String quartetScoreFromDpTotal(long dpTotal) {
+        if (dpTotal < 0 || (dpTotal & 1L) != 0) {
+            throw new IllegalStateException("DP objective total " + dpTotal
+                + " is not a non-negative even integer; cannot derive an exact quartet "
+                + "score (weight accumulation bug or overflow)");
         }
+        return Long.toString(dpTotal >> 1);
+    }
+
+    /** Exact INT128 path: total must be even and non-negative. */
+    static String quartetScoreFromDpTotal(Int128 dpTotal) {
+        if (dpTotal.compareTo(Int128.ZERO) < 0 || !dpTotal.isEven()) {
+            throw new IllegalStateException("DP objective total " + dpTotal
+                + " is not a non-negative even integer; cannot derive an exact quartet "
+                + "score (weight accumulation bug or overflow)");
+        }
+        return dpTotal.halve().toString();
+    }
+
+    /** Approximate DOUBLE path (only used above the exact-integer threshold). */
+    static String quartetScoreFromDpTotal(double dpTotal) {
+        if (!(dpTotal >= 0.0) || Double.isInfinite(dpTotal)) {
+            throw new IllegalStateException("DP objective total " + dpTotal
+                + " is not a finite non-negative number");
+        }
+        return String.format(java.util.Locale.ROOT, "%.0f", dpTotal / 2.0);
     }
 
     // -------------------------------------------------------------------------
@@ -307,6 +378,7 @@ public class Inference {
             // No chosen resolution: emit exactly the membership inherited from
             // the parent split.  This also covers valid DP residual clusters that
             // have no ClusterTable exemplar (common with incomplete gene trees).
+            lastTreeUnresolved = true;
             return polytomy(ch, registry, members);
         }
 

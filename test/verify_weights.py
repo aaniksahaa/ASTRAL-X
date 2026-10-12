@@ -305,7 +305,13 @@ def main():
             print(f"  score={sc:8d}  {sorted(B)} | {sorted(R)}")
 
     # --- DP ---
-    total, tree = infer(S, clusters, scores_map)
+    dp_total, tree = infer(S, clusters, scores_map)
+    # Summing QI over every internal node counts each agreeing gene-tree quartet
+    # exactly twice (once at each end of its internal path), so the DP objective
+    # is 2 x the quartet score.  Report ASTRAL's definition: the halved total.
+    assert dp_total % 2 == 0, f"DP objective total {dp_total} is odd"
+    total = dp_total // 2
+    print(f"[Inference] DP objective total = {dp_total} (= 2 x quartet score)")
     print(f"[Inference] quartet score = {total}")
     print(f"Species tree: {tree}")
 
