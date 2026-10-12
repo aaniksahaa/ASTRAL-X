@@ -116,6 +116,53 @@ astralx -i /path/to/gene_trees.tre \
   -o /path/to/quartet_score.txt
 ```
 
+## Branch support (local posterior probabilities)
+
+ASTRAL-X can annotate a species tree with quartet-frequency branch support, the
+local posterior probabilities of Sayyari and Mirarab (2016) that ASTRAL
+produces with `-q <tree> -t 4`. The computation is a faithful reimplementation
+of ASTRAL's: for every internal branch, the quadripartition formed by the four
+surrounding clusters is scored against each gene tree, the per-gene fractions
+of quartets supporting the three resolutions are averaged over the genes in
+which at least one such quartet is present, and the posterior and
+coalescent-unit branch length follow from the same Yule prior (`--lambda`,
+default 0.5). Missing taxa, unresolved gene-tree nodes, unrooted three-way
+roots and unresolved species-tree nodes are treated exactly as ASTRAL treats
+them, and the annotated tree keeps the shape of the input tree. On the
+48-taxon avian data with 14,446 gene trees the annotation of all 45 branches is
+identical to ASTRAL 5.15.5's output and takes about 1.5 seconds.
+
+```bash
+# annotate a given species tree
+astralx -i /path/to/gene_trees.tre \
+  --score-species-tree /path/to/species_tree.tre \
+  --branch-support --support-output /path/to/species_tree-support.tre
+
+# annotate the inferred species tree
+astralx -i /path/to/gene_trees.tre -o /path/to/species_tree.tre --branch-support
+```
+
+The annotated tree is printed as the last line of standard output (byte for
+byte the line ASTRAL prints, including its trailing space) and written to
+`--support-output`, or next to `-o` as `<stem>-support.<ext>` when no path is
+given. `--support-format` selects the annotation, each byte-identical to the
+corresponding ASTRAL `-t` output: `pp3` (default; `-t 4`,
+`'[pp1=..;pp2=..;pp3=..]'`), `pp` (`-t 3`), `q3` (`-t 8`), `full` (`-t 2`),
+`q1` (`-t 1`), `pvalue` (`-t 10`), `none` (`-t 0`), plus `percent` (the
+integer `pp1 x 100` that the usual cleaning scripts derive from `-t 4`). The
+posterior uses bit-exact ports of the Colt special functions ASTRAL calls.
+
+With `--score-species-tree`, `--branch-support-only` annotates the tree without
+computing the quartet score. This is the lean path for very large trees: it
+needs only the gene trees in memory (one integer per gene-tree node) plus small
+per-thread scratch, so a 9,524-taxon tree can be annotated on a laptop where
+ASTRAL needs tens of gigabytes. Branch support never changes the inferred
+topology or the quartet score. It runs on the GPU when CUDA is available
+(`libastralx_support.so`; one thread per branch and gene chunk, with the
+per-gene fractions added in gene order so the result is bit-identical to the
+CPU path) and otherwise in parallel over branches on the CPU.
+`--branch-support` is not available with `--taxa-file` in score-only mode.
+
 ## Search-space presets
 
 `--search-space` controls how broadly ASTRAL-X explores candidate species-tree

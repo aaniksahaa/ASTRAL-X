@@ -186,6 +186,15 @@ SCORE_ONLY_OUTPUT="$(java -cp "${ROOT}/build" astralx.Main --cpu -q \
 [[ "$SCORE_ONLY_OUTPUT" == *"Run Summary"* ]]
 [[ "$SCORE_ONLY_OUTPUT" == *"Quartet score"*"5"* ]]
 
+# Branch support must stay byte-identical to ASTRAL 5.15.5 (-q TREE -t 2); the
+# expected line was produced by ASTRAL on this polytomous, incomplete input.
+SUPPORT_LINE="$(java -cp "${ROOT}/build" astralx.Main --cpu -q \
+  -i "${ROOT}/test/input/tc16_polytomy_incomplete.tre" \
+  --score-species-tree "${ROOT}/test/expected/tc16_support_species.tre" \
+  --branch-support-only --support-format full 2>/dev/null | grep '^(' | tail -n1)"
+[[ "$SUPPORT_LINE" == "$(cat "${ROOT}/test/expected/tc16_support_full_astral.tre")" ]]
+echo "Branch support ASTRAL parity: PASS"
+
 # Parser-backed taxa extraction: deterministic union by default and explicit
 # intersection, with exactly one taxon name per output line.
 TAXA_UNION="${TEST_CLASSES}/taxa-union.txt"

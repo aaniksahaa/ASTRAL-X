@@ -12,6 +12,7 @@ import astralx.gpu.GPUSimilarityMatrix;
 import astralx.dp.DPTable;
 import astralx.dp.FixedTreeScorer;
 import astralx.dp.Inference;
+import astralx.support.BranchSupport;
 import astralx.greedy.EmissionBridge;
 import astralx.greedy.GreedyConsensus;
 import astralx.greedy.GreedyConsensusVerifier;
@@ -459,6 +460,7 @@ public class Main {
             boolean recomputeFinalScore = (inferenceInputHasPolytomy
                 && !cfg.isKeepPolytomyDuringInference())
                 || inference.isLastTreeUnresolved();
+            FinalScoringInput scoringInput = null;
             if (inference.isLastTreeUnresolved()) {
                 Logging.info("Inferred tree has unresolved node(s); the final quartet "
                     + "score is recomputed on the output topology");
@@ -479,7 +481,7 @@ public class Main {
 
                 long t8 = PhaseLogger.begin(
                     "Phase 8  Final quartet scoring against unresolved input", false);
-                FinalScoringInput scoringInput = parseFinalScoringInput(cfg, registry);
+                scoringInput = parseFinalScoringInput(cfg, registry);
                 Tree scoredSpeciesTree = TreeParser.parseSpeciesTreeNewick(
                     speciesTree, scoringInput.registry());
                 TaxonHasher scoringHasher = new TaxonHasher(
@@ -499,6 +501,15 @@ public class Main {
                     : "no unresolved input polytomies detected";
                 Logging.info("Final quartet score = %s  [reused inference DP score; %s]",
                     finalQuartetScore, reason);
+            }
+
+            if (cfg.isBranchSupport()) {
+                // Native (unrefined) gene trees: the Phase 8 re-read when it ran,
+                // otherwise the parsed input (binary, or kept polytomies).
+                List<Tree> supportTrees = scoringInput != null ? scoringInput.trees() : originalTrees;
+                TaxonRegistry supportRegistry = scoringInput != null ? scoringInput.registry() : registry;
+                writeBranchSupport(cfg, speciesTree, supportTrees, supportRegistry,
+                    "Phase 9  Branch support");
             }
 
             analysisCompleted = true;
@@ -529,6 +540,22 @@ public class Main {
                 case "-c", "--score", "--species-tree", "--score-species-tree" -> {
                     if (++i>=args.length) return false;
                     cfg.setScoreSpeciesTreeFile(args[i]);
+                }
+                case "--branch-support", "--support" -> cfg.setBranchSupport(true);
+                case "--branch-support-only", "--support-only" -> cfg.setBranchSupportOnly(true);
+                case "--support-output" -> {
+                    if (++i>=args.length) return false;
+                    cfg.setBranchSupport(true);
+                    cfg.setSupportOutputFile(args[i]);
+                }
+                case "--support-format" -> {
+                    if (++i>=args.length) return false;
+                    cfg.setBranchSupport(true);
+                    cfg.setSupportFormat(BranchSupport.Format.parse(args[i]).name());
+                }
+                case "--lambda", "--support-lambda" -> {
+                    if (++i>=args.length) return false;
+                    cfg.setSupportLambda(Double.parseDouble(args[i]));
                 }
                 case "--taxa-file", "--species-list", "--species-list-file" -> {
                     if (++i>=args.length) return false;
@@ -901,6 +928,17 @@ public class Main {
               --taxa-file FILE                 Restrict inference to these gene-tree taxa,
                                                  or both inputs in score-only mode
                                                  (one name per non-empty line)
+              --branch-support                 Annotate the scored or inferred species tree with
+                                                 quartet-frequency local posterior probabilities
+                                                 (ASTRAL -t 4 style); printed as the last stdout
+                                                 line and written next to -o as <stem>-support.<ext>
+              --branch-support-only            With --score-species-tree: annotate without computing
+                                                 the quartet score (lean memory path for huge trees)
+              --support-output FILE            Write the annotated tree to FILE (implies --branch-support)
+              --support-format F               pp3 (default, ASTRAL -t 4) | pp (-t 3) | q3 (-t 8)
+                                                 | full (-t 2) | q1 (-t 1) | pvalue (-t 10)
+                                                 | none (-t 0) | percent (integer pp1*100)
+              --lambda X                       Yule prior rate for the posterior (default: 0.5)
               --extract-taxa                   Write input taxa, one name per line, and exit
               --taxa-set union|intersection    Multi-tree extraction operation (default: union)
               -t, -T, --threads, --num-threads N
@@ -1177,6 +1215,10 @@ public class Main {
         PrefixHashArrays genePref = new PrefixHashArrays(geneTrees, hasher);
         PhaseLogger.end("Score filter  Taxon hashing", th, false);
 
+        if (cfg.isBranchSupport()) {
+            throw new IllegalArgumentException(
+                "--branch-support is not supported together with --taxa-file in score-only mode");
+        }
         Logging.info("Mode: SCORE-ONLY with taxa file (score supplied induced species tree; "
             + "no species-tree inference)");
         return scorePreparedSpeciesTree(
@@ -1209,12 +1251,73 @@ public class Main {
         // both paths are supported here.  The GPU path falls back to CPU on its own
         // if it reports infeasible, so no forced downgrade is needed.
 
+        if (cfg.isBranchSupportOnly()) {
+            Logging.info("Branch support only: quartet scoring skipped");
+            String newick = readSingleNewick(cfg.getScoreSpeciesTreeFile());
+            writeBranchSupport(cfg, newick, geneTrees, registry, "Score mode  Branch support");
+            return "n/a (--branch-support-only)";
+        }
+
         long ts = PhaseLogger.begin("Score mode  Parse supplied species tree", false);
         Tree speciesTree = TreeParser.parseSpeciesTree(cfg.getScoreSpeciesTreeFile(), registry);
         PhaseLogger.end("Score mode  Parse supplied species tree", ts, false);
 
-        return scorePreparedSpeciesTree(
+        String score = scorePreparedSpeciesTree(
             cfg, registry, geneTrees, genePref, hasher, speciesTree);
+        if (cfg.isBranchSupport()) {
+            String newick = readSingleNewick(cfg.getScoreSpeciesTreeFile());
+            writeBranchSupport(cfg, newick, geneTrees, registry, "Score mode  Branch support");
+        }
+        return score;
+    }
+
+    private static String readSingleNewick(String file) throws IOException {
+        List<String> lines = new ArrayList<>();
+        for (String ln : java.nio.file.Files.readAllLines(java.nio.file.Path.of(file))) {
+            if (!ln.trim().isEmpty()) lines.add(ln.trim());
+        }
+        if (lines.size() != 1) {
+            throw new IllegalArgumentException(
+                "Species tree file must contain exactly one Newick tree: " + file);
+        }
+        return lines.get(0);
+    }
+
+    /**
+     * Compute quartet-frequency branch support for {@code speciesNewick} against
+     * the native gene trees, print the annotated tree as the last stdout line and
+     * write it to --support-output, or next to -o as {@code <stem>-support.<ext>}.
+     */
+    private static void writeBranchSupport(Config cfg, String speciesNewick, List<Tree> geneTrees,
+                                           TaxonRegistry registry, String phase) throws IOException {
+        BranchSupport.Format format = BranchSupport.Format.parse(cfg.getSupportFormat());
+        boolean gpu = (cfg.getComputeMode() == Config.ComputeMode.GPU
+            || cfg.getComputeMode() == Config.ComputeMode.AUTO)
+            && astralx.gpu.GPUBranchSupport.isLoaded();
+        long tb = PhaseLogger.begin(phase, gpu);
+        BranchSupport.Result result = BranchSupport.compute(
+            speciesNewick, geneTrees, registry, cfg.getSupportLambda(), format,
+            gpu, cfg.getGpuTreeWalkVramCapMiB());
+        PhaseLogger.end(phase, tb, gpu);
+
+        String target = cfg.getSupportOutputFile();
+        if (target == null && cfg.getOutputFile() != null) {
+            String out = cfg.getOutputFile();
+            int slash = Math.max(out.lastIndexOf('/'), out.lastIndexOf('\\'));
+            int dot = out.lastIndexOf('.');
+            target = (dot > slash + 1) ? out.substring(0, dot) + "-support" + out.substring(dot)
+                                       : out + "-support.tre";
+        }
+        if (target != null) {
+            try (PrintStream out = new PrintStream(new FileOutputStream(target))) {
+                out.println(result.annotatedNewick);
+            }
+            Logging.info("Annotated species tree (%d branch(es), %s) written to %s",
+                result.annotatedBranches, format.name().toLowerCase(java.util.Locale.ROOT), target);
+        }
+        // ASTRAL prints its scored tree to stdout followed by a trailing space;
+        // keep that line byte-identical for downstream scripts that capture it.
+        System.out.println(result.annotatedNewick + " ");
     }
 
     private static String scorePreparedSpeciesTree(Config cfg, TaxonRegistry registry,

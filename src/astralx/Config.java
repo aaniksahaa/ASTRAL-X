@@ -65,6 +65,18 @@ public class Config {
     private String outputFile;
     private String logFile;
     private String scoreSpeciesTreeFile;
+
+    // ── Branch support (quartet-frequency local posterior probabilities) ──
+    /** Annotate the scored or inferred species tree with branch support. */
+    private boolean branchSupport = false;
+    /** Skip quartet scoring and only annotate (score-only mode; lean memory path). */
+    private boolean branchSupportOnly = false;
+    /** Explicit output path for the annotated tree (null: derived from -o / stdout). */
+    private String supportOutputFile;
+    /** Annotation style name, parsed by BranchSupport.Format (default: pp3 = ASTRAL -t 4). */
+    private String supportFormat = "pp3";
+    /** Yule prior rate for the posterior (ASTRAL default 0.5). */
+    private double supportLambda = 0.5;
     /** Optional inference/scoring taxon allow-list (one name per non-empty line). */
     private String taxaFile;
     /** Parser-backed utility mode: write taxa from the input tree file and exit. */
@@ -236,6 +248,17 @@ public class Config {
     public String getScoreSpeciesTreeFile()      { return scoreSpeciesTreeFile; }
     public void setScoreSpeciesTreeFile(String f){ this.scoreSpeciesTreeFile = f; }
     public boolean isScoreOnly()       { return scoreSpeciesTreeFile != null; }
+
+    public boolean isBranchSupport()               { return branchSupport; }
+    public boolean isBranchSupportOnly()           { return branchSupportOnly; }
+    public void setBranchSupportOnly(boolean v)    { this.branchSupportOnly = v; if (v) this.branchSupport = true; }
+    public void setBranchSupport(boolean v)        { this.branchSupport = v; }
+    public String getSupportOutputFile()           { return supportOutputFile; }
+    public void setSupportOutputFile(String f)     { this.supportOutputFile = f; }
+    public String getSupportFormat()               { return supportFormat; }
+    public void setSupportFormat(String f)         { this.supportFormat = f; }
+    public double getSupportLambda()               { return supportLambda; }
+    public void setSupportLambda(double l)         { this.supportLambda = l; }
     public String getTaxaFile()        { return taxaFile; }
     public void setTaxaFile(String f)  { this.taxaFile = f; }
     public boolean isExtractTaxa()     { return extractTaxa; }

@@ -3,6 +3,7 @@
 #   native/libastralx_weight.so  -- GPU weight calculation kernel
 #   native/libastralx_dp.so      -- GPU cross-tree DP transition search kernel
 #   native/libastralx_dist.so    -- GPU distance matrix kernel (Euler tour + RMQ)
+#   native/libastralx_support.so -- GPU branch-support (quartet frequency) kernel
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -86,6 +87,13 @@ SRC_SIM="$ROOT/src/native/astralx_similarity.cu"
 OUT_SIM="$NATIVE_OUT_DIR/libastralx_sim.so"
 echo "  Building    : $SRC_SIM  ->  $OUT_SIM"
 nvcc "${NVCC_FLAGS[@]}" -o "$OUT_SIM" "$SRC_SIM"
+echo "  OK"
+
+# ── Branch-support kernel ─────────────────────────────────────────────────────
+SRC_SUP="$ROOT/src/native/astralx_support.cu"
+OUT_SUP="$NATIVE_OUT_DIR/libastralx_support.so"
+echo "  Building    : $SRC_SUP  ->  $OUT_SUP"
+nvcc "${NVCC_FLAGS[@]}" -o "$OUT_SUP" "$SRC_SUP"
 echo "  OK"
 
 echo "=== Native build complete ==="
