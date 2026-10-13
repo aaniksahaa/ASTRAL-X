@@ -12,6 +12,10 @@ tree in 16 minutes. An NVIDIA CUDA GPU is strongly recommended and is used
 automatically when available; CPU execution remains a reliable fallback for
 smaller analyses, compatibility, and development.
 
+## 🎉 Updates
+
+- **2026-10-12 — v1.1.0 released.** The reported quartet score was previously double its true value (each agreeing quartet was counted twice); this is now fixed. ASTRAL-X can also now compute [branch support](#branch-support-local-posterior-probabilities) (local posterior probabilities) efficiently.
+
 ## Quick start
 
 Download the archive for your platform (for example
